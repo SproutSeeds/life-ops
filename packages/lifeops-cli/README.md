@@ -8,7 +8,8 @@ It is designed for teams and codebases that want a lightweight, installable comm
 - composing a week agenda from structured JSON feeds
 - drafting structured project-share emails and follow-up queues
 
-This package sits on top of [`@lifeops/core`](../life-ops-core/README.md), which remains the secondary SDK layer for builders.
+This package is the main install path for Life Ops.
+The sibling [`@lifeops/core`](../life-ops-core/README.md) package remains available as a secondary SDK layer for builders who want the reusable primitives directly.
 
 If you are trying Life Ops for the first time, start here.
 

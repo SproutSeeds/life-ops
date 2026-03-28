@@ -8,7 +8,7 @@ import {
   composeAgenda,
   renderAgendaText,
   renderEmailText,
-} from "@lifeops/core";
+} from "./core-lite.js";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const templateDir = path.join(packageDir, "templates");
