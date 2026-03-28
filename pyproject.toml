@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Local-first scheduling, communications, and agenda tooling for an agent-aware personal operating system."
 requires-python = ">=3.9"
 license = {text = "MIT"}
+authors = [
+    {name = "Fractal Research Group", email = "cody@frg.earth"},
+]
 dependencies = [
     "cryptography>=46.0.0",
     "google-api-python-client>=2.169.0",

@@ -27,6 +27,7 @@
     "ops",
     "productivity"
   ],
+  "author": "Fractal Research Group <cody@frg.earth>",
   "license": "MIT",
   "repository": {
     "type": "git",

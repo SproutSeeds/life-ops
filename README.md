@@ -2,6 +2,8 @@
 
 `life-ops` is a local-first personal operating system for scheduling, communications, events, and routines.
 
+Maintained by Fractal Research Group (`frg.earth`).
+
 The first MVP is intentionally narrow: it gives your agent a reliable place to look when you ask "what's on the agenda?" and returns a live week view built from:
 
 - calendar events

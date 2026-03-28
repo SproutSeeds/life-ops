@@ -2,6 +2,8 @@
 
 `@lifeops/core` is the installable JavaScript SDK for Life Ops.
 
+Maintained by Fractal Research Group (`frg.earth`).
+
 Most users do not need this package first.
 
 If you want the main install path, use the sibling `lifeops` package in `packages/lifeops-cli`.

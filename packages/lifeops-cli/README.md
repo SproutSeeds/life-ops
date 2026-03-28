@@ -2,6 +2,8 @@
 
 `lifeops` is the main public npm package for Life Ops.
 
+Maintained by Fractal Research Group (`frg.earth`).
+
 It is designed for teams and codebases that want a lightweight, installable command line for:
 
 - scaffolding Life Ops starter files
