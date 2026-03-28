@@ -1,0 +1,13 @@
+{
+  "client_id": "replace-me",
+  "client_secret": "",
+  "redirect_uri": "http://127.0.0.1:8787/x/callback",
+  "scopes": [
+    "tweet.read",
+    "users.read",
+    "tweet.write",
+    "offline.access"
+  ],
+  "bearer_token": "",
+  "note": "Use bearer_token for public reads. Use OAuth 2.0 Authorization Code with PKCE for user-context reads and posting."
+}

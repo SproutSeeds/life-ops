@@ -1,0 +1,9 @@
+{
+  "zone_name": "example.com",
+  "route_address": "you",
+  "forward_to": "",
+  "worker_name": "life-ops-email-ingest",
+  "worker_public_url": "https://life-ops-email-ingest.example.workers.dev",
+  "ingest_secret_env": "LIFE_OPS_MAIL_INGEST_SECRET",
+  "notes": "Cloudflare Email Routing is inbound only. This stack stores mail durably in the Cloudflare worker queue, syncs it into local SQLite, and uses a separate sender such as Resend or SES for outbound."
+}

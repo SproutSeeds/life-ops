@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "life-ops"
+version = "0.1.0"
+description = "Local-first scheduling, communications, and agenda tooling for an agent-aware personal operating system."
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=46.0.0",
+    "google-api-python-client>=2.169.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+]
+
+[project.scripts]
+life-ops = "life_ops.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,16 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+*.tgz
+*.egg-info/
+node_modules/
+data/**
+!data/.gitkeep
+config/*.json
+!config/.gitkeep
+!config/*.example.json
+config/cloudflare_email_worker/
+tools/gam7/

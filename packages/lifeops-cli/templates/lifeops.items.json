@@ -1,0 +1,38 @@
+[
+  {
+    "id": "founder-sync",
+    "kind": "event",
+    "title": "Founder sync",
+    "startsAt": "2026-03-26T15:00:00.000Z",
+    "endsAt": "2026-03-26T16:00:00.000Z",
+    "organization": "Life Ops",
+    "priority": "high",
+    "source": {
+      "connector": "calendar",
+      "id": "founder-sync"
+    }
+  },
+  {
+    "id": "project-share-follow-up",
+    "kind": "communication",
+    "title": "Follow up on Life Ops pilot outreach",
+    "followUpAt": "2026-03-27T18:00:00.000Z",
+    "organization": "Operator Friends",
+    "priority": "urgent",
+    "source": {
+      "connector": "outreach",
+      "id": "project-share-follow-up"
+    }
+  },
+  {
+    "id": "weekly-review",
+    "kind": "routine",
+    "title": "Weekly review",
+    "dueAt": "2026-03-29T23:00:00.000Z",
+    "priority": "normal",
+    "source": {
+      "connector": "manual",
+      "id": "weekly-review"
+    }
+  }
+]

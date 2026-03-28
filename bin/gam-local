@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+mkdir -p "$REPO_ROOT/data/gam-config"
+export GAMCFGDIR="$REPO_ROOT/data/gam-config"
+
+exec "$REPO_ROOT/tools/gam7/gam" "$@"

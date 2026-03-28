@@ -1,0 +1,136 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h:h}"
+LABEL="${LIFE_OPS_CLOUDFLARE_SYNC_LABEL:-com.frg.lifeops.cloudflare-mail-sync}"
+AGENT_DIR="${HOME}/Library/LaunchAgents"
+PLIST_PATH="${AGENT_DIR}/${LABEL}.plist"
+LOG_DIR="${ROOT_DIR}/data/logs"
+SERVICE_LOG_DIR="${HOME}/Library/Logs/life-ops"
+STDOUT_PATH="${SERVICE_LOG_DIR}/cloudflare-mail-sync-service.out.log"
+STDERR_PATH="${SERVICE_LOG_DIR}/cloudflare-mail-sync-service.err.log"
+START_INTERVAL="${LIFE_OPS_CLOUDFLARE_SYNC_INTERVAL_SECONDS:-30}"
+UID_VALUE="$(id -u)"
+
+mkdir -p "${LOG_DIR}"
+mkdir -p "${SERVICE_LOG_DIR}"
+
+usage() {
+  cat <<EOF
+Usage: zsh ./bin/cloudflare-mail-sync-service <command>
+
+Commands:
+  install   Write the LaunchAgent plist and load/start the service
+  start     Start or kickstart the installed service
+  stop      Stop the running service without deleting the plist
+  restart   Restart the installed service
+  uninstall Stop the service and remove the LaunchAgent plist
+  status    Show launchctl status and queue status
+  tail      Tail the service logs
+  plist     Print the expected LaunchAgent plist path
+EOF
+}
+
+render_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>timestamp="\$(date '+%Y-%m-%d %H:%M:%S %Z')"; if output="\$(PYTHONPATH='${ROOT_DIR}/src' '${ROOT_DIR}/.venv/bin/python' -m life_ops cloudflare-mail-sync --format json 2&gt;&amp;1)"; then printf '[%s] sync_ok %s\n' "\$timestamp" "\$output"; else exit_code=\$?; printf '[%s] sync_error status=%s %s\n' "\$timestamp" "\$exit_code" "\$output" 1&gt;&amp;2; exit "\$exit_code"; fi</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>${START_INTERVAL}</integer>
+  <key>StandardOutPath</key>
+  <string>${STDOUT_PATH}</string>
+  <key>StandardErrorPath</key>
+  <string>${STDERR_PATH}</string>
+</dict>
+</plist>
+EOF
+}
+
+command_name="${1:-status}"
+
+case "${command_name}" in
+  install)
+    mkdir -p "${AGENT_DIR}"
+    render_plist > "${PLIST_PATH}"
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Installed and started ${LABEL}."
+    echo "Plist: ${PLIST_PATH}"
+    ;;
+  start)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
+      exit 1
+    fi
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Started ${LABEL}."
+    ;;
+  stop)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}."
+      exit 0
+    fi
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    echo "Stopped ${LABEL}."
+    ;;
+  restart)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
+      exit 1
+    fi
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Restarted ${LABEL}."
+    ;;
+  uninstall)
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    rm -f "${PLIST_PATH}"
+    echo "Uninstalled ${LABEL}."
+    ;;
+  status)
+    echo "Label: ${LABEL}"
+    echo "Plist: ${PLIST_PATH}"
+    if [[ -f "${PLIST_PATH}" ]]; then
+      launchctl print "gui/${UID_VALUE}/${LABEL}" 2>/dev/null || echo "launchctl: service not loaded"
+    else
+      echo "launchctl: plist not installed"
+    fi
+    echo
+    cd "${ROOT_DIR}"
+    zsh ./bin/life-ops cloudflare-mail-queue-status
+    ;;
+  tail)
+    mkdir -p "${SERVICE_LOG_DIR}"
+    touch "${STDOUT_PATH}" "${STDERR_PATH}"
+    exec tail -f "${STDOUT_PATH}" "${STDERR_PATH}"
+    ;;
+  plist)
+    echo "${PLIST_PATH}"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

@@ -1,0 +1,17 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h:h}"
+LOG_PATH="${ROOT_DIR}/data/logs/cloudflare-mail-sync.log"
+
+mkdir -p "${ROOT_DIR}/data/logs"
+cd "${ROOT_DIR}"
+
+timestamp="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+if output="$(zsh ./bin/life-ops cloudflare-mail-sync --format json 2>&1)"; then
+  printf '[%s] sync_ok %s\n' "${timestamp}" "${output}" >> "${LOG_PATH}"
+else
+  status=$?
+  printf '[%s] sync_error status=%s %s\n' "${timestamp}" "${status}" "${output}" >> "${LOG_PATH}"
+  exit "${status}"
+fi

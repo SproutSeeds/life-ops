@@ -1,0 +1,27 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h:h}"
+INTERVAL_SECONDS="${LIFE_OPS_CLOUDFLARE_SYNC_INTERVAL_SECONDS:-30}"
+ERROR_SLEEP_SECONDS="${LIFE_OPS_CLOUDFLARE_SYNC_ERROR_SLEEP_SECONDS:-10}"
+LOG_PATH="${ROOT_DIR}/data/logs/cloudflare-mail-sync.log"
+
+mkdir -p "${ROOT_DIR}/data/logs"
+cd "${ROOT_DIR}"
+
+printf '[%s] cloudflare mail sync loop starting interval=%s error_sleep=%s\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S %Z')" \
+  "${INTERVAL_SECONDS}" \
+  "${ERROR_SLEEP_SECONDS}" >> "${LOG_PATH}"
+
+while true; do
+  timestamp="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  if output="$(zsh ./bin/life-ops cloudflare-mail-sync --format json 2>&1)"; then
+    printf '[%s] sync_ok %s\n' "${timestamp}" "${output}" >> "${LOG_PATH}"
+    sleep "${INTERVAL_SECONDS}"
+  else
+    status=$?
+    printf '[%s] sync_error status=%s %s\n' "${timestamp}" "${status}" "${output}" >> "${LOG_PATH}"
+    sleep "${ERROR_SLEEP_SECONDS}"
+  fi
+done

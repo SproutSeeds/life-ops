@@ -1,0 +1,31 @@
+{
+  "name": "@lifeops/core",
+  "version": "0.1.0",
+  "description": "Connector-based Life Ops SDK for agenda composition, structured project sharing, and outbound email drafting.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agenda",
+    "connectors",
+    "email",
+    "life-ops",
+    "ops",
+    "productivity"
+  ],
+  "license": "UNLICENSED"
+}

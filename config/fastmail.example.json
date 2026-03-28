@@ -1,0 +1,7 @@
+{
+  "account_email": "",
+  "session_url": "https://api.fastmail.com/jmap/session",
+  "api_token": "",
+  "api_token_env": "FASTMAIL_API_TOKEN",
+  "note": "For personal or self-use, create a Fastmail API token in Settings -> Privacy & Security -> Manage API tokens. Distributed or public integrations should eventually use OAuth instead."
+}

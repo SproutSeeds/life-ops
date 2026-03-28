@@ -1,0 +1,62 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h:h}"
+SESSION_NAME="${LIFE_OPS_PROFILE_ATTACHMENT_SESSION:-life-ops-profile-attachment-exhaust}"
+LOG_PATH="${ROOT_DIR}/data/logs/profile-attachment-exhaust.log"
+
+mkdir -p "${ROOT_DIR}/data/logs"
+
+usage() {
+  cat <<EOF
+Usage: zsh ./bin/profile-attachment-exhaust <command>
+
+Commands:
+  start   Start or resume the persistent profile attachment runner in tmux
+  restart Start the runner from a fresh attachment-backfill reset
+  status  Show the current profile attachment heartbeat
+  attach  Attach to the tmux session
+  tail    Tail the backlog log
+  stop    Stop the tmux session
+EOF
+}
+
+command_name="${1:-start}"
+
+case "${command_name}" in
+  start)
+    extra_args=()
+    ;;
+  restart)
+    extra_args=(--reset-cursor)
+    ;;
+  status)
+    cd "${ROOT_DIR}"
+    exec zsh ./bin/life-ops profile-attachment-heartbeat
+    ;;
+  attach)
+    exec tmux attach -t "${SESSION_NAME}"
+    ;;
+  tail)
+    touch "${LOG_PATH}"
+    exec tail -f "${LOG_PATH}"
+    ;;
+  stop)
+    tmux kill-session -t "${SESSION_NAME}"
+    echo "Stopped profile attachment session '${SESSION_NAME}'."
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
+
+if [[ "${command_name}" == "start" || "${command_name}" == "restart" ]]; then
+    if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+      echo "Profile attachment session '${SESSION_NAME}' is already running."
+      exit 0
+    fi
+    sync_command="cd ${ROOT_DIR:q} && while true; do zsh ./bin/life-ops backfill-profile-attachments --max-results 100 --max-runs 0 ${extra_args[*]} >> ${LOG_PATH:q} 2>&1; status=\$?; if [[ \$status -eq 0 ]]; then break; fi; printf '[%s] profile attachment runner exited with status %s, retrying in 10s\n' \"\$(date '+%Y-%m-%d %H:%M:%S %Z')\" \"\$status\" >> ${LOG_PATH:q}; sleep 10; done"
+    tmux new-session -d -s "${SESSION_NAME}" "${sync_command}"
+    echo "Started profile attachment session '${SESSION_NAME}'."
+fi

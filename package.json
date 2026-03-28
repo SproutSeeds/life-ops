@@ -1,0 +1,11 @@
+{
+  "name": "life-ops-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test:js": "npm run test --workspaces --if-present",
+    "pack:dry": "npm pack --workspaces --dry-run"
+  }
+}

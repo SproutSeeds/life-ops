@@ -1,0 +1,39 @@
+{
+  "name": "lifeops",
+  "version": "0.1.0",
+  "description": "Global Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
+  "type": "module",
+  "bin": {
+    "lifeops": "./bin/lifeops.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@lifeops/core": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agenda",
+    "agent",
+    "cli",
+    "email",
+    "life-ops",
+    "ops",
+    "productivity"
+  ],
+  "license": "UNLICENSED"
+}

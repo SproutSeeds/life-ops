@@ -1,0 +1,26 @@
+{
+  "name": "Life Ops",
+  "summary": "A local-first operating system for important human data and action loops.",
+  "whyNow": "The project is ready to share with a few high-context collaborators.",
+  "highlights": [
+    "Normalizes inbox, calendar, records, and routines into one action layer.",
+    "Lets an agent draft structured outreach and keep follow-up loops alive."
+  ],
+  "proofPoints": [
+    "Connector-based SDK for other codebases.",
+    "Local-first personal ops system already running against real Gmail, calendar, X, and Emma data."
+  ],
+  "asks": [
+    "If it resonates, I would love a short reaction and one obvious next intro."
+  ],
+  "links": [
+    {
+      "label": "Repo",
+      "url": "https://github.com/example/life-ops"
+    }
+  ],
+  "codebases": [
+    "life-ops",
+    "@lifeops/core"
+  ]
+}

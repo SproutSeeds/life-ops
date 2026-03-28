@@ -1,0 +1,10 @@
+{
+  "api_base_url": "https://api.resend.com",
+  "api_key": "",
+  "api_key_env": "RESEND_API_KEY",
+  "default_from": "Your Name <you@example.com>",
+  "default_reply_to": "you@example.com",
+  "notes": "Use Resend for outbound transactional or agent email. Inbound should arrive through Cloudflare Email Routing.",
+  "default_signature_text": "Your Name\nYour Organization\nyou@example.com",
+  "default_signature_html": "<p>Your Name<br>Your Organization<br><a href=\"mailto:you@example.com\">you@example.com</a></p>"
+}
