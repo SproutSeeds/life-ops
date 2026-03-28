@@ -22,15 +22,13 @@ The first MVP is intentionally narrow: it gives your agent a reliable place to l
 - A demo seed command so you can see the full flow immediately
 - Text and JSON output for both human use and agent consumption
 
-The repo now also includes:
+The repo now also includes two JavaScript entry points, but they are not equally primary:
 
-- an installable JavaScript SDK at `packages/life-ops-core`, targeting the npm namespace `@lifeops/core`
-- a global npm CLI at `packages/lifeops-cli`, targeting the package name `lifeops`
+- `lifeops` is the main public npm package and the install path most people should start with
+- `@lifeops/core` is the secondary SDK for developers who want to build adjacent tools on top of Life Ops primitives
 
-That gives other projects two public entry points:
-
-- `@lifeops/core` for embedding Life Ops primitives inside their own codebase
-- `lifeops` for a lightweight global CLI that can scaffold starter files, render agendas, and draft structured outreach packets
+If you are evaluating or adopting Life Ops, start with the CLI.
+If you are embedding Life Ops ideas into another codebase, reach for the SDK.
 
 ## Repo layout
 
@@ -61,6 +59,21 @@ pip install -e .
 zsh ./bin/life-ops init
 zsh ./bin/life-ops seed-demo
 zsh ./bin/life-ops agenda --days 7
+```
+
+## NPM install path
+
+Most users should start here:
+
+```bash
+npm install -g lifeops
+lifeops init
+```
+
+The SDK is optional and only for builders:
+
+```bash
+npm install @lifeops/core
 ```
 
 ## Core commands
@@ -178,20 +191,23 @@ The Cloudflare + Resend path now preserves more than plain message text:
 
 ## NPM modules
 
-If you want the lighter-weight JavaScript surface, the repo now ships both `@lifeops/core` and `lifeops`.
+The public npm story is intentionally simple:
 
-`@lifeops/core` is the SDK layer for other projects that want to:
+- `lifeops` is the primary package
+- `@lifeops/core` is the optional builder package
 
-- normalize signals from their own inbox, calendar, CRM, task, or codebase feeds
-- compose a shared agenda for agent workflows
-- draft structured project-share emails and create follow-up items
-- plug those drafts into their own sender layer
-
-`lifeops` is the global CLI layer for teams that want to:
+Use `lifeops` if you want to:
 
 - scaffold starter files with `lifeops init`
 - render agendas from JSON feeds with `lifeops agenda`
 - create share packets and follow-up queues with `lifeops share`
+
+Use `@lifeops/core` only if you want to:
+
+- normalize signals from your own inbox, calendar, CRM, task, or codebase feeds
+- compose a shared agenda inside another application
+- draft structured project-share emails and follow-up items from your own code
+- plug those drafts into your own sender layer
 
 Local workspace usage:
 
@@ -209,11 +225,11 @@ npm install ./packages/life-ops-core
 npm install -g ./packages/lifeops-cli
 ```
 
-Publish targets:
+Install targets:
 
 ```bash
-npm install @lifeops/core
 npm install -g lifeops
+npm install @lifeops/core
 ```
 
 ## Global keys

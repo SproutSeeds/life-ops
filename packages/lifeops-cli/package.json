@@ -1,7 +1,7 @@
 {
   "name": "lifeops",
   "version": "0.1.0",
-  "description": "Global Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
+  "description": "Primary public Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
   "type": "module",
   "bin": {
     "lifeops": "./bin/lifeops.js"

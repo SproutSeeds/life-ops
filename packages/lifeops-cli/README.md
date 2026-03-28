@@ -1,6 +1,6 @@
 # lifeops
 
-`lifeops` is the global npm CLI for the public JavaScript surface of Life Ops.
+`lifeops` is the main public npm package for Life Ops.
 
 It is designed for teams and codebases that want a lightweight, installable command line for:
 
@@ -8,7 +8,9 @@ It is designed for teams and codebases that want a lightweight, installable comm
 - composing a week agenda from structured JSON feeds
 - drafting structured project-share emails and follow-up queues
 
-This package sits on top of [`@lifeops/core`](../life-ops-core/README.md), which remains the reusable SDK layer.
+This package sits on top of [`@lifeops/core`](../life-ops-core/README.md), which remains the secondary SDK layer for builders.
+
+If you are trying Life Ops for the first time, start here.
 
 ## Install
 

@@ -2,7 +2,10 @@
 
 `@lifeops/core` is the installable JavaScript SDK for Life Ops.
 
-If you want the global command-line surface instead of the embeddable SDK, use the sibling `lifeops` package in `packages/lifeops-cli`.
+Most users do not need this package first.
+
+If you want the main install path, use the sibling `lifeops` package in `packages/lifeops-cli`.
+Reach for `@lifeops/core` only when you specifically want to embed Life Ops primitives inside another codebase.
 
 It gives other codebases a small, connector-based surface for:
 

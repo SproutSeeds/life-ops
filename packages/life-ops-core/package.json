@@ -1,7 +1,7 @@
 {
   "name": "@lifeops/core",
   "version": "0.1.0",
-  "description": "Connector-based Life Ops SDK for agenda composition, structured project sharing, and outbound email drafting.",
+  "description": "Secondary builder SDK for Life Ops primitives like connectors, agenda composition, and structured project sharing.",
   "type": "module",
   "exports": {
     ".": {
