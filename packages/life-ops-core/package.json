@@ -27,5 +27,14 @@
     "ops",
     "productivity"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SproutSeeds/life-ops.git",
+    "directory": "packages/life-ops-core"
+  },
+  "homepage": "https://github.com/SproutSeeds/life-ops/tree/main/packages/life-ops-core",
+  "bugs": {
+    "url": "https://github.com/SproutSeeds/life-ops/issues"
+  }
 }
