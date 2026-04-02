@@ -39,6 +39,7 @@ If you are embedding Life Ops ideas into another codebase, reach for the SDK.
 - `docs/daily-weekly-flow.md`: recommended operating rhythm
 - `docs/agent-usage.md`: how an agent should query the system
 - `docs/google-setup.md`: how to connect Gmail and Google Calendar
+- `docs/academic-outreach/workflow.md`: ORP-gated workflow for recipient-aware academic outreach drafts
 - `docs/tracing.md`: how behavior traces are captured and exported
 - `docs/profile-context.md`: how important human-profile records are extracted from stored mail
 - `docs/x-integration.md`: setup and command surface for X account integration
@@ -78,6 +79,28 @@ The SDK is optional and only for builders:
 npm install @lifeops/core
 ```
 
+## Academic outreach workflow
+
+For research-adjacent outreach where recipient distinctions matter, use the ORP-gated workflow instead of freehanding drafts:
+
+```bash
+python3 scripts/validate_academic_outreach.py \
+  --manifest examples/academic-outreach/manifest.json
+
+orp --config orp.academic-outreach.yml \
+  gate run --profile academic_outreach_default --json
+
+orp --config orp.academic-outreach.yml \
+  packet emit --profile academic_outreach_default --json
+```
+
+This validates:
+
+- current recipient title/source metadata
+- required project links and install command
+- plain-text draft hygiene
+- distinct recipient angles so multiple drafts do not collapse into one template
+
 ## Core commands
 
 ```bash
@@ -87,6 +110,10 @@ zsh ./bin/life-ops agenda --days 7 --format json
 zsh ./bin/life-ops add-org --name "Primary Work"
 zsh ./bin/life-ops add-event --title "Founder sync" --start 2026-03-25T10:00 --end 2026-03-25T11:00 --organization "Primary Work"
 zsh ./bin/life-ops add-comm --subject "Reply to investor email" --channel email --follow-up-at 2026-03-26T13:00 --organization "Primary Work"
+zsh ./bin/life-ops add-item --list personal --title "Buy new dish sponge"
+zsh ./bin/life-ops add-item --list professional --title "Reply to partner note"
+zsh ./bin/life-ops list-items --status open
+zsh ./bin/life-ops done-item --id 1
 zsh ./bin/life-ops add-routine --name "Morning planning" --cadence daily --start-time 08:30 --duration 30
 zsh ./bin/life-ops add-routine --name "Weekly review" --cadence weekly --day sunday --start-time 18:00 --duration 60
 zsh ./bin/life-ops done-comm --id 1
@@ -130,6 +157,10 @@ zsh ./bin/life-ops mail-ingest-generate-secret
 zsh ./bin/life-ops cloudflare-mail-sync
 zsh ./bin/cloudflare-mail-sync-service install
 zsh ./bin/cloudflare-mail-sync-service status
+zsh ./bin/life-ops mail-ui
+zsh ./bin/life-ops cmail-drafts
+zsh ./bin/life-ops cmail-draft-save --subject "Draft for Terence Tao" --body-file ./tao.txt
+zsh ./bin/life-ops cmail-draft-save --subject "Draft for Thomas Bloom" --body-file ./bloom.txt
 zsh ./bin/life-ops resend-init-config
 zsh ./bin/life-ops resend-status
 zsh ./bin/life-ops resend-signature-show
@@ -264,6 +295,7 @@ That path is:
 In this setup, the local SQLite database is the primary operational source of truth for the agent, while the Cloudflare durable queue keeps a redundant cloud copy of raw inbound messages for resilience and replay.
 `life_ops.db` now lives as an encrypted logical store on disk, with `backup-create` producing encrypted snapshots from that canonical store.
 On macOS, `zsh ./bin/cloudflare-mail-sync-service install` installs a native `launchd` job that runs a sync every `30` seconds by default. Its daemon logs live in `~/Library/Logs/life-ops/`.
+The sync path is single-flight, so overlapping runs now skip cleanly instead of stacking up behind the encrypted DB lock.
 That same sync loop also processes due outbound Resend queue items, so one background service covers both inbound drain and outbound retry.
 
 Start with:

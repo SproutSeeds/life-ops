@@ -58,11 +58,11 @@ X_DEFAULT_USER_FIELDS = [
 
 
 def default_x_client_path() -> Path:
-    return store.repo_root() / "config" / "x_client.json"
+    return store.config_root() / "x_client.json"
 
 
 def default_x_token_path() -> Path:
-    return store.repo_root() / "data" / "x_token.json"
+    return store.data_root() / "x_token.json"
 
 
 def x_client_template() -> dict[str, Any]:

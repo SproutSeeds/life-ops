@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import time as time_module
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -22,15 +24,25 @@ DEFAULT_CLOUDFLARE_WORKER_NAME = "life-ops-email-ingest"
 DEFAULT_CLOUDFLARE_WORKER_COMPATIBILITY_DATE = "2026-03-27"
 DEFAULT_CLOUDFLARE_QUEUE_PULL_LIMIT = 25
 MAX_CLOUDFLARE_QUEUE_PULL_LIMIT = 100
-CLOUDFLARE_WORKER_USER_AGENT = "life-ops/0.1 (+https://frg.earth)"
+CLOUDFLARE_WORKER_USER_AGENT = "life-ops/0.2 (+https://frg.earth)"
+DEFAULT_CLOUDFLARE_SYNC_LOCK_TIMEOUT_SECONDS = 0.0
+DEFAULT_CLOUDFLARE_SYNC_REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 def default_cloudflare_mail_config_path() -> Path:
-    return store.repo_root() / "config" / "cloudflare_mail.json"
+    return store.config_root() / "cloudflare_mail.json"
 
 
 def default_cloudflare_worker_output_dir() -> Path:
-    return store.repo_root() / "config" / "cloudflare_email_worker"
+    return store.package_root() / "config" / "cloudflare_email_worker"
+
+
+def default_cloudflare_sync_lock_path() -> Path:
+    return store.data_root() / ".cloudflare_mail_sync.lock"
+
+
+class CloudflareMailSyncBusy(RuntimeError):
+    pass
 
 
 def cloudflare_mail_config_template() -> dict[str, Any]:
@@ -91,6 +103,40 @@ def _normalize_base_url(value: str) -> str:
 
 def _utc_now_string() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _acquire_cloudflare_sync_lock(*, timeout_seconds: float = DEFAULT_CLOUDFLARE_SYNC_LOCK_TIMEOUT_SECONDS):
+    lock_path = default_cloudflare_sync_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    deadline = time_module.monotonic() + max(0.0, float(timeout_seconds))
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time_module.monotonic() >= deadline:
+                handle.close()
+                raise CloudflareMailSyncBusy(f"another cloudflare mail sync is already running ({lock_path})")
+            time_module.sleep(0.1)
+    try:
+        os.chmod(lock_path, 0o600)
+    except OSError:
+        pass
+    return handle
+
+
+def _release_cloudflare_sync_lock(handle) -> None:
+    if not handle:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
 
 
 def _coalesce_number(*values: Any) -> int:
@@ -565,7 +611,7 @@ async function verifyLifeOpsRequest({{ secret, timestamp, signature, body, maxSk
     return {{ ok: false, reason: "stale_timestamp" }};
   }}
   const expected = await signLifeOpsPayload(secret, timestamp, body);
-  if (!timingSafeEqual(expected, signature)) {{
+  if (!(await timingSafeEqual(expected, signature))) {{
     return {{ ok: false, reason: "invalid_signature" }};
   }}
   return {{ ok: true, reason: "ok" }};
@@ -588,12 +634,14 @@ async function signLifeOpsPayload(secret, timestamp, body) {{
   return `sha256=${{digest}}`;
 }}
 
-function timingSafeEqual(left, right) {{
-  const a = new TextEncoder().encode(String(left || ""));
-  const b = new TextEncoder().encode(String(right || ""));
-  if (a.length !== b.length) {{
-    return false;
-  }}
+async function timingSafeEqual(left, right) {{
+  const encoder = new TextEncoder();
+  const [leftDigest, rightDigest] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(String(left || ""))),
+    crypto.subtle.digest("SHA-256", encoder.encode(String(right || ""))),
+  ]);
+  const a = new Uint8Array(leftDigest);
+  const b = new Uint8Array(rightDigest);
   let mismatch = 0;
   for (let index = 0; index < a.length; index += 1) {{
     mismatch |= a[index] ^ b[index];
@@ -812,6 +860,7 @@ def _cloudflare_worker_request_json(
     secret: str,
     path: str,
     payload: Optional[dict[str, Any]] = None,
+    timeout_seconds: float = 60,
 ) -> dict[str, Any]:
     body_dict = payload or {}
     body_bytes = json.dumps(body_dict).encode("utf-8")
@@ -835,7 +884,7 @@ def _cloudflare_worker_request_json(
         headers=headers,
     )
     try:
-        with request.urlopen(req, timeout=60) as response:
+        with request.urlopen(req, timeout=max(0.1, float(timeout_seconds))) as response:
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="ignore")
@@ -854,7 +903,11 @@ def _cloudflare_worker_request_json(
         raise RuntimeError("Cloudflare worker returned non-JSON output.") from exc
 
 
-def cloudflare_mail_queue_status(*, config_path: Path | None = None) -> dict[str, Any]:
+def cloudflare_mail_queue_status(
+    *,
+    config_path: Path | None = None,
+    timeout_seconds: float = 60,
+) -> dict[str, Any]:
     config = _load_cloudflare_mail_config(config_path or default_cloudflare_mail_config_path())
     if not config["worker_public_url"]:
         raise RuntimeError("Set worker_public_url in config/cloudflare_mail.json before querying queue status.")
@@ -865,6 +918,7 @@ def cloudflare_mail_queue_status(*, config_path: Path | None = None) -> dict[str
         secret=str(config["ingest_secret"]),
         path="/api/mail/queue/status",
         payload={},
+        timeout_seconds=timeout_seconds,
     )
     return {
         **result,
@@ -904,6 +958,7 @@ def sync_cloudflare_mail_queue(
     db_path: Path,
     config_path: Path | None = None,
     limit: int = DEFAULT_CLOUDFLARE_QUEUE_PULL_LIMIT,
+    request_timeout_seconds: float = DEFAULT_CLOUDFLARE_SYNC_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     config = _load_cloudflare_mail_config(config_path or default_cloudflare_mail_config_path())
     if not config["worker_public_url"]:
@@ -913,11 +968,34 @@ def sync_cloudflare_mail_queue(
     sync_started_at = _utc_now_string()
     alert_key = "cloudflare_mail_sync"
     try:
+        sync_lock_handle = _acquire_cloudflare_sync_lock()
+    except CloudflareMailSyncBusy as exc:
+        return {
+            "route_full_address": _route_full_address(str(config["route_address"]), str(config["zone_name"])),
+            "worker_public_url": config["worker_public_url"],
+            "forward_to": config["forward_to"] or None,
+            "forwarding_enabled": bool(config["forward_to"]),
+            "archive_encryption_enabled": bool(config["archive_key_present"]),
+            "skipped": True,
+            "skip_reason": str(exc),
+            "sync_lock_path": str(default_cloudflare_sync_lock_path()),
+            "pulled_count": 0,
+            "ingested_count": 0,
+            "failed_count": 0,
+            "acked_count": 0,
+            "pending_count": None,
+            "total_stored": None,
+            "total_acknowledged": None,
+            "ingested": [],
+            "errors": [],
+        }
+    try:
         queue_response = _cloudflare_worker_request_json(
             worker_public_url=str(config["worker_public_url"]),
             secret=str(config["ingest_secret"]),
             path="/api/mail/queue/pull",
             payload={"limit": max(1, min(MAX_CLOUDFLARE_QUEUE_PULL_LIMIT, int(limit)))},
+            timeout_seconds=request_timeout_seconds,
         )
         items = list(queue_response.get("items") or [])
 
@@ -952,6 +1030,7 @@ def sync_cloudflare_mail_queue(
                 secret=str(config["ingest_secret"]),
                 path="/api/mail/queue/ack",
                 payload={"ids": ack_ids},
+                timeout_seconds=request_timeout_seconds,
             )
 
         result = {
@@ -960,6 +1039,9 @@ def sync_cloudflare_mail_queue(
             "forward_to": config["forward_to"] or None,
             "forwarding_enabled": bool(config["forward_to"]),
             "archive_encryption_enabled": True,
+            "skipped": False,
+            "skip_reason": "",
+            "sync_lock_path": str(default_cloudflare_sync_lock_path()),
             "pulled_count": len(items),
             "ingested_count": len(ingested),
             "failed_count": len(errors),
@@ -974,10 +1056,16 @@ def sync_cloudflare_mail_queue(
             "ingested": ingested,
             "errors": errors,
         }
+        sync_completed_at = _utc_now_string()
         with store.open_db(db_path) as connection:
-            store.set_sync_state(connection, "cloudflare_mail:last_sync_at", sync_started_at)
+            store.set_sync_state(connection, "cloudflare_mail:last_sync_at", sync_completed_at)
+            store.set_sync_state(connection, "cloudflare_mail:pending_count", str(result["pending_count"]))
+            store.set_sync_state(connection, "cloudflare_mail:total_stored", str(result["total_stored"]))
+            store.set_sync_state(connection, "cloudflare_mail:total_acknowledged", str(result["total_acknowledged"]))
+            store.set_sync_state(connection, "cloudflare_mail:forwarding_enabled", "1" if result["forwarding_enabled"] else "0")
+            store.set_sync_state(connection, "cloudflare_mail:archive_encryption_enabled", "1" if result["archive_encryption_enabled"] else "0")
             if errors:
-                store.set_sync_state(connection, "cloudflare_mail:last_failure_at", sync_started_at)
+                store.set_sync_state(connection, "cloudflare_mail:last_failure_at", sync_completed_at)
                 store.upsert_system_alert(
                     connection,
                     alert_key=alert_key,
@@ -988,12 +1076,16 @@ def sync_cloudflare_mail_queue(
                     details={"errors": errors[:10], "pulled_count": len(items), "ingested_count": len(ingested)},
                 )
             else:
-                store.set_sync_state(connection, "cloudflare_mail:last_success_at", sync_started_at)
+                store.set_sync_state(connection, "cloudflare_mail:last_success_at", sync_completed_at)
                 store.clear_system_alert(connection, alert_key)
+            purge_result = store.purge_deleted_communications(connection)
+        result["purged_deleted_count"] = int(purge_result.get("purged_count", 0))
+        result["purged_artifact_count"] = int(purge_result.get("artifact_count", 0))
         return result
     except Exception as exc:
+        sync_failed_at = _utc_now_string()
         with store.open_db(db_path) as connection:
-            store.set_sync_state(connection, "cloudflare_mail:last_failure_at", sync_started_at)
+            store.set_sync_state(connection, "cloudflare_mail:last_failure_at", sync_failed_at)
             store.upsert_system_alert(
                 connection,
                 alert_key=alert_key,
@@ -1004,6 +1096,8 @@ def sync_cloudflare_mail_queue(
                 details={"worker_public_url": config["worker_public_url"], "route_full_address": _route_full_address(str(config["route_address"]), str(config["zone_name"]))},
             )
         raise
+    finally:
+        _release_cloudflare_sync_lock(locals().get("sync_lock_handle"))
 
 
 def write_cloudflare_worker_template(

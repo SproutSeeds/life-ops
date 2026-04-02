@@ -4,12 +4,16 @@ import base64
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from email.message import EmailMessage
+from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 import os
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -54,6 +58,17 @@ class MailIngestTests(unittest.TestCase):
             "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
             "raw_size": len(raw_bytes),
         }
+
+    def _start_ingest_server(self):
+        handler = mail_ingest._make_handler(
+            db_path=self.db_path,
+            secret_name=mail_ingest.MAIL_INGEST_SECRET_NAME,
+            path=mail_ingest.DEFAULT_MAIL_INGEST_PATH,
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_port}{mail_ingest.DEFAULT_MAIL_INGEST_PATH}"
 
     def test_mail_ingest_status_reflects_secret_presence(self) -> None:
         with mock.patch("life_ops.mail_ingest.credentials.resolve_secret", return_value="secret"):
@@ -284,6 +299,120 @@ class MailIngestTests(unittest.TestCase):
 
         self.assertFalse(verified)
         self.assertEqual("stale_timestamp", reason)
+
+    def test_mail_ingest_handler_refuses_requests_when_secret_is_missing(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(mail_ingest.MAIL_INGEST_SECRET_NAME, None)
+            with mock.patch("life_ops.mail_ingest.credentials.resolve_secret", return_value=""):
+                server, thread, url = self._start_ingest_server()
+                try:
+                    request = urllib.request.Request(
+                        url,
+                        data=b"{}",
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as error_context:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(500, error_context.exception.code)
+                    error_payload = json.loads(error_context.exception.read().decode("utf-8"))
+                    self.assertEqual("missing_ingest_secret", error_payload["error"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_mail_ingest_handler_rejects_oversized_requests(self) -> None:
+        with mock.patch("life_ops.mail_ingest.credentials.resolve_secret", return_value="secret"):
+            with mock.patch("life_ops.mail_ingest.DEFAULT_MAIL_INGEST_MAX_BODY_BYTES", 10):
+                server, thread, url = self._start_ingest_server()
+                try:
+                    request = urllib.request.Request(
+                        url,
+                        data=b"x" * 11,
+                        method="POST",
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as error_context:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(413, error_context.exception.code)
+                    error_payload = json.loads(error_context.exception.read().decode("utf-8"))
+                    self.assertEqual("payload_too_large", error_payload["error"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_mail_ingest_handler_returns_generic_internal_error(self) -> None:
+        raw = json.dumps({"hello": "world"}).encode("utf-8")
+        timestamp = mail_ingest._utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        signature = mail_ingest.sign_mail_ingest_payload(
+            body_bytes=raw,
+            secret="secret",
+            timestamp=timestamp,
+        )
+        with mock.patch("life_ops.mail_ingest.credentials.resolve_secret", return_value="secret"):
+            with mock.patch(
+                "life_ops.mail_ingest.ingest_cloudflare_email_payload",
+                side_effect=RuntimeError("sensitive path /tmp/life-ops.db"),
+            ):
+                server, thread, url = self._start_ingest_server()
+                try:
+                    request = urllib.request.Request(
+                        url,
+                        data=raw,
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            mail_ingest.MAIL_INGEST_TIMESTAMP_HEADER: timestamp,
+                            mail_ingest.MAIL_INGEST_SIGNATURE_HEADER: signature,
+                        },
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as error_context:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(500, error_context.exception.code)
+                    error_payload = json.loads(error_context.exception.read().decode("utf-8"))
+                    self.assertEqual("internal_error", error_payload["error"])
+                    self.assertNotIn("/tmp/life-ops.db", json.dumps(error_payload))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_mail_ingest_handler_returns_generic_invalid_payload_error(self) -> None:
+        raw = json.dumps({"hello": "world"}).encode("utf-8")
+        timestamp = mail_ingest._utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        signature = mail_ingest.sign_mail_ingest_payload(
+            body_bytes=raw,
+            secret="secret",
+            timestamp=timestamp,
+        )
+        with mock.patch("life_ops.mail_ingest.credentials.resolve_secret", return_value="secret"):
+            with mock.patch(
+                "life_ops.mail_ingest.ingest_cloudflare_email_payload",
+                side_effect=ValueError("payload.raw_base64 is required"),
+            ):
+                server, thread, url = self._start_ingest_server()
+                try:
+                    request = urllib.request.Request(
+                        url,
+                        data=raw,
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            mail_ingest.MAIL_INGEST_TIMESTAMP_HEADER: timestamp,
+                            mail_ingest.MAIL_INGEST_SIGNATURE_HEADER: signature,
+                        },
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as error_context:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(400, error_context.exception.code)
+                    error_payload = json.loads(error_context.exception.read().decode("utf-8"))
+                    self.assertEqual("invalid_payload", error_payload["error"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
 
 
 if __name__ == "__main__":

@@ -351,6 +351,18 @@ def _summarize_media_file(path: Path, *, mime_type: str) -> str:
     )
 
 
+def _summarize_image_file(path: Path, *, mime_type: str) -> str:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return "\n".join(
+        [
+            f"Image file ({mime_type or 'application/octet-stream'})",
+            f"size: {_format_size(path.stat().st_size)}",
+            f"sha256: {digest}",
+            f"magic_header_hex: {_read_binary_header(path, 16)}",
+        ]
+    )
+
+
 def _summarize_binary_file(path: Path, *, mime_type: str) -> str:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return "\n".join(
@@ -383,8 +395,13 @@ def extract_text_from_saved_attachment(path: Path, *, mime_type: str) -> tuple[s
                 return _summarize_tar_archive(path), "archive_summary"
         except tarfile.TarError:
             pass
+    if effective_mime == "image/gif" or suffix == ".gif":
+        return _summarize_media_file(path, mime_type=effective_mime), "media_summary"
     if effective_mime.startswith("image/") or suffix in IMAGE_SUFFIXES:
-        return _run_capture(["tesseract", str(path), "stdout", "--psm", "6"]), "ocr_image"
+        try:
+            return _run_capture(["tesseract", str(path), "stdout", "--psm", "6"]), "ocr_image"
+        except RuntimeError:
+            return _summarize_image_file(path, mime_type=effective_mime), "image_summary"
     if effective_mime.startswith("audio/") or effective_mime.startswith("video/") or suffix in MEDIA_SUFFIXES:
         return _summarize_media_file(path, mime_type=effective_mime), "media_summary"
     if suffix in EXECUTABLE_SUFFIXES:

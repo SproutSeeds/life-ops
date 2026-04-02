@@ -26,7 +26,7 @@ def _sha256_hex(data: bytes) -> str:
 
 
 def backup_root() -> Path:
-    return store.repo_root() / "data" / "backups"
+    return store.data_root() / "backups"
 
 
 def _manifest_path(backup_id: str, root: Path) -> Path:

@@ -29,6 +29,17 @@ class _FakeResponse:
         return False
 
 
+class _DummySyncLock:
+    def __init__(self) -> None:
+        self._handle = tempfile.TemporaryFile()
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
+
+    def close(self) -> None:
+        self._handle.close()
+
+
 class CloudflareEmailTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -186,7 +197,10 @@ class CloudflareEmailTests(unittest.TestCase):
         def _fake_urlopen(req, timeout=60):
             return next(responses)
 
-        with mock.patch("life_ops.cloudflare_email.credentials.resolve_secret", return_value="secret"), mock.patch(
+        with mock.patch("life_ops.cloudflare_email._acquire_cloudflare_sync_lock", return_value=_DummySyncLock()), mock.patch(
+            "life_ops.cloudflare_email.credentials.resolve_secret",
+            return_value="secret",
+        ), mock.patch(
             "life_ops.cloudflare_email.request.urlopen",
             side_effect=_fake_urlopen,
         ):
@@ -209,7 +223,10 @@ class CloudflareEmailTests(unittest.TestCase):
         self._write_config()
         queue_payload = self._payload()
 
-        with mock.patch("life_ops.cloudflare_email.credentials.resolve_secret", return_value="secret"), mock.patch(
+        with mock.patch("life_ops.cloudflare_email._acquire_cloudflare_sync_lock", return_value=_DummySyncLock()), mock.patch(
+            "life_ops.cloudflare_email.credentials.resolve_secret",
+            return_value="secret",
+        ), mock.patch(
             "life_ops.cloudflare_email._cloudflare_worker_request_json",
             return_value={
                 "items": [{"id": "mail_0000000000000001", "seq": 1, "payload": queue_payload}],
@@ -232,6 +249,26 @@ class CloudflareEmailTests(unittest.TestCase):
             alerts = store.list_system_alerts(connection, source="cloudflare_email", status="active", limit=5)
         self.assertTrue(alerts)
         self.assertEqual("Cloudflare mail sync ingested with errors", alerts[0]["title"])
+
+    def test_sync_cloudflare_mail_queue_skips_when_another_sync_is_running(self) -> None:
+        self._write_config()
+        with mock.patch("life_ops.cloudflare_email.credentials.resolve_secret", return_value="secret"), mock.patch(
+            "life_ops.cloudflare_email._acquire_cloudflare_sync_lock",
+            side_effect=cloudflare_email.CloudflareMailSyncBusy("another sync is already running"),
+        ), mock.patch(
+            "life_ops.cloudflare_email._cloudflare_worker_request_json",
+        ) as worker_request:
+            result = cloudflare_email.sync_cloudflare_mail_queue(
+                db_path=self.db_path,
+                config_path=self.config_path,
+                limit=10,
+            )
+
+        self.assertTrue(result["skipped"])
+        self.assertIn("another sync", result["skip_reason"])
+        self.assertEqual(0, result["pulled_count"])
+        self.assertEqual([], result["errors"])
+        worker_request.assert_not_called()
 
 
 if __name__ == "__main__":

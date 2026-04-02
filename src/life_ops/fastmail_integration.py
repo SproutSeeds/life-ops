@@ -15,7 +15,7 @@ FASTMAIL_JMAP_MAIL = "urn:ietf:params:jmap:mail"
 
 
 def default_fastmail_config_path() -> Path:
-    return store.repo_root() / "config" / "fastmail.json"
+    return store.config_root() / "fastmail.json"
 
 
 def fastmail_config_template() -> dict[str, Any]:

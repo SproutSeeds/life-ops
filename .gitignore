@@ -14,3 +14,9 @@ config/*.json
 !config/*.example.json
 config/cloudflare_email_worker/
 tools/gam7/
+orp/artifacts/
+orp/packets/
+orp/state.json
+packages/lifeops-cli/backend/
+.playwright-mcp/
+analysis/

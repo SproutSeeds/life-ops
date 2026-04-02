@@ -4,8 +4,9 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from datetime import datetime, time, date
+from datetime import datetime, time, date, timezone
 from pathlib import Path
+import os
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -22,17 +23,24 @@ from life_ops.google_sync import (
     sync_gmail_corpus,
     sync_gmail_category_pass,
 )
-from life_ops import store, tracing
+from life_ops import mail_vault, store, tracing, vault_crypto
 
 
 class SyncStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "sync-test.db"
+        self.vault_root = Path(self.temp_dir.name) / "attachments"
+        self.original_master_key = os.environ.get(vault_crypto.MASTER_KEY_NAME)
+        os.environ[vault_crypto.MASTER_KEY_NAME] = vault_crypto._b64url_encode(b"c" * 32)
         self.connection = store.open_db(self.db_path)
 
     def tearDown(self) -> None:
         self.connection.close()
+        if self.original_master_key is None:
+            os.environ.pop(vault_crypto.MASTER_KEY_NAME, None)
+        else:
+            os.environ[vault_crypto.MASTER_KEY_NAME] = self.original_master_key
         self.temp_dir.cleanup()
 
     def test_upsert_event_from_sync_updates_existing_row(self) -> None:
@@ -94,6 +102,132 @@ class SyncStoreTests(unittest.TestCase):
         self.assertEqual("done", row["status"])
         self.assertEqual("2026-03-24T11:00", row["follow_up_at"])
         self.assertEqual("Reply please updated", row["subject"])
+
+    def test_list_items_support_personal_professional_and_done_status(self) -> None:
+        personal_item_id = store.add_list_item(
+            self.connection,
+            list_name="personal",
+            title="Buy new dish sponge",
+        )
+        professional_item_id = store.add_list_item(
+            self.connection,
+            list_name="professional",
+            title="Reply to partner note",
+            notes="Check the partnership draft before Friday.",
+        )
+
+        open_items = store.list_list_items(self.connection, status="open", limit=20)
+        self.assertEqual(
+            [personal_item_id, professional_item_id],
+            [int(row["id"]) for row in open_items],
+        )
+
+        store.set_list_item_status(self.connection, item_id=professional_item_id, status="done")
+
+        professional_done = store.list_list_items(
+            self.connection,
+            list_name="professional",
+            status="done",
+            limit=20,
+        )
+        self.assertEqual(1, len(professional_done))
+        self.assertEqual(professional_item_id, int(professional_done[0]["id"]))
+        self.assertEqual("done", str(professional_done[0]["status"]))
+        self.assertTrue(str(professional_done[0]["completed_at"]))
+
+        personal_open = store.list_list_items(
+            self.connection,
+            list_name="personal",
+            status="open",
+            limit=20,
+        )
+        self.assertEqual(1, len(personal_open))
+        self.assertEqual(personal_item_id, int(personal_open[0]["id"]))
+        self.assertEqual("Buy new dish sponge", str(personal_open[0]["title"]))
+
+    def test_life_ops_home_controls_default_data_and_config_paths(self) -> None:
+        home_root = Path(self.temp_dir.name) / "lifeops-home"
+        with patch.dict(os.environ, {"LIFE_OPS_HOME": str(home_root)}, clear=False):
+            expected = home_root.resolve(strict=False)
+            self.assertEqual(expected / "data" / "life_ops.db", store.default_db_path())
+            self.assertEqual(expected / "data" / "attachments", store.attachment_vault_root())
+            self.assertEqual(expected / "data" / "x_media", store.x_media_root())
+            self.assertEqual(expected / "config", store.config_root())
+
+    def test_purge_deleted_communications_removes_archived_rows_and_vault_artifacts(self) -> None:
+        raw_relative_path, _ = mail_vault.write_encrypted_vault_file(
+            vault_root=self.vault_root,
+            relative_dir=Path("cloudflare_email") / "communication-1" / "raw",
+            logical_filename="message.eml",
+            raw_bytes=b"raw-message",
+            metadata={"kind": "raw"},
+        )
+        attachment_relative_path, _ = mail_vault.write_encrypted_vault_file(
+            vault_root=self.vault_root,
+            relative_dir=Path("cloudflare_email") / "communication-1" / "attachments",
+            logical_filename="proof.txt",
+            raw_bytes=b"proof body",
+            metadata={"kind": "attachment"},
+        )
+        extracted_text_relative_path, _ = mail_vault.write_encrypted_vault_file(
+            vault_root=self.vault_root,
+            relative_dir=Path("cloudflare_email") / "communication-1" / "attachments",
+            logical_filename="proof.txt.extracted.txt",
+            raw_bytes=b"proof body extracted",
+            metadata={"kind": "extracted_text"},
+        )
+
+        communication_id = store.upsert_communication_from_sync(
+            self.connection,
+            source="cloudflare_email",
+            external_id="msg-delete-1",
+            subject="Delete me later",
+            channel="email",
+            happened_at=datetime(2026, 2, 1, 10, 0),
+            follow_up_at=None,
+            direction="inbound",
+            person="Archive Test",
+            external_from="archive@example.com",
+            raw_relative_path=raw_relative_path,
+        )
+        store.upsert_communication_attachment(
+            self.connection,
+            external_key="att-delete-1",
+            communication_id=communication_id,
+            source="cloudflare_email",
+            external_message_id="msg-delete-1",
+            external_attachment_id="att-1",
+            part_id="1",
+            filename="proof.txt",
+            mime_type="text/plain",
+            size=10,
+            relative_path=attachment_relative_path,
+            extracted_text="proof body extracted",
+            extracted_text_path=extracted_text_relative_path,
+            extraction_method="unit_test",
+            ingest_status="saved",
+            sha256="abc123",
+        )
+        store.set_communication_status(self.connection, communication_id=communication_id, status="deleted")
+        self.connection.execute(
+            "UPDATE communications SET deleted_at = ? WHERE id = ?",
+            ("2026-02-15T00:00:00Z", communication_id),
+        )
+        self.connection.commit()
+
+        result = store.purge_deleted_communications(
+            self.connection,
+            now=datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc),
+            vault_root=self.vault_root,
+        )
+
+        self.assertEqual(1, result["purged_count"])
+        self.assertEqual(3, result["artifact_count"])
+        self.assertIsNone(store.get_communication_by_id(self.connection, communication_id))
+        self.assertEqual([], store.list_communication_attachments(self.connection, communication_id=communication_id))
+        self.assertFalse((self.vault_root / raw_relative_path).exists())
+        self.assertFalse((self.vault_root / attachment_relative_path).exists())
+        self.assertFalse((self.vault_root / extracted_text_relative_path).exists())
 
     def test_calendar_all_day_event_uses_inclusive_local_day(self) -> None:
         start_at, end_at, all_day = _calendar_event_times(

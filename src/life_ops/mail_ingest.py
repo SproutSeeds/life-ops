@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -35,9 +36,11 @@ MAIL_INGEST_SIGNATURE_HEADER = "X-Life-Ops-Signature"
 MAIL_INGEST_TIMESTAMP_HEADER = "X-Life-Ops-Timestamp"
 MAIL_INGEST_SIGNATURE_VERSION = "sha256"
 DEFAULT_MAIL_INGEST_MAX_SKEW_SECONDS = 300
+DEFAULT_MAIL_INGEST_MAX_BODY_BYTES = 50 * 1024 * 1024
 MAIL_ATTACHMENT_TEXT_LIMIT = 12000
 MAIL_INLINE_ATTACHMENT_SUFFIX_FALLBACK = ".bin"
 FORENSIC_HEADERS_ENV = "LIFE_OPS_FORENSIC_HEADERS"
+LOGGER = logging.getLogger(__name__)
 
 
 def _strip_string(value: Any) -> str:
@@ -45,7 +48,21 @@ def _strip_string(value: Any) -> str:
 
 
 def _utc_now() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
+
+
+def _coerce_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_mail_ingest_timestamp(timestamp: str) -> tuple[datetime, str]:
+    clean_timestamp = _strip_string(timestamp)
+    parsed = datetime.fromisoformat(clean_timestamp.replace("Z", "+00:00"))
+    normalized = _coerce_utc_datetime(parsed).replace(microsecond=0)
+    canonical_timestamp = normalized.isoformat().replace("+00:00", "Z")
+    return normalized, canonical_timestamp
 
 
 def _collapse_whitespace(value: str) -> str:
@@ -88,16 +105,15 @@ def _message_datetime(message: Message) -> datetime:
     if raw_date:
         try:
             parsed = parsedate_to_datetime(raw_date)
-            if parsed.tzinfo is not None:
-                return parsed.astimezone().replace(tzinfo=None)
-            return parsed
+            return _coerce_utc_datetime(parsed)
         except (TypeError, ValueError, IndexError):
             pass
-    return datetime.now()
+    return _utc_now()
 
 
 def sign_mail_ingest_payload(*, body_bytes: bytes, secret: str, timestamp: str) -> str:
-    canonical = timestamp.encode("utf-8") + b"." + body_bytes
+    _, canonical_timestamp = _parse_mail_ingest_timestamp(timestamp)
+    canonical = canonical_timestamp.encode("utf-8") + b"." + body_bytes
     digest = hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
     return f"{MAIL_INGEST_SIGNATURE_VERSION}={digest}"
 
@@ -119,13 +135,11 @@ def verify_mail_ingest_signature(
         return False, "missing_signature"
 
     try:
-        signed_at = datetime.fromisoformat(clean_timestamp.replace("Z", "+00:00"))
+        signed_at, canonical_timestamp = _parse_mail_ingest_timestamp(clean_timestamp)
     except ValueError:
         return False, "invalid_timestamp"
-
-    if signed_at.tzinfo is not None:
-        signed_at = signed_at.astimezone(timezone.utc).replace(tzinfo=None)
     current = now or _utc_now()
+    current = _coerce_utc_datetime(current)
     skew = abs((current - signed_at).total_seconds())
     if skew > max_skew_seconds:
         return False, "stale_timestamp"
@@ -133,9 +147,14 @@ def verify_mail_ingest_signature(
     expected = sign_mail_ingest_payload(
         body_bytes=body_bytes,
         secret=secret,
-        timestamp=clean_timestamp,
+        timestamp=canonical_timestamp,
     )
     if not hmac.compare_digest(expected, clean_signature):
+        legacy_canonical = clean_timestamp.encode("utf-8") + b"." + body_bytes
+        legacy_signature = hmac.new(secret.encode("utf-8"), legacy_canonical, hashlib.sha256).hexdigest()
+        legacy_expected = f"{MAIL_INGEST_SIGNATURE_VERSION}={legacy_signature}"
+        if hmac.compare_digest(legacy_expected, clean_signature):
+            return True, "ok"
         return False, "invalid_signature"
     return True, "ok"
 
@@ -598,6 +617,14 @@ def ingest_cloudflare_email_payload(
 
 def _make_handler(*, db_path: Path, secret_name: str, path: str):
     class MailIngestHandler(BaseHTTPRequestHandler):
+        def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):  # pragma: no cover - exercised via helper in real runtime
             if self.path != path:
                 self.send_response(404)
@@ -605,53 +632,55 @@ def _make_handler(*, db_path: Path, secret_name: str, path: str):
                 self.wfile.write(b"Not found.")
                 return
 
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw = self.rfile.read(content_length)
             expected_secret = _strip_string(os.getenv(secret_name)) or _strip_string(
                 credentials.resolve_secret(name=secret_name) or ""
             )
-            if expected_secret:
-                signature = _strip_string(self.headers.get(MAIL_INGEST_SIGNATURE_HEADER))
-                timestamp = _strip_string(self.headers.get(MAIL_INGEST_TIMESTAMP_HEADER))
-                verified, reason = verify_mail_ingest_signature(
-                    body_bytes=raw,
-                    secret=expected_secret,
-                    timestamp=timestamp,
-                    signature=signature,
-                )
-                if not verified:
-                    self.send_response(401)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": reason}).encode("utf-8"))
-                    return
+            if not expected_secret:
+                LOGGER.error("Mail ingest secret %s is missing; refusing unauthenticated ingest.", secret_name)
+                self._write_json(500, {"error": "missing_ingest_secret"})
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._write_json(400, {"error": "invalid_content_length"})
+                return
+            if content_length < 0:
+                self._write_json(400, {"error": "invalid_content_length"})
+                return
+            if content_length > DEFAULT_MAIL_INGEST_MAX_BODY_BYTES:
+                self._write_json(413, {"error": "payload_too_large"})
+                return
+            raw = self.rfile.read(content_length)
+            signature = _strip_string(self.headers.get(MAIL_INGEST_SIGNATURE_HEADER))
+            timestamp = _strip_string(self.headers.get(MAIL_INGEST_TIMESTAMP_HEADER))
+            verified, reason = verify_mail_ingest_signature(
+                body_bytes=raw,
+                secret=expected_secret,
+                timestamp=timestamp,
+                signature=signature,
+            )
+            if not verified:
+                self._write_json(401, {"error": reason})
+                return
             try:
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except json.JSONDecodeError:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "invalid_json"}).encode("utf-8"))
+                self._write_json(400, {"error": "invalid_json"})
                 return
 
             try:
                 result = ingest_cloudflare_email_payload(payload, db_path=db_path)
-            except Exception as exc:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+            except ValueError:
+                LOGGER.exception("Mail ingest rejected invalid payload.")
+                self._write_json(400, {"error": "invalid_payload"})
+                return
+            except Exception:
+                LOGGER.exception("Mail ingest failed unexpectedly.")
+                self._write_json(500, {"error": "internal_error"})
                 return
 
-            body = json.dumps(result).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write_json(200, result)
 
         def log_message(self, format, *args):  # pragma: no cover - suppress console noise
             return

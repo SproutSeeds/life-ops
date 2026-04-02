@@ -86,6 +86,7 @@ zsh ./bin/cloudflare-mail-sync-service tail
 ```
 
 This service uses native `launchd` scheduling (`RunAtLoad` + `StartInterval`) to run a single sync every `30` seconds by default. The daemon's own stdout/stderr logs live in `~/Library/Logs/life-ops/`, while synced mail is stored in the repo-local SQLite database.
+The sync command is single-flight, so if a previous run is still active the next invocation exits as a clean skip rather than competing for the encrypted DB lock.
 The same loop also processes due outbound Resend queue items, so inbound drain and outbound retry share one background service.
 
 ## Resend outbound

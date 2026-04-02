@@ -19,7 +19,7 @@ from life_ops import mail_vault
 from life_ops import store
 
 RESEND_API_BASE_URL = "https://api.resend.com"
-RESEND_USER_AGENT = "life-ops/0.1 (+https://frg.earth)"
+RESEND_USER_AGENT = "life-ops/0.2 (+https://frg.earth)"
 DEFAULT_RESEND_MAX_ATTEMPTS = 8
 DEFAULT_RESEND_PROCESS_LIMIT = 25
 RESEND_QUEUE_ALERT_PREFIX = "resend_delivery"
@@ -27,7 +27,7 @@ RESEND_QUEUE_GLOBAL_ALERT_KEY = "resend_delivery_queue"
 
 
 def default_resend_config_path() -> Path:
-    return store.repo_root() / "config" / "resend.json"
+    return store.config_root() / "resend.json"
 
 
 def resend_config_template() -> dict[str, Any]:
@@ -255,7 +255,6 @@ def _queue_outbound_mail_artifacts(
         extracted_text, extraction_method = extract_text_from_saved_attachment(
             path=source_path,
             mime_type=str(spec["mime_type"]),
-            filename=source_path.name,
         )
         attachment_id = store.upsert_communication_attachment(
             connection,

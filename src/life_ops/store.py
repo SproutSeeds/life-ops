@@ -8,9 +8,11 @@ import sqlite3
 import tempfile
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from life_ops import mail_vault
 from life_ops import vault_crypto
 
 LOW_SIGNAL_ATTACHMENT_NAME_FRAGMENTS = {
@@ -32,6 +34,12 @@ LOW_SIGNAL_ATTACHMENT_NAMES = {
     "image",
     "logo",
 }
+
+MAIL_UI_HIDDEN_CONTACTS_SYNC_KEY = "mail_ui:hidden_contacts"
+MAIL_CONTACTS_BACKFILLED_SYNC_KEY = "mail_contacts:backfilled_at"
+MAIL_CONTACTS_CLEANUP_SYNC_KEY = "mail_contacts:cleanup_v1"
+LIST_ITEM_NAMES = ("personal", "professional")
+LIST_ITEM_STATUSES = ("open", "done")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -103,7 +111,8 @@ CREATE TABLE IF NOT EXISTS communications (
     priority_score INTEGER NOT NULL DEFAULT 0,
     retention_bucket TEXT NOT NULL DEFAULT '',
     classifier_version TEXT NOT NULL DEFAULT '',
-    classification_json TEXT NOT NULL DEFAULT '{}'
+    classification_json TEXT NOT NULL DEFAULT '{}',
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS profile_context_items (
@@ -233,9 +242,35 @@ CREATE TABLE IF NOT EXISTS routines (
     notes TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS list_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    list_name TEXT NOT NULL CHECK (list_name IN ('personal', 'professional')),
+    title TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS mail_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_key TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    interaction_count INTEGER NOT NULL DEFAULT 1,
+    last_direction TEXT NOT NULL DEFAULT '',
+    last_source TEXT NOT NULL DEFAULT '',
+    last_communication_id INTEGER REFERENCES communications(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -304,24 +339,52 @@ DAY_TO_INDEX = {
 }
 
 FORCE_ENCRYPTED_DB_ENV = "LIFE_OPS_FORCE_ENCRYPTED_DB"
+LIFE_OPS_HOME_ENV = "LIFE_OPS_HOME"
+LIFE_OPS_PACKAGE_ROOT_ENV = "LIFE_OPS_PACKAGE_ROOT"
 ENCRYPTED_DB_SUFFIX = ".enc.json"
 DB_LOCK_SUFFIX = ".lock"
+DELETED_COMMUNICATION_RETENTION_DAYS = 30
 
 
-def repo_root() -> Path:
+def package_root() -> Path:
+    override = str(os.getenv(LIFE_OPS_PACKAGE_ROOT_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser().resolve(strict=False)
     return Path(__file__).resolve().parents[2]
 
 
+def repo_root() -> Path:
+    return package_root()
+
+
+def life_ops_home() -> Path:
+    override = str(os.getenv(LIFE_OPS_HOME_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser().resolve(strict=False)
+    package = package_root()
+    if (package / ".git").exists() or (package / "pyproject.toml").exists():
+        return package
+    return Path.home() / ".lifeops"
+
+
+def data_root() -> Path:
+    return life_ops_home() / "data"
+
+
+def config_root() -> Path:
+    return life_ops_home() / "config"
+
+
 def default_db_path() -> Path:
-    return repo_root() / "data" / "life_ops.db"
+    return data_root() / "life_ops.db"
 
 
 def attachment_vault_root() -> Path:
-    return repo_root() / "data" / "attachments"
+    return data_root() / "attachments"
 
 
 def x_media_root() -> Path:
-    return repo_root() / "data" / "x_media"
+    return data_root() / "x_media"
 
 
 def _normalized_path(path: Path) -> Path:
@@ -597,6 +660,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
 
         connection.executescript(SCHEMA)
         _apply_migrations(connection)
+        _ensure_mail_contacts_backfilled(connection)
 
         if not manifest_path.exists():
             _persist_connection_snapshot(connection, db_path)
@@ -610,6 +674,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     _configure_connection(connection, encrypted_storage=False)
     connection.executescript(SCHEMA)
     _apply_migrations(connection)
+    _ensure_mail_contacts_backfilled(connection)
     return connection
 
 
@@ -653,6 +718,10 @@ def parse_datetime(value: str) -> datetime:
         return datetime.combine(parsed_date, time(0, 0))
 
     return _local_naive(parsed)
+
+
+def _utc_now_string() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _column_names(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -704,6 +773,7 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "communications", "retention_bucket", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "classifier_version", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "classification_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "communications", "deleted_at", "TEXT")
 
     _ensure_column(connection, "profile_context_items", "external_key", "TEXT")
     _ensure_column(connection, "profile_context_items", "subject_key", "TEXT NOT NULL DEFAULT 'self'")
@@ -754,6 +824,26 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "mail_delivery_queue", "last_error", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "mail_delivery_queue", "created_at", "TEXT")
     _ensure_column(connection, "mail_delivery_queue", "updated_at", "TEXT")
+
+    _ensure_column(connection, "mail_contacts", "contact_key", "TEXT")
+    _ensure_column(connection, "mail_contacts", "email", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "mail_contacts", "display_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "mail_contacts", "first_seen_at", "TEXT")
+    _ensure_column(connection, "mail_contacts", "last_seen_at", "TEXT")
+    _ensure_column(connection, "mail_contacts", "interaction_count", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(connection, "mail_contacts", "last_direction", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "mail_contacts", "last_source", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "mail_contacts", "last_communication_id", "INTEGER")
+    _ensure_column(connection, "mail_contacts", "created_at", "TEXT")
+    _ensure_column(connection, "mail_contacts", "updated_at", "TEXT")
+
+    _ensure_column(connection, "list_items", "list_name", "TEXT NOT NULL DEFAULT 'personal'")
+    _ensure_column(connection, "list_items", "title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "list_items", "notes", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "list_items", "status", "TEXT NOT NULL DEFAULT 'open'")
+    _ensure_column(connection, "list_items", "created_at", "TEXT")
+    _ensure_column(connection, "list_items", "updated_at", "TEXT")
+    _ensure_column(connection, "list_items", "completed_at", "TEXT")
 
     _ensure_column(connection, "system_alerts", "alert_key", "TEXT")
     _ensure_column(connection, "system_alerts", "source", "TEXT")
@@ -880,6 +970,30 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_contacts_key
+        ON mail_contacts(contact_key)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mail_contacts_last_seen
+        ON mail_contacts(last_seen_at DESC, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mail_contacts_email
+        ON mail_contacts(email)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_list_items_list_status_updated
+        ON list_items(list_name, status, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_system_alerts_key
         ON system_alerts(alert_key)
         """
@@ -925,6 +1039,22 @@ def add_organization(connection: sqlite3.Connection, name: str, category: str = 
     if organization_id is None:
         raise ValueError("organization name is required")
     return organization_id
+
+
+def _normalize_list_name(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if clean not in LIST_ITEM_NAMES:
+        valid = ", ".join(LIST_ITEM_NAMES)
+        raise ValueError(f"invalid list '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_list_item_status(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if clean not in LIST_ITEM_STATUSES:
+        valid = ", ".join(LIST_ITEM_STATUSES)
+        raise ValueError(f"invalid status '{value}'. Use one of: {valid}")
+    return clean
 
 
 def add_event(
@@ -996,6 +1126,354 @@ def add_communication(
     )
     connection.commit()
     return int(cursor.lastrowid)
+
+
+def add_list_item(
+    connection: sqlite3.Connection,
+    *,
+    list_name: str,
+    title: str,
+    notes: str = "",
+) -> int:
+    clean_list_name = _normalize_list_name(list_name)
+    clean_title = " ".join(str(title or "").split()).strip()
+    if not clean_title:
+        raise ValueError("list item title is required")
+    now = _utc_now_string()
+    cursor = connection.execute(
+        """
+        INSERT INTO list_items (
+            list_name, title, notes, status, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, 'open', ?, ?, NULL)
+        """,
+        (
+            clean_list_name,
+            clean_title,
+            str(notes or ""),
+            now,
+            now,
+        ),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def get_list_item(connection: sqlite3.Connection, item_id: int) -> Optional[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT *
+        FROM list_items
+        WHERE id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+
+
+def list_list_items(
+    connection: sqlite3.Connection,
+    *,
+    list_name: Optional[str] = None,
+    status: str = "open",
+    limit: int = 200,
+) -> list[sqlite3.Row]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if list_name and str(list_name).strip().lower() != "all":
+        clauses.append("list_name = ?")
+        params.append(_normalize_list_name(list_name))
+    clean_status = str(status or "open").strip().lower()
+    if clean_status != "all":
+        clauses.append("status = ?")
+        params.append(_normalize_list_item_status(clean_status))
+
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return connection.execute(
+        f"""
+        SELECT *
+        FROM list_items
+        {where_clause}
+        ORDER BY
+            CASE status WHEN 'open' THEN 0 ELSE 1 END,
+            list_name,
+            updated_at DESC,
+            id DESC
+        LIMIT ?
+        """,
+        [*params, max(1, int(limit))],
+    ).fetchall()
+
+
+def set_list_item_status(connection: sqlite3.Connection, *, item_id: int, status: str) -> None:
+    clean_status = _normalize_list_item_status(status)
+    now = _utc_now_string()
+    completed_at = now if clean_status == "done" else None
+    cursor = connection.execute(
+        """
+        UPDATE list_items
+        SET status = ?, updated_at = ?, completed_at = ?
+        WHERE id = ?
+        """,
+        (clean_status, now, completed_at, item_id),
+    )
+    if cursor.rowcount <= 0:
+        raise ValueError(f"list item #{item_id} was not found")
+    connection.commit()
+
+
+def _mail_contact_key(*, email: str = "", display_name: str = "", fallback: str = "") -> str:
+    clean_email = str(email or "").strip().lower()
+    if clean_email:
+        return clean_email
+    clean_name = " ".join(str(display_name or fallback or "").split()).strip().lower()
+    if clean_name:
+        return f"person:{clean_name}"
+    return ""
+
+
+def _mail_contact_record(*, name: str = "", email: str = "", fallback_name: str = "") -> dict[str, str]:
+    clean_name = " ".join(str(name or fallback_name or "").split()).strip()
+    clean_email = str(email or "").strip().lower()
+    if not clean_email and "@" in clean_name:
+        return {}
+    contact_key = _mail_contact_key(email=clean_email, display_name=clean_name)
+    if not contact_key:
+        return {}
+    return {
+        "contact_key": contact_key,
+        "email": clean_email,
+        "display_name": clean_name,
+    }
+
+
+def _dedupe_mail_contact_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: dict[str, dict[str, str]] = {}
+    ordered_keys: list[str] = []
+    for record in records:
+        contact_key = str(record.get("contact_key") or "").strip()
+        if not contact_key:
+            continue
+        if contact_key not in deduped:
+            deduped[contact_key] = {
+                "contact_key": contact_key,
+                "email": str(record.get("email") or "").strip().lower(),
+                "display_name": " ".join(str(record.get("display_name") or "").split()).strip(),
+            }
+            ordered_keys.append(contact_key)
+            continue
+        existing = deduped[contact_key]
+        candidate_name = " ".join(str(record.get("display_name") or "").split()).strip()
+        candidate_email = str(record.get("email") or "").strip().lower()
+        if candidate_email and not existing.get("email"):
+            existing["email"] = candidate_email
+        if candidate_name and (
+            not existing.get("display_name")
+            or existing.get("display_name") == existing.get("email")
+            or len(candidate_name) > len(str(existing.get("display_name") or ""))
+        ):
+            existing["display_name"] = candidate_name
+    return [deduped[key] for key in ordered_keys]
+
+
+def _mail_contact_records_from_header(value: str, *, fallback_name: str = "") -> list[dict[str, str]]:
+    if not str(value or "").strip():
+        return []
+    return _dedupe_mail_contact_records(
+        [
+            _mail_contact_record(name=name, email=email, fallback_name=fallback_name)
+            for name, email in getaddresses([str(value)])
+        ]
+    )
+
+
+def _mail_contact_records_from_structured(values: Optional[list[dict]], *, fallback_name: str = "") -> list[dict[str, str]]:
+    if not values:
+        return []
+    records: list[dict[str, str]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            _mail_contact_record(
+                name=str(item.get("name") or ""),
+                email=str(item.get("email") or ""),
+                fallback_name=fallback_name,
+            )
+        )
+    return _dedupe_mail_contact_records(records)
+
+
+def upsert_mail_contact(
+    connection: sqlite3.Connection,
+    *,
+    email: str = "",
+    display_name: str = "",
+    happened_at: str = "",
+    direction: str = "",
+    source: str = "",
+    communication_id: Optional[int] = None,
+    contact_key: str = "",
+) -> Optional[int]:
+    clean_email = str(email or "").strip().lower()
+    clean_name = " ".join(str(display_name or "").split()).strip()
+    normalized_key = str(contact_key or "").strip() or _mail_contact_key(email=clean_email, display_name=clean_name)
+    if not normalized_key:
+        return None
+    happened_text = str(happened_at or "").strip() or _utc_now_string()
+    existing = connection.execute(
+        """
+        SELECT id, email, display_name, first_seen_at, last_seen_at, interaction_count, last_communication_id
+        FROM mail_contacts
+        WHERE contact_key = ?
+        """,
+        (normalized_key,),
+    ).fetchone()
+
+    if existing:
+        existing_email = str(existing["email"] or "").strip().lower()
+        existing_name = " ".join(str(existing["display_name"] or "").split()).strip()
+        existing_first_seen = str(existing["first_seen_at"] or "").strip()
+        existing_last_seen = str(existing["last_seen_at"] or "").strip()
+        existing_last_communication_id = int(existing["last_communication_id"] or 0)
+        next_email = clean_email or existing_email
+        next_name = existing_name
+        if clean_name and (not existing_name or existing_name == existing_email or len(clean_name) > len(existing_name)):
+            next_name = clean_name
+        should_increment = bool(communication_id and int(communication_id) != existing_last_communication_id)
+        next_interaction_count = int(existing["interaction_count"] or 0) + (1 if should_increment else 0)
+        next_first_seen = existing_first_seen or happened_text
+        next_last_seen = happened_text if happened_text >= existing_last_seen else existing_last_seen
+        connection.execute(
+            """
+            UPDATE mail_contacts
+            SET email = ?, display_name = ?, first_seen_at = ?, last_seen_at = ?, interaction_count = ?,
+                last_direction = ?, last_source = ?, last_communication_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                next_email,
+                next_name,
+                next_first_seen,
+                next_last_seen,
+                next_interaction_count,
+                str(direction or ""),
+                str(source or ""),
+                int(communication_id) if communication_id else existing_last_communication_id or None,
+                int(existing["id"]),
+            ),
+        )
+        return int(existing["id"])
+
+    cursor = connection.execute(
+        """
+        INSERT INTO mail_contacts (
+            contact_key, email, display_name, first_seen_at, last_seen_at,
+            interaction_count, last_direction, last_source, last_communication_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            normalized_key,
+            clean_email,
+            clean_name,
+            happened_text,
+            happened_text,
+            1,
+            str(direction or ""),
+            str(source or ""),
+            int(communication_id) if communication_id else None,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def touch_mail_contacts_for_communication(
+    connection: sqlite3.Connection,
+    *,
+    communication_id: Optional[int],
+    happened_at: str,
+    direction: str,
+    source: str,
+    person: str = "",
+    external_from: str = "",
+    external_to: str = "",
+    external_cc: str = "",
+    external_bcc: str = "",
+    external_reply_to: str = "",
+    from_value: Optional[dict] = None,
+    to_recipients: Optional[list[dict]] = None,
+    cc_recipients: Optional[list[dict]] = None,
+    bcc_recipients: Optional[list[dict]] = None,
+    reply_to_recipients: Optional[list[dict]] = None,
+) -> None:
+    records: list[dict[str, str]] = []
+    clean_direction = str(direction or "").strip().lower()
+    if clean_direction == "inbound":
+        primary_sender = _mail_contact_record(
+            name=str((from_value or {}).get("name") or ""),
+            email=str((from_value or {}).get("email") or ""),
+            fallback_name=person,
+        )
+        if primary_sender:
+            records.append(primary_sender)
+        records.extend(_mail_contact_records_from_header(external_from, fallback_name=person))
+        records.extend(_mail_contact_records_from_structured(reply_to_recipients, fallback_name=person))
+        records.extend(_mail_contact_records_from_header(external_reply_to, fallback_name=person))
+    elif clean_direction == "outbound":
+        records.extend(_mail_contact_records_from_structured(to_recipients, fallback_name=person))
+        records.extend(_mail_contact_records_from_structured(cc_recipients))
+        records.extend(_mail_contact_records_from_structured(bcc_recipients))
+        records.extend(_mail_contact_records_from_header(external_to, fallback_name=person))
+        records.extend(_mail_contact_records_from_header(external_cc))
+        records.extend(_mail_contact_records_from_header(external_bcc))
+    for record in _dedupe_mail_contact_records(records):
+        upsert_mail_contact(
+            connection,
+            email=str(record.get("email") or ""),
+            display_name=str(record.get("display_name") or ""),
+            happened_at=happened_at,
+            direction=clean_direction,
+            source=source,
+            communication_id=communication_id,
+            contact_key=str(record.get("contact_key") or ""),
+        )
+
+
+def _touch_mail_contacts_for_communication(
+    connection: sqlite3.Connection,
+    *,
+    communication_id: Optional[int],
+    happened_at_text: str,
+    direction: str,
+    source: str,
+    person: str = "",
+    external_from: str = "",
+    external_to: str = "",
+    external_cc: str = "",
+    external_bcc: str = "",
+    external_reply_to: str = "",
+    from_value: Optional[dict] = None,
+    to_recipients: Optional[list[dict]] = None,
+    cc_recipients: Optional[list[dict]] = None,
+    bcc_recipients: Optional[list[dict]] = None,
+    reply_to_recipients: Optional[list[dict]] = None,
+) -> None:
+    touch_mail_contacts_for_communication(
+        connection,
+        communication_id=communication_id,
+        happened_at=happened_at_text,
+        direction=direction,
+        source=source,
+        person=person,
+        external_from=external_from,
+        external_to=external_to,
+        external_cc=external_cc,
+        external_bcc=external_bcc,
+        external_reply_to=external_reply_to,
+        from_value=from_value,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+        bcc_recipients=bcc_recipients,
+        reply_to_recipients=reply_to_recipients,
+    )
 
 
 def upsert_event_from_sync(
@@ -1122,8 +1600,8 @@ def upsert_communication_from_sync(
     ).fetchone()
 
     follow_up_text = _iso_minute(follow_up_at) if follow_up_at else None
-    if existing and existing["status"] == "done":
-        persisted_status = "done"
+    if existing and str(existing["status"] or "") in {"done", "deleted"}:
+        persisted_status = str(existing["status"] or "")
         persisted_follow_up = existing["follow_up_at"]
     else:
         persisted_status = status
@@ -1171,6 +1649,7 @@ def upsert_communication_from_sync(
     )
 
     if existing:
+        communication_id = int(existing["id"])
         connection.execute(
             """
             UPDATE communications
@@ -1183,10 +1662,28 @@ def upsert_communication_from_sync(
                 retention_bucket = ?, classifier_version = ?, classification_json = ?
             WHERE id = ?
             """,
-            values + (int(existing["id"]),),
+            values + (communication_id,),
+        )
+        _touch_mail_contacts_for_communication(
+            connection,
+            communication_id=communication_id,
+            happened_at_text=_iso_minute(happened_at),
+            direction=direction,
+            source=source,
+            person=person,
+            external_from=external_from or "",
+            external_to=external_to,
+            external_cc=external_cc,
+            external_bcc=external_bcc,
+            external_reply_to=external_reply_to,
+            from_value=from_value,
+            to_recipients=to_recipients,
+            cc_recipients=cc_recipients,
+            bcc_recipients=bcc_recipients,
+            reply_to_recipients=reply_to_recipients,
         )
         connection.commit()
-        return int(existing["id"])
+        return communication_id
 
     cursor = connection.execute(
         """
@@ -1234,8 +1731,126 @@ def upsert_communication_from_sync(
             _json_text(classification, {}),
         ),
     )
+    communication_id = int(cursor.lastrowid)
+    _touch_mail_contacts_for_communication(
+        connection,
+        communication_id=communication_id,
+        happened_at_text=_iso_minute(happened_at),
+        direction=direction,
+        source=source,
+        person=person,
+        external_from=external_from or "",
+        external_to=external_to,
+        external_cc=external_cc,
+        external_bcc=external_bcc,
+        external_reply_to=external_reply_to,
+        from_value=from_value,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+        bcc_recipients=bcc_recipients,
+        reply_to_recipients=reply_to_recipients,
+    )
     connection.commit()
-    return int(cursor.lastrowid)
+    return communication_id
+
+
+def set_communication_status(
+    connection: sqlite3.Connection,
+    *,
+    communication_id: int,
+    status: str,
+) -> bool:
+    deleted_at = _utc_now_string() if str(status or "") == "deleted" else None
+    cursor = connection.execute(
+        "UPDATE communications SET status = ?, deleted_at = ? WHERE id = ?",
+        (status, deleted_at, int(communication_id)),
+    )
+    connection.commit()
+    return int(cursor.rowcount) > 0
+
+
+def set_communications_status(
+    connection: sqlite3.Connection,
+    *,
+    communication_ids: list[int],
+    status: str,
+) -> int:
+    ids = [int(value) for value in communication_ids if int(value) > 0]
+    if not ids:
+        return 0
+    deleted_at = _utc_now_string() if str(status or "") == "deleted" else None
+    placeholders = ", ".join("?" for _ in ids)
+    cursor = connection.execute(
+        f"UPDATE communications SET status = ?, deleted_at = ? WHERE id IN ({placeholders})",
+        [status, deleted_at, *ids],
+    )
+    connection.commit()
+    return int(cursor.rowcount)
+
+
+def purge_deleted_communications(
+    connection: sqlite3.Connection,
+    *,
+    retention_days: int = DELETED_COMMUNICATION_RETENTION_DAYS,
+    now: Optional[datetime] = None,
+    vault_root: Optional[Path] = None,
+) -> dict[str, int]:
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max(0, int(retention_days)))
+    cutoff_text = cutoff.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    rows = connection.execute(
+        """
+        SELECT id, raw_relative_path
+        FROM communications
+        WHERE status = 'deleted'
+          AND deleted_at IS NOT NULL
+          AND deleted_at <= ?
+        ORDER BY deleted_at ASC, id ASC
+        """,
+        (cutoff_text,),
+    ).fetchall()
+    communication_ids = [int(row["id"]) for row in rows]
+    if not communication_ids:
+        return {"purged_count": 0, "artifact_count": 0}
+
+    placeholders = ", ".join("?" for _ in communication_ids)
+    artifact_rows = connection.execute(
+        f"""
+        SELECT relative_path, extracted_text_path
+        FROM communication_attachments
+        WHERE communication_id IN ({placeholders})
+        """,
+        communication_ids,
+    ).fetchall()
+
+    artifact_paths = {
+        str(row["raw_relative_path"] or "").strip()
+        for row in rows
+        if str(row["raw_relative_path"] or "").strip()
+    }
+    artifact_paths.update(
+        str(row["relative_path"] or "").strip()
+        for row in artifact_rows
+        if str(row["relative_path"] or "").strip()
+    )
+    artifact_paths.update(
+        str(row["extracted_text_path"] or "").strip()
+        for row in artifact_rows
+        if str(row["extracted_text_path"] or "").strip()
+    )
+
+    cursor = connection.execute(
+        f"DELETE FROM communications WHERE id IN ({placeholders})",
+        communication_ids,
+    )
+    purged_count = int(cursor.rowcount)
+    connection.commit()
+
+    deleted_artifacts = 0
+    resolved_vault_root = vault_root or attachment_vault_root()
+    for relative_path in sorted(artifact_paths):
+        if mail_vault.delete_encrypted_vault_file(vault_root=resolved_vault_root, relative_path=relative_path):
+            deleted_artifacts += 1
+    return {"purged_count": purged_count, "artifact_count": deleted_artifacts}
 
 
 def replace_profile_context_items(
@@ -1957,6 +2572,8 @@ def list_communications(
     *,
     status: Optional[str] = None,
     source: Optional[str] = None,
+    channel: Optional[str] = None,
+    direction: Optional[str] = None,
     category: Optional[str] = None,
     limit: Optional[int] = 100,
 ) -> list[sqlite3.Row]:
@@ -1969,6 +2586,12 @@ def list_communications(
     if source:
         clauses.append("communications.source = ?")
         params.append(source)
+    if channel:
+        clauses.append("communications.channel = ?")
+        params.append(channel)
+    if direction:
+        clauses.append("communications.direction = ?")
+        params.append(direction)
     if category and category != "all":
         clauses.append("communications.category = ?")
         params.append(category)
@@ -1990,6 +2613,119 @@ def list_communications(
         """,
         params,
     ).fetchall()
+
+
+def list_mail_contacts(
+    connection: sqlite3.Connection,
+    *,
+    query: Optional[str] = None,
+    limit: Optional[int] = 100,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+    clean_query = str(query or "").strip().lower()
+    if clean_query:
+        like_value = f"%{clean_query}%"
+        clauses.append(
+            "(LOWER(mail_contacts.email) LIKE ? OR LOWER(mail_contacts.display_name) LIKE ? OR LOWER(mail_contacts.contact_key) LIKE ?)"
+        )
+        params.extend([like_value, like_value, like_value])
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    limit_clause = ""
+    if limit is not None:
+        params.append(max(1, int(limit)))
+        limit_clause = "LIMIT ?"
+    return connection.execute(
+        f"""
+        SELECT *
+        FROM mail_contacts
+        {where_clause}
+        ORDER BY last_seen_at DESC, interaction_count DESC, id DESC
+        {limit_clause}
+        """,
+        params,
+    ).fetchall()
+
+
+def _ensure_mail_contacts_backfilled(connection: sqlite3.Connection) -> None:
+    existing_marker = connection.execute(
+        "SELECT value FROM sync_state WHERE key = ?",
+        (MAIL_CONTACTS_BACKFILLED_SYNC_KEY,),
+    ).fetchone()
+    cleanup_marker = connection.execute(
+        "SELECT value FROM sync_state WHERE key = ?",
+        (MAIL_CONTACTS_CLEANUP_SYNC_KEY,),
+    ).fetchone()
+    if not cleanup_marker or not str(cleanup_marker["value"] or "").strip():
+        connection.execute(
+            """
+            DELETE FROM mail_contacts
+            WHERE email = ''
+              AND display_name LIKE '%@%'
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO sync_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (MAIL_CONTACTS_CLEANUP_SYNC_KEY, _utc_now_string()),
+        )
+        connection.commit()
+    if existing_marker and str(existing_marker["value"] or "").strip():
+        return
+
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM communications
+        WHERE channel = 'email'
+          AND status != 'deleted'
+        ORDER BY happened_at ASC, id ASC
+        """
+    ).fetchall()
+    if not rows:
+        connection.execute(
+            """
+            INSERT INTO sync_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (MAIL_CONTACTS_BACKFILLED_SYNC_KEY, _utc_now_string()),
+        )
+        connection.commit()
+        return
+
+    connection.execute("DELETE FROM mail_contacts")
+    for row in rows:
+        touch_mail_contacts_for_communication(
+            connection,
+            communication_id=int(row["id"]) if row["id"] is not None else None,
+            happened_at=str(row["happened_at"] or ""),
+            direction=str(row["direction"] or ""),
+            source=str(row["source"] or ""),
+            person=str(row["person"] or ""),
+            external_from=str(row["external_from"] or ""),
+            external_to=str(row["external_to"] or ""),
+            external_cc=str(row["external_cc"] or ""),
+            external_bcc=str(row["external_bcc"] or ""),
+            external_reply_to=str(row["external_reply_to"] or ""),
+            from_value=_json_value(str(row["from_json"] or "{}"), {}),
+            to_recipients=_json_value(str(row["to_json"] or "[]"), []),
+            cc_recipients=_json_value(str(row["cc_json"] or "[]"), []),
+            bcc_recipients=_json_value(str(row["bcc_json"] or "[]"), []),
+            reply_to_recipients=_json_value(str(row["reply_to_json"] or "[]"), []),
+        )
+    connection.execute(
+        """
+        INSERT INTO sync_state (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """,
+        (MAIL_CONTACTS_BACKFILLED_SYNC_KEY, _utc_now_string()),
+    )
+    connection.commit()
 
 
 def get_communication_by_external_id(
@@ -2644,6 +3380,70 @@ def get_sync_state(connection: sqlite3.Connection, key: str) -> Optional[str]:
     if not row:
         return None
     return str(row["value"])
+
+
+def mail_contact_key(*, person: str = "", external_from: str = "", source: str = "") -> str:
+    contact_name, contact_email = parseaddr(str(external_from or ""))
+    contact_name = contact_name.strip() or str(person or "").strip()
+    contact_email = contact_email.strip().lower()
+    if contact_email:
+        return contact_email
+    contact_label = contact_name or str(source or "unknown sender").strip()
+    return f"person:{contact_label.lower()}"
+
+
+def get_hidden_mail_contacts(connection: sqlite3.Connection) -> dict[str, str]:
+    raw = get_sync_state(connection, MAIL_UI_HIDDEN_CONTACTS_SYNC_KEY)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    hidden: dict[str, str] = {}
+    for key, value in payload.items():
+        contact_key = str(key or "").strip().lower()
+        hidden_at = str(value or "").strip()
+        if contact_key and hidden_at:
+            hidden[contact_key] = hidden_at
+    return hidden
+
+
+def set_hidden_mail_contacts(connection: sqlite3.Connection, hidden_contacts: dict[str, str]) -> None:
+    payload = {
+        str(contact_key).strip().lower(): str(hidden_at).strip()
+        for contact_key, hidden_at in hidden_contacts.items()
+        if str(contact_key).strip() and str(hidden_at).strip()
+    }
+    set_sync_state(connection, MAIL_UI_HIDDEN_CONTACTS_SYNC_KEY, json.dumps(payload, sort_keys=True))
+
+
+def mark_hidden_mail_contact(
+    connection: sqlite3.Connection,
+    *,
+    contact_key: str,
+    hidden_at: Optional[str] = None,
+) -> None:
+    normalized_key = str(contact_key or "").strip().lower()
+    if not normalized_key:
+        return
+    hidden_contacts = get_hidden_mail_contacts(connection)
+    hidden_contacts[normalized_key] = str(hidden_at or _utc_now_string())
+    set_hidden_mail_contacts(connection, hidden_contacts)
+
+
+def clear_hidden_mail_contact(connection: sqlite3.Connection, *, contact_key: str) -> bool:
+    normalized_key = str(contact_key or "").strip().lower()
+    if not normalized_key:
+        return False
+    hidden_contacts = get_hidden_mail_contacts(connection)
+    if normalized_key not in hidden_contacts:
+        return False
+    hidden_contacts.pop(normalized_key, None)
+    set_hidden_mail_contacts(connection, hidden_contacts)
+    return True
 
 
 def enqueue_mail_delivery(

@@ -119,3 +119,45 @@ test("lifeops share emits JSON packet output and writes packet files", async () 
     process.chdir(originalCwd);
   }
 });
+
+test("lifeops cmail delegates to the managed cmail service wrapper", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const exitCode = await runCli(
+    ["cmail", "status"],
+    io,
+    {
+      runner: async (payload) => {
+        calls.push(payload);
+        io.stdout.write("cmail ok\n");
+        return 0;
+      },
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.match(getStdout(), /cmail ok/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "zsh");
+  assert.deepEqual(calls[0].args, ["./bin/cmail-service", "status"]);
+});
+
+test("lifeops cmail url prints the mailbox URL without spawning a process", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const exitCode = await runCli(["cmail", "url"], io);
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.equal(getStdout().trim(), "http://127.0.0.1:4311");
+});
+
+test("lifeops cmail help is available from the shortcut entrypoint", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const exitCode = await runCli(["cmail", "--help"], io);
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.match(getStdout(), /self-hosted mail surface/i);
+  assert.match(getStdout(), /Cloudflare\/Resend accounts/i);
+});

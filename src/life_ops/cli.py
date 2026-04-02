@@ -72,6 +72,23 @@ from life_ops.mail_ingest import (
     mail_ingest_status,
     serve_mail_ingest,
 )
+from life_ops.mail_ui import (
+    DEFAULT_MAIL_UI_HOST,
+    DEFAULT_MAIL_UI_LIMIT,
+    DEFAULT_MAIL_UI_PORT,
+    list_cmail_drafts,
+    save_cmail_draft,
+    send_cmail_draft,
+    serve_mail_ui,
+)
+from life_ops.cmail_runtime import (
+    default_cmail_runtime_db_path,
+    ensure_cmail_runtime_db,
+    ensure_cmail_runtime_list_items,
+    resolve_cmail_db_path,
+    seal_cmail_runtime_db,
+    serve_cmail_service,
+)
 from life_ops.profile_context import extract_profile_context_items
 from life_ops.profile_memory import (
     approve_profile_context_item,
@@ -415,6 +432,65 @@ def build_parser() -> argparse.ArgumentParser:
     mail_ingest_serve_parser.add_argument("--host", default=DEFAULT_MAIL_INGEST_HOST)
     mail_ingest_serve_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_INGEST_PORT)
     mail_ingest_serve_parser.add_argument("--path", default=DEFAULT_MAIL_INGEST_PATH)
+
+    mail_ui_parser = subparsers.add_parser(
+        "mail-ui",
+        help="Start a super minimal local frontend for the life-ops mail system.",
+    )
+    mail_ui_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    mail_ui_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
+    mail_ui_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
+    mail_ui_parser.add_argument("--limit", type=int, default=DEFAULT_MAIL_UI_LIMIT)
+
+    cmail_serve_parser = subparsers.add_parser(
+        "cmail-serve",
+        help="Start the managed local CMAIL runtime service against the hot runtime mailbox DB.",
+    )
+    cmail_serve_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_serve_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
+    cmail_serve_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
+    cmail_serve_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
+    cmail_serve_parser.add_argument("--limit", type=int, default=DEFAULT_MAIL_UI_LIMIT)
+    cmail_serve_parser.add_argument("--sync-interval", type=float, default=2.0)
+    cmail_serve_parser.add_argument("--send-interval", type=float, default=2.0)
+    cmail_serve_parser.add_argument("--seal-interval", type=float, default=30.0)
+
+    cmail_runtime_seal_parser = subparsers.add_parser(
+        "cmail-runtime-seal",
+        help="Seal the hot runtime mailbox DB back into the encrypted canonical life-ops store.",
+    )
+    cmail_runtime_seal_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_runtime_seal_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
+    cmail_runtime_seal_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    cmail_drafts_parser = subparsers.add_parser(
+        "cmail-drafts",
+        help="List local CMAIL drafts stored for manual review or later send.",
+    )
+    cmail_drafts_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_drafts_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    cmail_draft_save_parser = subparsers.add_parser(
+        "cmail-draft-save",
+        help="Create or update a local CMAIL draft without sending it.",
+    )
+    cmail_draft_save_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_draft_save_parser.add_argument("--id", type=int, default=0)
+    cmail_draft_save_parser.add_argument("--to", default="")
+    cmail_draft_save_parser.add_argument("--cc", default="")
+    cmail_draft_save_parser.add_argument("--bcc", default="")
+    cmail_draft_save_parser.add_argument("--subject", default="")
+    cmail_draft_save_parser.add_argument("--body", default="")
+    cmail_draft_save_parser.add_argument("--body-file", type=Path, default=None)
+    cmail_draft_save_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    cmail_draft_send_parser = subparsers.add_parser(
+        "cmail-draft-send",
+        help="Send a saved local CMAIL draft through the configured outbound mail path.",
+    )
+    cmail_draft_send_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_draft_send_parser.add_argument("--id", required=True, type=int)
+    cmail_draft_send_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     resend_init_parser = subparsers.add_parser("resend-init-config", help="Write a local Resend config template.")
     resend_init_parser.add_argument("--config", type=Path, default=default_resend_config_path())
@@ -789,6 +865,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_comm.add_argument("--follow-up-at", type=_parse_datetime_or_date, default=None)
     add_comm.add_argument("--notes", default="")
 
+    add_item = subparsers.add_parser("add-item", help="Add a personal or professional list item.")
+    add_item.add_argument("--list", dest="list_name", choices=store.LIST_ITEM_NAMES, required=True)
+    add_item.add_argument("--title", required=True)
+    add_item.add_argument("--notes", default="")
+
+    list_items = subparsers.add_parser("list-items", help="Show personal and professional list items.")
+    list_items.add_argument("--list", dest="list_name", choices=[*store.LIST_ITEM_NAMES, "all"], default="all")
+    list_items.add_argument("--status", choices=[*store.LIST_ITEM_STATUSES, "all"], default="open")
+    list_items.add_argument("--limit", type=int, default=200)
+    list_items.add_argument("--format", choices=["text", "json"], default="text")
+
+    done_item = subparsers.add_parser("done-item", help="Mark a list item done.")
+    done_item.add_argument("--id", required=True, type=int)
+
     add_routine = subparsers.add_parser("add-routine", help="Add a daily or weekly routine.")
     add_routine.add_argument("--name", required=True)
     add_routine.add_argument("--cadence", choices=["daily", "weekly"], required=True)
@@ -807,6 +897,68 @@ def _render_sync_summary(title: str, payload: dict) -> str:
     lines = [title]
     for key, value in payload.items():
         lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def _render_cmail_drafts_text(records: list[dict]) -> str:
+    if not records:
+        return "No CMAIL drafts stored."
+    lines = [f"{len(records)} CMAIL draft{'s' if len(records) != 1 else ''}"]
+    for record in records:
+        label = str(record.get("label") or "(untitled draft)")
+        to_value = str(record.get("to") or "no recipient yet")
+        updated_at = str(record.get("updated_at") or "")
+        lines.append(f"- [{record.get('id')}] {label}")
+        lines.append(f"  to: {to_value}")
+        if updated_at:
+            lines.append(f"  updated: {updated_at}")
+    return "\n".join(lines)
+
+
+def _render_cmail_draft_saved_text(record: dict) -> str:
+    label = str(record.get("label") or "(untitled draft)")
+    to_value = str(record.get("to") or "no recipient yet")
+    updated_at = str(record.get("updated_at") or "")
+    lines = [
+        "CMAIL draft saved",
+        f"- id: {record.get('id')}",
+        f"- label: {label}",
+        f"- to: {to_value}",
+    ]
+    if updated_at:
+        lines.append(f"- updated: {updated_at}")
+    return "\n".join(lines)
+
+
+def _list_item_record(row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "list_name": str(row["list_name"]),
+        "title": str(row["title"]),
+        "notes": str(row["notes"] or ""),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "completed_at": str(row["completed_at"] or ""),
+    }
+
+
+def _render_list_items_text(records: list[dict]) -> str:
+    if not records:
+        return "No list items stored."
+    lines = ["Life Ops lists"]
+    for list_name in store.LIST_ITEM_NAMES:
+        bucket = [record for record in records if record["list_name"] == list_name]
+        lines.append(f"")
+        lines.append(f"{list_name.title()}")
+        if not bucket:
+            lines.append("- none")
+            continue
+        for record in bucket:
+            marker = "x" if record["status"] == "done" else " "
+            lines.append(f"- [{record['id']}] [{marker}] {record['title']}")
+            if record["notes"]:
+                lines.append(f"  notes: {record['notes']}")
     return "\n".join(lines)
 
 
@@ -1204,6 +1356,9 @@ def _render_cloudflare_mail_sync_text(result: dict) -> str:
     lines.append(f"- worker_public_url: {result.get('worker_public_url') or 'not_set'}")
     lines.append(f"- forward_to: {result.get('forward_to') or 'disabled'}")
     lines.append(f"- forwarding_enabled: {result.get('forwarding_enabled', False)}")
+    lines.append(f"- skipped: {result.get('skipped', False)}")
+    if result.get("skip_reason"):
+        lines.append(f"- skip_reason: {result.get('skip_reason')}")
     lines.append(f"- pulled_count: {result.get('pulled_count', 0)}")
     lines.append(f"- ingested_count: {result.get('ingested_count', 0)}")
     lines.append(f"- acked_count: {result.get('acked_count', 0)}")
@@ -2039,6 +2194,10 @@ def _render_attachment_summary_text(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _should_use_hot_runtime_db(db_path: Path) -> bool:
+    return db_path.expanduser().resolve(strict=False) == store.default_db_path().resolve(strict=False)
+
+
 def _run_without_db_command(args: argparse.Namespace) -> str | None:
     command = args.command
 
@@ -2150,30 +2309,39 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
             config_path=args.config,
             limit=args.limit,
         )
-        try:
-            outbound_result = process_resend_delivery_queue(
-                db_path=args.db,
-                config_path=default_resend_config_path(),
-                limit=args.limit,
-            )
-        except Exception as exc:
-            with store.open_db(args.db) as connection:
-                store.upsert_system_alert(
-                    connection,
-                    alert_key="resend_delivery_queue",
-                    source="resend_delivery",
-                    severity="error",
-                    title="Resend queue processing failed",
-                    message=str(exc),
-                    details={"command": "cloudflare-mail-sync"},
-                )
+        if inbound_result.get("skipped"):
             outbound_result = {
+                "skipped": True,
                 "processed_count": 0,
-                "failed_count": 1,
+                "failed_count": 0,
                 "processed": [],
-                "failures": [{"error": str(exc)}],
-                "error": str(exc),
+                "failures": [],
             }
+        else:
+            try:
+                outbound_result = process_resend_delivery_queue(
+                    db_path=args.db,
+                    config_path=default_resend_config_path(),
+                    limit=args.limit,
+                )
+            except Exception as exc:
+                with store.open_db(args.db) as connection:
+                    store.upsert_system_alert(
+                        connection,
+                        alert_key="resend_delivery_queue",
+                        source="resend_delivery",
+                        severity="error",
+                        title="Resend queue processing failed",
+                        message=str(exc),
+                        details={"command": "cloudflare-mail-sync"},
+                    )
+                outbound_result = {
+                    "processed_count": 0,
+                    "failed_count": 1,
+                    "processed": [],
+                    "failures": [{"error": str(exc)}],
+                    "error": str(exc),
+                }
         result = {**inbound_result, "outbound": outbound_result}
         if args.format == "json":
             return json.dumps(result, indent=2)
@@ -2269,6 +2437,104 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
             path=args.path,
         )
         return ""
+
+    if command == "mail-ui":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        print(
+            f"Starting mail UI on http://{args.host}:{args.port}",
+            flush=True,
+        )
+        serve_mail_ui(
+            db_path=target_db_path,
+            host=args.host,
+            port=args.port,
+            limit=args.limit,
+        )
+        return ""
+
+    if command == "cmail-serve":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=args.canonical_db,
+        )
+        print(
+            f"Starting managed CMAIL service on http://{args.host}:{args.port}",
+            flush=True,
+        )
+        serve_cmail_service(
+            runtime_db_path=target_db_path,
+            canonical_db_path=args.canonical_db,
+            host=args.host,
+            port=args.port,
+            limit=args.limit,
+            sync_interval_seconds=args.sync_interval,
+            send_interval_seconds=args.send_interval,
+            seal_interval_seconds=args.seal_interval,
+        )
+        return ""
+
+    if command == "cmail-runtime-seal":
+        result = seal_cmail_runtime_db(
+            runtime_db_path=resolve_cmail_db_path(args.db),
+            canonical_db_path=args.canonical_db,
+        )
+        if args.format == "json":
+            return json.dumps(result, indent=2)
+        return _render_sync_summary("CMAIL runtime sealed", result)
+
+    if command == "cmail-drafts":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        records = list_cmail_drafts(db_path=target_db_path)
+        if args.format == "json":
+            return json.dumps(records, indent=2)
+        return _render_cmail_drafts_text(records)
+
+    if command == "cmail-draft-save":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        body_text = args.body
+        if args.body_file is not None:
+            body_text = args.body_file.read_text()
+        record = save_cmail_draft(
+            db_path=target_db_path,
+            payload={
+                "id": args.id,
+                "to": args.to,
+                "cc": args.cc,
+                "bcc": args.bcc,
+                "subject": args.subject,
+                "body_text": body_text,
+            },
+        )
+        if args.format == "json":
+            return json.dumps(record, indent=2)
+        return _render_cmail_draft_saved_text(record)
+
+    if command == "cmail-draft-send":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        result = send_cmail_draft(
+            db_path=target_db_path,
+            draft_id=args.id,
+        )
+        if args.format == "json":
+            return json.dumps(result, indent=2)
+        return _render_sync_summary("CMAIL draft sent", result)
 
     if command == "resend-init-config":
         result = write_resend_config_template(args.config, force=args.force)
@@ -2534,6 +2800,41 @@ def run(args: argparse.Namespace) -> str:
     without_db_result = _run_without_db_command(args)
     if without_db_result is not None:
         return without_db_result
+
+    if command in {"add-item", "list-items", "done-item"} and _should_use_hot_runtime_db(args.db):
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_list_items(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        with store.open_db(target_db_path) as connection:
+            if command == "add-item":
+                item_id = store.add_list_item(
+                    connection,
+                    list_name=args.list_name,
+                    title=args.title,
+                    notes=args.notes,
+                )
+                return f"Added {args.list_name} item #{item_id}: {args.title}"
+
+            if command == "list-items":
+                rows = store.list_list_items(
+                    connection,
+                    list_name=args.list_name,
+                    status=args.status,
+                    limit=args.limit,
+                )
+                records = [_list_item_record(row) for row in rows]
+                if args.format == "json":
+                    return json.dumps(records, indent=2)
+                return _render_list_items_text(records)
+
+            if command == "done-item":
+                store.set_list_item_status(connection, item_id=args.id, status="done")
+                row = store.get_list_item(connection, args.id)
+                if row is None:
+                    return f"Marked list item #{args.id} done"
+                return f"Marked {row['list_name']} item #{args.id} done: {row['title']}"
 
     with store.open_db(args.db) as connection:
         if command == "google-auth":
@@ -3496,6 +3797,34 @@ def run(args: argparse.Namespace) -> str:
                 notes=args.notes,
             )
             return f"Added communication #{communication_id}: {args.subject}"
+
+        if command == "add-item":
+            item_id = store.add_list_item(
+                connection,
+                list_name=args.list_name,
+                title=args.title,
+                notes=args.notes,
+            )
+            return f"Added {args.list_name} item #{item_id}: {args.title}"
+
+        if command == "list-items":
+            rows = store.list_list_items(
+                connection,
+                list_name=args.list_name,
+                status=args.status,
+                limit=args.limit,
+            )
+            records = [_list_item_record(row) for row in rows]
+            if args.format == "json":
+                return json.dumps(records, indent=2)
+            return _render_list_items_text(records)
+
+        if command == "done-item":
+            store.set_list_item_status(connection, item_id=args.id, status="done")
+            row = store.get_list_item(connection, args.id)
+            if row is None:
+                return f"Marked list item #{args.id} done"
+            return f"Marked {row['list_name']} item #{args.id} done: {row['title']}"
 
         if command == "add-routine":
             day_of_week: Optional[int] = None

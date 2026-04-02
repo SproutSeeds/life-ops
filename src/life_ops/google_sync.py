@@ -126,11 +126,11 @@ class _HTMLTextExtractor(HTMLParser):
 
 
 def default_credentials_path() -> Path:
-    return store.repo_root() / "config" / "google_credentials.json"
+    return store.config_root() / "google_credentials.json"
 
 
 def default_token_path() -> Path:
-    return store.repo_root() / "data" / "google_token.json"
+    return store.data_root() / "google_token.json"
 
 
 def _import_google_clients():

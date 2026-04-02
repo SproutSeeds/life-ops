@@ -44,6 +44,24 @@ class MailVaultTests(unittest.TestCase):
         self.assertEqual(b"Subject: hello\r\n\r\nbody", plaintext)
         self.assertEqual(64, len(sha256))
 
+    def test_read_and_delete_reject_path_traversal(self) -> None:
+        outside_path = Path(self.temp_dir.name) / "outside.enc.json"
+        outside_path.write_text("{}", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            mail_vault.read_encrypted_vault_file(
+                vault_root=self.vault_root,
+                relative_path="../../outside.enc.json",
+            )
+
+        with self.assertRaises(ValueError):
+            mail_vault.delete_encrypted_vault_file(
+                vault_root=self.vault_root,
+                relative_path="../../outside.enc.json",
+            )
+
+        self.assertTrue(outside_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

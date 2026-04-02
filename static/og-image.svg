@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#141f14"/>
+      <stop offset="100%" stop-color="#0a0d0b"/>
+    </radialGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- ring 5 — outermost, barely visible (r≈260) -->
+  <g transform="translate(600,315) rotate(48)" fill="none" stroke="#b8ff4d" stroke-width="0.8" stroke-linecap="round">
+    <path d="M0 -260 Q162 -130 146 32"    opacity="0.05"/>
+    <path d="M219 -162 Q195 32 32 146"     opacity="0.04"/>
+    <path d="M227 65 Q65 162 -97 114"      opacity="0.03"/>
+    <path d="M0 260 Q-162 130 -146 -32"    opacity="0.05"/>
+    <path d="M-219 162 Q-195 -32 -32 -146" opacity="0.04"/>
+    <path d="M-227 -65 Q-65 -162 97 -114"  opacity="0.03"/>
+  </g>
+
+  <!-- ring 4 (r≈200) -->
+  <g transform="translate(600,315) rotate(36)" fill="none" stroke="#b8ff4d" stroke-width="1.2" stroke-linecap="round">
+    <path d="M0 -200 Q125 -100 112 25"    opacity="0.10"/>
+    <path d="M169 -125 Q150 25 25 112"     opacity="0.08"/>
+    <path d="M175 50 Q50 125 -75 88"       opacity="0.06"/>
+    <path d="M0 200 Q-125 100 -112 -25"    opacity="0.10"/>
+    <path d="M-169 125 Q-150 -25 -25 -112" opacity="0.08"/>
+    <path d="M-175 -50 Q-50 -125 75 -88"   opacity="0.06"/>
+  </g>
+
+  <!-- ring 3 (r≈145) -->
+  <g transform="translate(600,315) rotate(24)" fill="none" stroke="#b8ff4d" stroke-width="1.6" stroke-linecap="round">
+    <path d="M0 -145 Q91 -72 82 18"      opacity="0.22"/>
+    <path d="M122 -91 Q109 18 18 82"      opacity="0.16"/>
+    <path d="M127 36 Q36 91 -54 63"       opacity="0.11"/>
+    <path d="M0 145 Q-91 72 -82 -18"      opacity="0.22"/>
+    <path d="M-122 91 Q-109 -18 -18 -82"  opacity="0.16"/>
+    <path d="M-127 -36 Q-36 -91 54 -63"   opacity="0.11"/>
+  </g>
+
+  <!-- ring 2 (r≈95) -->
+  <g transform="translate(600,315) rotate(12)" fill="none" stroke="#b8ff4d" stroke-width="2.0" stroke-linecap="round">
+    <path d="M0 -95 Q59 -48 53 12"       opacity="0.42"/>
+    <path d="M80 -59 Q71 12 12 53"        opacity="0.32"/>
+    <path d="M83 24 Q24 59 -36 42"        opacity="0.22"/>
+    <path d="M0 95 Q-59 48 -53 -12"       opacity="0.42"/>
+    <path d="M-80 59 Q-71 -12 -12 -53"    opacity="0.32"/>
+    <path d="M-83 -24 Q-24 -59 36 -42"    opacity="0.22"/>
+  </g>
+
+  <!-- ring 1 — innermost blades (r≈50) -->
+  <g transform="translate(600,315)" fill="none" stroke="#b8ff4d" stroke-width="2.2" stroke-linecap="round">
+    <path d="M0 -50 Q31 -25 28 6"        opacity="0.70"/>
+    <path d="M42 -31 Q38 6 6 28"          opacity="0.55"/>
+    <path d="M44 13 Q13 31 -19 22"        opacity="0.40"/>
+    <path d="M0 50 Q-31 25 -28 -6"        opacity="0.70"/>
+    <path d="M-42 31 Q-38 -6 -6 -28"      opacity="0.55"/>
+    <path d="M-44 -13 Q-13 -31 19 -22"    opacity="0.40"/>
+  </g>
+</svg>

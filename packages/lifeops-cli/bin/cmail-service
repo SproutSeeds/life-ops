@@ -1,0 +1,184 @@
+#!/bin/zsh
+set -euo pipefail
+
+PACKAGE_DIR="${0:A:h:h}"
+LABEL="${LIFE_OPS_CMAIL_LABEL:-com.frg.lifeops.cmail}"
+STATE_ROOT="${LIFE_OPS_HOME:-${HOME}/.lifeops}"
+AGENT_DIR="${HOME}/Library/LaunchAgents"
+PLIST_PATH="${AGENT_DIR}/${LABEL}.plist"
+SERVICE_LOG_DIR="${HOME}/Library/Logs/life-ops"
+STDOUT_PATH="${SERVICE_LOG_DIR}/cmail-service.out.log"
+STDERR_PATH="${SERVICE_LOG_DIR}/cmail-service.err.log"
+UID_VALUE="$(id -u)"
+PYTHON_BIN="${LIFE_OPS_PYTHON_BIN:-$(command -v python3 || true)}"
+VENV_DIR="${STATE_ROOT}/venvs/cmail"
+VENV_PYTHON="${VENV_DIR}/bin/python"
+BACKEND_DIR="${PACKAGE_DIR}/backend"
+
+if [[ ! -f "${BACKEND_DIR}/pyproject.toml" ]]; then
+  REPO_BACKEND_DIR="${PACKAGE_DIR:h:h}/src"
+  REPO_ROOT="${PACKAGE_DIR:h:h}"
+  if [[ -f "${REPO_ROOT}/pyproject.toml" && -d "${REPO_ROOT}/src/life_ops" ]]; then
+    BACKEND_DIR="${REPO_ROOT}"
+  fi
+fi
+
+usage() {
+  cat <<EOF
+Usage: cmail <command>
+
+Commands:
+  install   Bootstrap the bundled backend, write the LaunchAgent plist, and start the service
+  start     Start or kickstart the installed service
+  stop      Stop the running service without deleting the plist
+  restart   Restart the installed service
+  uninstall Stop the service and remove the LaunchAgent plist
+  status    Show launchctl status for the service
+  tail      Tail the service logs
+  plist     Print the expected LaunchAgent plist path
+EOF
+}
+
+ensure_backend() {
+  if [[ ! -f "${BACKEND_DIR}/pyproject.toml" ]]; then
+    cat <<EOF
+CMAIL backend not found.
+
+Expected bundled backend at:
+  ${PACKAGE_DIR}/backend
+
+This install should come from the published lifeops package or a full local Life Ops checkout.
+EOF
+    exit 1
+  fi
+}
+
+ensure_python() {
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "python3 is required to install CMAIL."
+    exit 1
+  fi
+}
+
+ensure_venv() {
+  ensure_backend
+  ensure_python
+  mkdir -p "${SERVICE_LOG_DIR}" "${STATE_ROOT}"
+  if [[ ! -x "${VENV_PYTHON}" ]]; then
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+  fi
+  "${VENV_PYTHON}" -m pip install --upgrade pip setuptools wheel >/dev/null
+  "${VENV_PYTHON}" -m pip install --upgrade "${BACKEND_DIR}" >/dev/null
+}
+
+render_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>LIFE_OPS_HOME='${STATE_ROOT}' LIFE_OPS_PACKAGE_ROOT='${BACKEND_DIR}' '${VENV_PYTHON}' -m life_ops cmail-serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LIFE_OPS_HOME</key>
+    <string>${STATE_ROOT}</string>
+    <key>LIFE_OPS_PACKAGE_ROOT</key>
+    <string>${BACKEND_DIR}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${STDOUT_PATH}</string>
+  <key>StandardErrorPath</key>
+  <string>${STDERR_PATH}</string>
+</dict>
+</plist>
+EOF
+}
+
+command_name="${1:-status}"
+
+case "${command_name}" in
+  install)
+    ensure_venv
+    mkdir -p "${AGENT_DIR}"
+    render_plist > "${PLIST_PATH}"
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Installed and started ${LABEL}."
+    echo "Plist: ${PLIST_PATH}"
+    echo "Home: ${STATE_ROOT}"
+    echo "Backend: ${BACKEND_DIR}"
+    echo "Python: ${VENV_PYTHON}"
+    ;;
+  start)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
+      exit 1
+    fi
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Started ${LABEL}."
+    ;;
+  stop)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}."
+      exit 0
+    fi
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    echo "Stopped ${LABEL}."
+    ;;
+  restart)
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
+      exit 1
+    fi
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    echo "Restarted ${LABEL}."
+    ;;
+  uninstall)
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    rm -f "${PLIST_PATH}"
+    echo "Uninstalled ${LABEL}."
+    ;;
+  status)
+    echo "Label: ${LABEL}"
+    echo "Plist: ${PLIST_PATH}"
+    echo "Home: ${STATE_ROOT}"
+    echo "Backend: ${BACKEND_DIR}"
+    echo "Python: ${VENV_PYTHON}"
+    if [[ -f "${PLIST_PATH}" ]]; then
+      launchctl print "gui/${UID_VALUE}/${LABEL}" 2>/dev/null || echo "launchctl: service not loaded"
+    else
+      echo "launchctl: plist not installed"
+    fi
+    ;;
+  tail)
+    mkdir -p "${SERVICE_LOG_DIR}"
+    touch "${STDOUT_PATH}" "${STDERR_PATH}"
+    exec tail -f "${STDOUT_PATH}" "${STDERR_PATH}"
+    ;;
+  plist)
+    echo "${PLIST_PATH}"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

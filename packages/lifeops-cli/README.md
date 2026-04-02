@@ -9,11 +9,28 @@ It is designed for teams and codebases that want a lightweight, installable comm
 - scaffolding Life Ops starter files
 - composing a week agenda from structured JSON feeds
 - drafting structured project-share emails and follow-up queues
+- controlling the local managed CMAIL inbox service
 
 This package is the main install path for Life Ops.
 The sibling [`@lifeops/core`](../life-ops-core/README.md) package remains available as a secondary SDK layer for builders who want the reusable primitives directly.
 
 If you are trying Life Ops for the first time, start here.
+
+## Self-hosted CMAIL
+
+`CMAIL` is a self-hosted mail surface for Life Ops.
+
+That means:
+
+- you bring your own domain
+- you bring your own Cloudflare setup
+- you bring your own Resend setup
+- you bring your own local secrets and API keys
+
+Life Ops does not ship any FRG credentials, tokens, domains, or provider billing.
+Each user/operator sets up and pays for their own mail infrastructure.
+
+`lifeops cmail install` bootstraps the bundled Python backend into a local user-owned environment and installs the managed mailbox service for that user.
 
 ## Install
 
@@ -89,3 +106,25 @@ This writes:
 - `packet.json`
 - one `.txt` draft per recipient
 - one `.html` draft per recipient
+
+### `lifeops cmail`
+
+Control the local managed CMAIL service:
+
+```bash
+lifeops cmail install
+lifeops cmail status
+lifeops cmail restart
+lifeops cmail open
+```
+
+The package also installs a dedicated `cmail` shortcut:
+
+```bash
+cmail status
+cmail restart
+cmail open
+```
+
+This is intended for a self-hosted local mailbox running on your machine.
+The install flow bootstraps the bundled backend into your local Life Ops home before starting the service.

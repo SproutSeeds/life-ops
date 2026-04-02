@@ -1,10 +1,11 @@
 {
   "name": "lifeops",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Primary public Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
   "type": "module",
   "bin": {
-    "lifeops": "./bin/lifeops.js"
+    "lifeops": "./bin/lifeops.js",
+    "cmail": "./bin/cmail.js"
   },
   "exports": {
     ".": {
@@ -12,12 +13,14 @@
     }
   },
   "files": [
+    "backend",
     "bin",
     "src",
     "templates",
     "README.md"
   ],
   "scripts": {
+    "prepack": "node ./scripts/sync-backend.mjs",
     "test": "node --test"
   },
   "engines": {
