@@ -1,6 +1,6 @@
 {
   "name": "lifeops",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Primary public Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
   "type": "module",
   "bin": {
