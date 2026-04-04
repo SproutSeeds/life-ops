@@ -152,6 +152,16 @@ test("lifeops cmail url prints the mailbox URL without spawning a process", asyn
   assert.equal(getStdout().trim(), "http://127.0.0.1:4311");
 });
 
+test("lifeops version reads the installed package version", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const packageMeta = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const exitCode = await runCli(["version"], io);
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.equal(getStdout().trim(), `lifeops ${packageMeta.version}`);
+});
+
 test("lifeops cmail help is available from the shortcut entrypoint", async () => {
   const { io, getStdout, getStderr } = createIo();
   const exitCode = await runCli(["cmail", "--help"], io);

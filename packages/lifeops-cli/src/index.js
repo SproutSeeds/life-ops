@@ -13,6 +13,7 @@ import {
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const templateDir = path.join(packageDir, "templates");
+const packageJsonPath = path.join(packageDir, "package.json");
 
 function parseArgv(argv = []) {
   const positionals = [];
@@ -400,7 +401,8 @@ export async function runCli(
     }
 
     if (command === "version") {
-      io.stdout.write("lifeops 0.2.0\n");
+      const packageMeta = await readJson(packageJsonPath);
+      io.stdout.write(`lifeops ${packageMeta?.version ?? "unknown"}\n`);
       return 0;
     }
 
