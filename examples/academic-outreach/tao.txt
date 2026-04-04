@@ -1,0 +1,27 @@
+Subject: A note on erdos-problems
+
+Professor Tao,
+
+I came into this area through Erdős problem 857 on erdosproblems.com, and I wanted to say thank you. The public-facing work that you, Thomas Bloom, and others have done made this corner of mathematics feel enterable from the outside, and that mattered a great deal to me.
+
+In that spirit, I built a project called erdos-problems:
+
+https://www.npmjs.com/package/erdos-problems
+https://github.com/SproutSeeds/erdos-problems
+
+If you want to try it locally, the install is:
+
+npm install -g erdos-problems
+
+It is a structured local workspace around Erdős problems: dossiers, checkpoints, archive surfaces, and local route state for active work.
+
+One design constraint I cared about was to keep the upstream record visible. The package preserves explicit provenance back to erdosproblems.com and the upstream repository, while adding a more structured local layer for active work.
+
+I built it for both humans and agents to use. With an agentic harness such as Codex CLI or Claude Code, it turns the workflow around a problem into something much more finite and explicit, while still leaving mathematical judgment on the human side of the process.
+
+Given your work around usable AI tools for research, I thought it would be worth putting in front of you. If any part of the structure feels insufficiently legible from either the human or agent side, I would value your reaction.
+
+Best,
+Cody Mitchell
+Fractal Research Group
+cody@frg.earth

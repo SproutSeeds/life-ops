@@ -323,6 +323,27 @@ class MailUiTests(unittest.TestCase):
         self.assertNotIn("<script", str(body_display["quoted_html"]))
         self.assertNotIn("On Wed, Apr 1, 2026 at 12:45 PM Cody &lt;cody@frg.earth&gt; wrote:", str(body_display["quoted_html"]))
 
+    def test_body_display_uses_sanitized_rich_html_for_primary_body(self) -> None:
+        body_display = mail_ui._body_display(
+            """<!DOCTYPE html><html lang="en"><head><title>Receipt</title><style>.x{color:red}</style></head>
+            <body>
+              <table><tr><td><div>Payment Receipt Confirmation</div></td></tr></table>
+              <p><a href="https://example.com/receipt">View receipt</a></p>
+              <img src="https://securecheckout-fl.cdc.nicusa.com/logo.png" alt="remote tracking image">
+              <script>alert('xss')</script>
+            </body></html>""",
+            html_body="",
+            snippet="Payment Receipt Confirmation",
+        )
+
+        self.assertFalse(body_display["has_quote"])
+        self.assertIn("Payment Receipt Confirmation", str(body_display["primary_html"]))
+        self.assertIn('href="https://example.com/receipt"', str(body_display["primary_html"]))
+        self.assertNotIn("securecheckout-fl.cdc.nicusa.com", str(body_display["primary_html"]))
+        self.assertNotIn("<script", str(body_display["primary_html"]))
+        self.assertNotIn("<style", str(body_display["primary_html"]))
+        self.assertNotIn("<!DOCTYPE", str(body_display["primary_html"]))
+
     def test_http_endpoints_expose_threads_drafts_and_image_previews(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
         server = HTTPServer(("127.0.0.1", 0), handler)
@@ -339,6 +360,9 @@ class MailUiTests(unittest.TestCase):
                 self.assertIn("CMAIL", html)
                 self.assertIn('rel="icon" href="/static/favicon.svg"', html)
                 self.assertIn('property="og:image" content="/static/og-image.svg"', html)
+                self.assertIn('id="correspondenceSearch"', html)
+                self.assertIn('placeholder="search name or email"', html)
+                self.assertIn('data-reply-message="${message.id}"', html)
                 self.assertNotIn("all sources", html)
                 self.assertNotIn("quick drafts", html)
                 self.assertNotIn("__MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__", html)
@@ -387,6 +411,11 @@ class MailUiTests(unittest.TestCase):
                 )
                 self.assertEqual("Preview image for the thread.", detail["attachments"][0]["text_preview"])
                 self.assertEqual(2, len(detail["thread_messages"]))
+
+                with urllib.request.urlopen(f"{base_url}/api/communications/{self.outbound_communication_id}") as response:
+                    outbound_detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual("bob@example.com", outbound_detail["drafts"]["reply"]["to"])
+                self.assertEqual("bob@example.com", outbound_detail["drafts"]["new_draft"]["to"])
 
                 with urllib.request.urlopen(f"{base_url}/api/attachments/{self.attachment_id}/content") as response:
                     preview_bytes = response.read()
@@ -497,6 +526,46 @@ class MailUiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_reply_draft_metadata_is_preserved_through_send(self) -> None:
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                "subject": "Re: Structured mail test",
+                "to": "Replies Desk <reply@example.com>",
+                "cc": "",
+                "bcc": "",
+                "body_text": "Thanks for the note.",
+                "in_reply_to": "<msg-002@example.com>",
+                "references": ["<thread@example.com>", "<msg-001@example.com>", "<msg-002@example.com>"],
+                "thread_key": "<thread@example.com>",
+            },
+        )
+
+        self.assertEqual("<msg-002@example.com>", saved["in_reply_to"])
+        self.assertEqual(
+            ["<thread@example.com>", "<msg-001@example.com>", "<msg-002@example.com>"],
+            saved["references"],
+        )
+        self.assertEqual("<thread@example.com>", saved["thread_key"])
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 999},
+        ) as resend_send:
+            result = mail_ui.send_cmail_draft(
+                db_path=self.db_path,
+                draft_id=int(saved["id"]),
+            )
+
+        self.assertEqual("queued", result["draft_status"])
+        resend_send.assert_called_once()
+        self.assertEqual("<msg-002@example.com>", resend_send.call_args.kwargs["in_reply_to"])
+        self.assertEqual(
+            ["<thread@example.com>", "<msg-001@example.com>", "<msg-002@example.com>"],
+            resend_send.call_args.kwargs["references"],
+        )
+        self.assertEqual("<thread@example.com>", resend_send.call_args.kwargs["thread_key"])
 
     def test_delete_actions_hide_message_and_contact_from_inbox(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)

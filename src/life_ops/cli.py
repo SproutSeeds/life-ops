@@ -110,6 +110,14 @@ from life_ops.resend_integration import (
     write_resend_config_template,
 )
 from life_ops import store
+from life_ops.social.post import (
+    authenticate as social_authenticate,
+    available_platforms as social_available_platforms,
+    check_status as social_check_status,
+    post_multi as social_post_multi,
+    post_to_platform as social_post_to_platform,
+)
+from life_ops.social.browser import clear_session as social_clear_session, list_sessions as social_list_sessions
 from life_ops import tracing
 from life_ops.x_content import (
     DEFAULT_OPENAI_IMAGE_BACKGROUND,
@@ -889,6 +897,75 @@ def build_parser() -> argparse.ArgumentParser:
 
     done_comm = subparsers.add_parser("done-comm", help="Mark a communication follow-up done.")
     done_comm.add_argument("--id", required=True, type=int)
+
+    # ── social ──────────────────────────────────────────────────────
+    social_auth_parser = subparsers.add_parser(
+        "social-auth",
+        help="Authenticate with a social platform (opens a browser for manual login).",
+    )
+    social_auth_parser.add_argument(
+        "platform",
+        choices=social_available_platforms(),
+        help="Platform to authenticate with.",
+    )
+
+    social_status_parser = subparsers.add_parser(
+        "social-status",
+        help="Show the status of stored social platform sessions.",
+    )
+    social_status_parser.add_argument(
+        "--platform",
+        choices=social_available_platforms(),
+        default=None,
+        help="Check a specific platform (default: all).",
+    )
+    social_status_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    social_logout_parser = subparsers.add_parser(
+        "social-logout",
+        help="Clear the stored browser session for a social platform.",
+    )
+    social_logout_parser.add_argument(
+        "platform",
+        choices=social_available_platforms(),
+        help="Platform to log out of.",
+    )
+
+    social_post_parser = subparsers.add_parser(
+        "social-post",
+        help="Publish a post to one or more social platforms via browser automation.",
+    )
+    social_post_parser.add_argument(
+        "--platforms",
+        required=True,
+        help="Comma-separated list of platforms (e.g. linkedin,facebook).",
+    )
+    social_post_parser.add_argument(
+        "--text",
+        default=None,
+        help="Default post text (used for any platform without a specific override).",
+    )
+    social_post_parser.add_argument(
+        "--linkedin-text",
+        default=None,
+        help="Override text for LinkedIn.",
+    )
+    social_post_parser.add_argument(
+        "--facebook-text",
+        default=None,
+        help="Override text for Facebook.",
+    )
+    social_post_parser.add_argument(
+        "--image",
+        default=None,
+        help="Path to an image file to attach.",
+    )
+    social_post_parser.add_argument(
+        "--visible",
+        action="store_true",
+        default=False,
+        help="Run the browser in headed (visible) mode for debugging.",
+    )
 
     return parser
 
@@ -2786,6 +2863,104 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
         if args.format == "json":
             return json.dumps(payload, indent=2)
         return _render_x_post_action_text(payload, action="delete")
+
+    # ── social ──────────────────────────────────────────────────────
+
+    if command == "social-auth":
+        ok = social_authenticate(args.platform)
+        if ok:
+            return f"Authenticated with {args.platform}."
+        return f"Authentication timed out for {args.platform}.  Try again."
+
+    if command == "social-status":
+        if args.platform:
+            profile_present = args.platform in social_list_sessions()
+            logged_in = social_check_status(args.platform) if profile_present else False
+            result = {
+                args.platform: {
+                    "logged_in": logged_in,
+                    "profile_present": profile_present,
+                }
+            }
+        else:
+            sessions = social_list_sessions()
+            platforms = social_available_platforms()
+            result = {}
+            for plat in platforms:
+                profile_present = plat in sessions
+                logged_in = False
+                if profile_present:
+                    logged_in = social_check_status(plat)
+                result[plat] = {
+                    "logged_in": logged_in,
+                    "profile_present": profile_present,
+                    "cookies": sessions.get(plat, {}).get("cookies", 0),
+                }
+        if args.format == "json":
+            return json.dumps(result, indent=2)
+        lines = ["Social platform sessions:"]
+        for plat, info in sorted(result.items()):
+            if info.get("logged_in"):
+                status_icon = "ok"
+            elif info.get("profile_present"):
+                status_icon = "saved profile, login expired"
+            else:
+                status_icon = "no session"
+            lines.append(f"  {plat}: {status_icon}")
+        return "\n".join(lines)
+
+    if command == "social-logout":
+        removed = social_clear_session(args.platform)
+        if removed:
+            return f"Cleared session for {args.platform}."
+        return f"No stored session for {args.platform}."
+
+    if command == "social-post":
+        platforms = []
+        seen_platforms: set[str] = set()
+        for raw_name in args.platforms.split(","):
+            platform_name = raw_name.strip()
+            if not platform_name or platform_name in seen_platforms:
+                continue
+            seen_platforms.add(platform_name)
+            platforms.append(platform_name)
+        if not platforms:
+            raise ValueError("No platforms specified.")
+        invalid_platforms = [plat for plat in platforms if plat not in social_available_platforms()]
+        if invalid_platforms:
+            raise ValueError(
+                "Unknown platform(s): "
+                + ", ".join(sorted(invalid_platforms))
+                + f". Available: {', '.join(social_available_platforms())}"
+            )
+        text = args.text or ""
+        if not text and not args.linkedin_text and not args.facebook_text:
+            raise ValueError("Provide --text or a platform-specific text flag.")
+        overrides: dict[str, str] = {}
+        if args.linkedin_text:
+            overrides["linkedin"] = args.linkedin_text
+        if args.facebook_text:
+            overrides["facebook"] = args.facebook_text
+        missing_text_platforms = [
+            plat for plat in platforms if not (overrides.get(plat, text) or "").strip()
+        ]
+        if missing_text_platforms:
+            raise ValueError(
+                "Provide post text for: " + ", ".join(missing_text_platforms)
+            )
+        headless = not args.visible
+        results = social_post_multi(
+            platforms,
+            text,
+            platform_text=overrides if overrides else None,
+            image=args.image,
+            headless=headless,
+        )
+        lines = []
+        for plat, info in results.items():
+            status = "ok" if info.get("ok") else "FAILED"
+            lines.append(f"  {plat}: {status} — {info.get('message', '')}")
+        return "Social post results:\n" + "\n".join(lines)
 
     return None
 

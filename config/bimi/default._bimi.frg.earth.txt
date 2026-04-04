@@ -1,0 +1,1 @@
+v=BIMI1; l=https://frg.earth/branding/frg-bimi-iris-floating.svg; a=https://frg.earth/branding/frg-bimi.pem

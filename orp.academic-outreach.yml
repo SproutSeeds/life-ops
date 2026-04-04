@@ -1,0 +1,64 @@
+version: "1"
+project:
+  name: life-ops-academic-outreach
+  repo_root: .
+  canonical_paths:
+    code: src/
+    analysis: analysis/
+lifecycle:
+  claim_status_map:
+    Draft: draft
+    In review: ready
+    Verified: reviewed
+    Blocked: blocked
+    Retracted: retracted
+  atom_status_map:
+    todo: draft
+    in_progress: ready
+    blocked: blocked
+    done: reviewed
+gates:
+  - id: outreach_kernel
+    description: Validate the academic outreach kernel artifact
+    phase: structure_kernel
+    command: echo ORP_ACADEMIC_OUTREACH_KERNEL
+    pass:
+      exit_codes: [0]
+      stdout_must_contain:
+        - ORP_ACADEMIC_OUTREACH_KERNEL
+    kernel:
+      mode: hard
+      artifacts:
+        - path: analysis/academic-outreach/orp.kernel.task.yml
+          artifact_class: task
+    evidence:
+      status: process_only
+      note: Academic outreach kernel records the reusable review protocol.
+      paths:
+        - analysis/academic-outreach/orp.kernel.task.yml
+        - docs/academic-outreach/workflow.md
+    on_fail: stop
+  - id: academic_outreach_validation
+    description: Validate recipient-aware academic outreach drafts against the manifest
+    phase: verification
+    command: python3 scripts/validate_academic_outreach.py --manifest examples/academic-outreach/manifest.json
+    pass:
+      exit_codes: [0]
+      stdout_must_contain:
+        - OUTREACH_VALIDATION_OK
+    evidence:
+      status: process_only
+      note: Validation checks provenance links, recipient-specific deltas, and anti-template drift.
+      paths:
+        - examples/academic-outreach/manifest.json
+        - examples/academic-outreach/tao.txt
+        - examples/academic-outreach/bloom.txt
+        - docs/academic-outreach/workflow.md
+profiles:
+  academic_outreach_default:
+    description: Gate recipient-aware academic outreach drafts before sending test mail
+    mode: discovery
+    packet_kind: problem_scope
+    gate_ids:
+      - outreach_kernel
+      - academic_outreach_validation

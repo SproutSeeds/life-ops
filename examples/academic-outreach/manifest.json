@@ -1,0 +1,55 @@
+{
+  "project": {
+    "name": "erdos-problems",
+    "links": [
+      "https://www.npmjs.com/package/erdos-problems",
+      "https://github.com/SproutSeeds/erdos-problems"
+    ],
+    "install_command": "npm install -g erdos-problems"
+  },
+  "rules": {
+    "require_project_links": true,
+    "require_install_command": true,
+    "require_human_agent_language": true,
+    "forbidden_phrases": [
+      "no pressure",
+      "if you don't have time",
+      "small tool",
+      "rather than burying it"
+    ],
+    "min_distinctives": 2,
+    "max_similarity": 0.93
+  },
+  "recipients": [
+    {
+      "id": "tao",
+      "name": "Terence Tao",
+      "salutation": "Professor Tao,",
+      "title_source": "https://math.math.ucla.edu/people/ladder/tao",
+      "distinctives": [
+        "Frames the note around usable AI tools for research.",
+        "Positions the project as something worth putting on Tao's radar rather than a site-ecosystem stewardship request."
+      ],
+      "must_include": [
+        "usable AI tools for research",
+        "both humans and agents"
+      ],
+      "draft_path": "tao.txt"
+    },
+    {
+      "id": "bloom",
+      "name": "Thomas Bloom",
+      "salutation": "Dr. Bloom,",
+      "title_source": "https://research.manchester.ac.uk/en/persons/thomas-bloom/",
+      "distinctives": [
+        "Frames the note around erdosproblems.com as the entry point.",
+        "Emphasizes that the project is meant to build on the ecosystem around the site."
+      ],
+      "must_include": [
+        "ecosystem around the site",
+        "both humans and agents"
+      ],
+      "draft_path": "bloom.txt"
+    }
+  ]
+}

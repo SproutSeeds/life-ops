@@ -1,0 +1,27 @@
+Subject: A note on erdos-problems and erdosproblems.com
+
+Dr. Bloom,
+
+I came into this area through Erdős problem 857 on erdosproblems.com, and I wanted to say thank you for the work you and others have put into making that ecosystem so usable from the outside. The site gave me a genuine entry point into the subject.
+
+In that spirit, I built a project called erdos-problems:
+
+https://www.npmjs.com/package/erdos-problems
+https://github.com/SproutSeeds/erdos-problems
+
+If you want to try it locally, the install is:
+
+npm install -g erdos-problems
+
+It is a structured local workspace around Erdős problems: dossiers, checkpoints, archive surfaces, and local route state for active work.
+
+One design constraint I cared about was to keep the upstream record visible. The package preserves explicit provenance back to erdosproblems.com and the upstream repository, and the public GitHub repo is where the structured layer can be inspected, improved, and contributed to further.
+
+I built it for both humans and agents to use. With an agentic harness such as Codex CLI or Claude Code, it turns the research loop into a much more finite and inspectable process while still leaving judgment and steering on the human side.
+
+Because this is meant to build on the ecosystem around the site, your reaction to the structure would matter a great deal to me. If any part of it feels unclear, overbuilt, or misaligned with the upstream ecosystem, I would want to know.
+
+Best,
+Cody Mitchell
+Fractal Research Group
+cody@frg.earth

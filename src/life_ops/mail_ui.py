@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from life_ops import mail_metadata
 from life_ops import mail_vault
 from life_ops.resend_integration import resend_send_email
 from life_ops import store
@@ -455,6 +456,32 @@ _HTML = """<!doctype html>
       align-items: center;
       gap: 10px;
     }
+    .panel-search {
+      padding: 10px 14px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .panel-search.hidden {
+      display: none;
+    }
+    .panel-search input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.018);
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      outline: none;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .panel-search input::placeholder {
+      color: rgba(226, 230, 224, 0.42);
+    }
+    .panel-search input:focus {
+      border-color: rgba(184, 255, 77, 0.34);
+      background: rgba(184, 255, 77, 0.035);
+    }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -625,6 +652,21 @@ _HTML = """<!doctype html>
       align-items: end;
       justify-content: flex-end;
     }
+    .detail-action-buttons {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .inline-reply {
+      min-width: 72px;
+      height: 28px;
+      padding: 0 12px;
+      font-size: 13px;
+      line-height: 1;
+      border-radius: 999px;
+    }
     .inline-delete {
       width: 28px;
       height: 28px;
@@ -733,6 +775,7 @@ _HTML = """<!doctype html>
       line-height: 1.72;
       font-size: 16px;
     }
+    .body-rich,
     .quote-rich {
       color: #d7ddd3;
       line-height: 1.7;
@@ -741,31 +784,53 @@ _HTML = """<!doctype html>
       gap: 12px;
       overflow-wrap: anywhere;
     }
+    .body-rich p,
+    .body-rich div,
+    .body-rich blockquote,
+    .body-rich table,
     .quote-rich p,
     .quote-rich div,
     .quote-rich blockquote,
     .quote-rich table {
       margin: 0;
     }
+    .body-rich :where(div, p, blockquote, table, ul, ol, pre) + :where(div, p, blockquote, table, ul, ol, pre),
     .quote-rich :where(div, p, blockquote, table, ul, ol, pre) + :where(div, p, blockquote, table, ul, ol, pre) {
       margin-top: 0.92em;
     }
+    .body-rich td > :where(div, p) + :where(div, p),
     .quote-rich td > :where(div, p) + :where(div, p) {
       margin-top: 0.28em;
     }
+    .body-rich table,
+    .quote-rich table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .body-rich td,
+    .body-rich th,
+    .quote-rich td,
+    .quote-rich th {
+      vertical-align: top;
+      padding: 4px 8px 4px 0;
+    }
+    .body-rich blockquote,
     .quote-rich blockquote {
       margin: 0;
       padding-left: 14px;
       border-left: 2px solid rgba(184, 255, 77, 0.28);
       color: #c9d1c7;
     }
+    .body-rich a,
     .quote-rich a {
       color: var(--accent);
       text-decoration: none;
     }
+    .body-rich a:hover,
     .quote-rich a:hover {
       text-decoration: underline;
     }
+    .body-rich img,
     .quote-rich img {
       display: block;
       max-width: min(100%, 240px);
@@ -1028,6 +1093,9 @@ _HTML = """<!doctype html>
             <span class="badge" id="threadCount">0 contacts</span>
           </div>
         </div>
+        <div class="panel-search" id="correspondenceSearchWrap">
+          <input id="correspondenceSearch" type="search" placeholder="search name or email" autocomplete="off" spellcheck="false">
+        </div>
         <div class="thread-list" id="threadList"></div>
       </section>
       <section class="panel detail" id="detailPanel">
@@ -1043,6 +1111,7 @@ _HTML = """<!doctype html>
     const SELECTED_CONTACT_STORAGE_KEY = "lifeops.mail.selectedContact";
     const SELECTED_MESSAGE_STORAGE_KEY = "lifeops.mail.selectedMessage";
     const ACTIVE_VIEW_STORAGE_KEY = "lifeops.mail.activeView";
+    const CORRESPONDENCE_QUERY_STORAGE_KEY = "lifeops.mail.correspondenceQuery";
     const SELECTED_DRAFT_STORAGE_KEY = "lifeops.mail.selectedDraft";
     const EXPANDED_QUOTED_MESSAGES_STORAGE_KEY = "lifeops.mail.expandedQuotedMessages";
     const PENDING_DELETE_CONTACTS_STORAGE_KEY = "lifeops.mail.pendingDeletedContacts";
@@ -1255,13 +1324,33 @@ _HTML = """<!doctype html>
           window.localStorage.removeItem(SELECTED_DRAFT_STORAGE_KEY);
         }
         window.localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, state.activeView);
+        window.localStorage.setItem(CORRESPONDENCE_QUERY_STORAGE_KEY, state.correspondenceQuery || "");
       } catch (_error) {
         // Ignore local storage failures.
       }
     }
 
+    function normalizedSearchText(value) {
+      return String(value || "").trim().toLowerCase();
+    }
+
+    function filterContacts(contacts) {
+      const query = normalizedSearchText(state.correspondenceQuery);
+      if (!query) return contacts || [];
+      return (contacts || []).filter((contact) => {
+        const haystack = [
+          contact?.contact_label,
+          contact?.contact_name,
+          contact?.contact_email,
+          contact?.contact_key,
+        ].map((value) => normalizedSearchText(value)).join(" ");
+        return haystack.includes(query);
+      });
+    }
+
     const state = {
       activeView: loadStoredText(ACTIVE_VIEW_STORAGE_KEY) === "drafts" ? "drafts" : "inbox",
+      correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
       selectedContactKey: loadStoredText(SELECTED_CONTACT_STORAGE_KEY),
       selectedThreadKey: null,
       selectedId: Number(loadStoredText(SELECTED_MESSAGE_STORAGE_KEY) || "") || null,
@@ -1287,6 +1376,7 @@ _HTML = """<!doctype html>
       draftSaveInFlight: false,
       draftSaveFlushInFlight: false,
       contactLookupInFlight: null,
+      draftComposerSeed: null,
     };
 
     function reconcilePendingDeleteState() {
@@ -1645,6 +1735,8 @@ _HTML = """<!doctype html>
       $("tabDrafts").setAttribute("aria-selected", inboxActive ? "false" : "true");
       $("panelTitle").textContent = inboxActive ? "correspondence" : "drafts";
       $("newDraftButton").classList.toggle("hidden", inboxActive);
+      $("correspondenceSearchWrap").classList.toggle("hidden", !inboxActive);
+      $("correspondenceSearch").value = state.correspondenceQuery || "";
     }
 
     function mailboxVersionSignature(payload) {
@@ -1750,17 +1842,20 @@ _HTML = """<!doctype html>
     }
 
     function renderContactList(payload) {
-      const contacts = payload.contacts || [];
-      const signature = JSON.stringify(contacts.map((contact) => [
+      const contacts = filterContacts(payload.contacts || []);
+      const signature = JSON.stringify([
+        state.correspondenceQuery || "",
+        contacts.map((contact) => [
         contact.contact_key,
         contact.latest_message_id,
         contact.count,
         contact.happened_at,
         (contact.threads || []).map((thread) => [thread.thread_key, thread.latest_message_id, thread.count]),
-      ]));
-      $("threadCount").textContent = `${contacts.length} contacts`;
+      ]),
+      ]);
+      $("threadCount").textContent = `${contacts.length} contact${contacts.length === 1 ? "" : "s"}`;
       if (!contacts.length) {
-        $("threadList").innerHTML = `<div class="empty">No correspondence yet.</div>`;
+        $("threadList").innerHTML = `<div class="empty">${state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet."}</div>`;
         state.listSignature = signature;
         return;
       }
@@ -1800,6 +1895,9 @@ _HTML = """<!doctype html>
     }
 
     function selectedDraft() {
+      if (state.selectedDraftId == null && state.draftComposerSeed) {
+        return seededDraft(state.draftComposerSeed);
+      }
       return sortedDrafts(state.drafts).find((draft) => draft.id === state.selectedDraftId) || null;
     }
 
@@ -1833,6 +1931,7 @@ _HTML = """<!doctype html>
         node.addEventListener("click", () => {
           const draftId = Number(node.getAttribute("data-draft-id"));
           if (!draftId) return;
+          state.draftComposerSeed = null;
           state.selectedDraftId = draftId;
           persistSelectionState();
           renderCurrentSelection();
@@ -1893,7 +1992,7 @@ _HTML = """<!doctype html>
         renderDraftSelection();
         return;
       }
-      const contacts = state.overview?.contacts || [];
+      const contacts = filterContacts(state.overview?.contacts || []);
       const selectedContactStillPresent = contacts.some((contact) => contact.contact_key === state.selectedContactKey);
       if (!selectedContactStillPresent) {
         state.selectedContactKey = contacts[0]?.contact_key ?? null;
@@ -1908,7 +2007,7 @@ _HTML = """<!doctype html>
       persistSelectionState();
       if (!state.selectedId) {
         $("detailPanel").classList.remove("draft-mode");
-        $("detailPanel").innerHTML = `<div class="empty">No correspondence yet.</div>`;
+        $("detailPanel").innerHTML = `<div class="empty">${state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet."}</div>`;
         return;
       }
       const cached = state.detailCache.get(String(state.selectedId));
@@ -1924,8 +2023,9 @@ _HTML = """<!doctype html>
 
     function renderDraftSelection() {
       const drafts = sortedDrafts(state.drafts);
+      const usingComposerSeed = state.selectedDraftId == null && Boolean(state.draftComposerSeed);
       const selectedStillPresent = drafts.some((draft) => draft.id === state.selectedDraftId);
-      if (!selectedStillPresent) {
+      if (!usingComposerSeed && !selectedStillPresent) {
         state.selectedDraftId = drafts[0]?.id ?? null;
       }
       persistSelectionState();
@@ -2015,7 +2115,30 @@ _HTML = """<!doctype html>
         body_text: "",
         snippet: "",
         updated_at: "",
+        in_reply_to: "",
+        references: [],
+        thread_key: "",
       };
+    }
+
+    function seededDraft(seed) {
+      const next = {
+        ...blankDraft(),
+        ...(seed || {}),
+      };
+      next.subject = String(next.subject || "");
+      next.to = String(next.to || "");
+      next.cc = String(next.cc || "");
+      next.bcc = String(next.bcc || "");
+      next.body_text = String(next.body_text || "");
+      next.in_reply_to = String(next.in_reply_to || "");
+      next.references = Array.isArray(next.references)
+        ? next.references.map((value) => String(value || "").trim()).filter(Boolean)
+        : [];
+      next.thread_key = String(next.thread_key || "");
+      next.label = localDraftLabel(next.subject || next.label || "");
+      next.snippet = localDraftSnippet(next.body_text);
+      return next;
     }
 
     function draftRecipientSummary(draft) {
@@ -2030,10 +2153,38 @@ _HTML = """<!doctype html>
     }
 
     function startNewDraft() {
+      state.draftComposerSeed = seededDraft({});
       state.selectedDraftId = null;
       state.draftStatus = "";
       persistSelectionState();
       renderCurrentSelection();
+    }
+
+    function replyRecipientValue(message) {
+      const direction = String(message?.direction || "").toLowerCase();
+      if (direction === "outbound") {
+        return String(message?.external_to || "").trim();
+      }
+      const scaffoldTo = String(message?.drafts?.reply?.to || "").trim();
+      if (scaffoldTo) return scaffoldTo;
+      return String(message?.external_reply_to || message?.external_from || "").trim();
+    }
+
+    function openReplyDraft(message) {
+      if (!message) return;
+      const replySeed = message?.drafts?.reply || {};
+      state.draftComposerSeed = seededDraft({
+        to: replyRecipientValue(message),
+        cc: String(replySeed.cc || ""),
+        subject: String(replySeed.subject || ""),
+        in_reply_to: String(replySeed.in_reply_to || ""),
+        references: Array.isArray(replySeed.references) ? replySeed.references : [],
+        thread_key: String(replySeed.thread_key || ""),
+      });
+      state.selectedDraftId = null;
+      state.draftStatus = "";
+      persistSelectionState();
+      setActiveView("drafts");
     }
 
     function requestSendDraft(draft) {
@@ -2188,6 +2339,7 @@ _HTML = """<!doctype html>
       state.draftStatus = "saving...";
       renderDraftStatus();
       try {
+        const activeDraft = selectedDraft() || blankDraft();
         const localId = Number(state.selectedDraftId || 0) || nextTemporaryDraftId();
         const payload = {
           subject: subjectInput.value,
@@ -2195,6 +2347,9 @@ _HTML = """<!doctype html>
           cc: ccInput.value,
           bcc: bccInput.value,
           body_text: bodyInput.value,
+          in_reply_to: String(activeDraft.in_reply_to || ""),
+          references: Array.isArray(activeDraft.references) ? activeDraft.references : [],
+          thread_key: String(activeDraft.thread_key || ""),
         };
         const localDraft = {
           id: localId,
@@ -2206,7 +2361,11 @@ _HTML = """<!doctype html>
           body_text: payload.body_text,
           snippet: localDraftSnippet(payload.body_text),
           updated_at: new Date().toISOString(),
+          in_reply_to: payload.in_reply_to,
+          references: payload.references,
+          thread_key: payload.thread_key,
         };
+        state.draftComposerSeed = null;
         state.selectedDraftId = localId;
         upsertDraft(localDraft);
         state.draftStatus = "saved locally";
@@ -2383,6 +2542,20 @@ _HTML = """<!doctype html>
       }
     }
 
+    function updateCorrespondenceSearch(value) {
+      state.correspondenceQuery = String(value || "").slice(0, 200);
+      const contacts = filterContacts(state.overview?.contacts || []);
+      if (!contacts.length) {
+        state.selectedContactKey = null;
+        state.selectedId = null;
+      } else if (!contacts.some((contact) => contact.contact_key === state.selectedContactKey)) {
+        state.selectedContactKey = contacts[0].contact_key;
+        state.selectedId = null;
+      }
+      persistSelectionState();
+      renderCurrentSelection();
+    }
+
     function gridItem(label, value) {
       return `
         <div class="item">
@@ -2522,12 +2695,19 @@ _HTML = """<!doctype html>
             ${gridItem(outbound ? "to" : "from", messageCounterpartyValue(message))}
             ${gridItem(outbound ? "sent" : "received", humanTimestamp(message.happened_at || ""))}
             <div class="item item-action">
-              <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence">×</button>
+              <div class="detail-action-buttons">
+                <button class="secondary inline-reply" type="button" data-reply-message="${message.id}">reply</button>
+                <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence">×</button>
+              </div>
             </div>
           </div>
           <div class="block">
             <div class="label">body</div>
-            <div class="body-text">${escapeHtml(bodyDisplay.primary_text || message.body_text || message.snippet || "")}</div>
+            ${
+              bodyDisplay.primary_html
+                ? `<div class="body-rich">${bodyDisplay.primary_html}</div>`
+                : `<div class="body-text">${escapeHtml(bodyDisplay.primary_text || message.body_text || message.snippet || "")}</div>`
+            }
           </div>
           ${quoteMarkup}
           ${attachmentsMarkup}
@@ -2557,6 +2737,12 @@ _HTML = """<!doctype html>
         });
       }
       const deleteButton = detail.querySelector("[data-delete-message]");
+      const replyButton = detail.querySelector("[data-reply-message]");
+      if (replyButton) {
+        replyButton.addEventListener("click", () => {
+          openReplyDraft(message);
+        });
+      }
       if (deleteButton) {
         deleteButton.addEventListener("click", async () => {
           requestDeleteMessage(message.id);
@@ -2686,6 +2872,7 @@ _HTML = """<!doctype html>
     renderChrome();
     $("tabInbox").addEventListener("click", () => setActiveView("inbox"));
     $("tabDrafts").addEventListener("click", () => setActiveView("drafts"));
+    $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
     $("newDraftButton").addEventListener("click", () => startNewDraft());
     if (state.activeView === "drafts") {
       if (!state.contacts.length) {
@@ -2892,7 +3079,31 @@ def _extract_quoted_html_fragment(html_body: str) -> str:
     return ""
 
 
-def _sanitize_rich_quote_html(html_fragment: str) -> str:
+def _extract_body_html_fragment(html_body: str) -> str:
+    raw = str(html_body or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"<body\b[^>]*>(?P<body>.*)</body\s*>", raw, re.IGNORECASE | re.DOTALL)
+    if match:
+        return str(match.group("body") or "").strip()
+    return raw
+
+
+def _extract_primary_html_fragment(html_body: str) -> str:
+    body_fragment = _extract_body_html_fragment(html_body)
+    if not body_fragment:
+        return ""
+    gmail_match = _GMAIL_QUOTE_RE.search(body_fragment)
+    if gmail_match:
+        return body_fragment[: gmail_match.start()].strip()
+    lower = body_fragment.lower()
+    blockquote_index = lower.find("<blockquote")
+    if blockquote_index != -1:
+        return body_fragment[:blockquote_index].strip()
+    return body_fragment
+
+
+def _sanitize_rich_html_fragment(html_fragment: str) -> str:
     fragment = str(html_fragment or "").strip()
     if not fragment:
         return ""
@@ -2900,6 +3111,19 @@ def _sanitize_rich_quote_html(html_fragment: str) -> str:
     sanitizer.feed(fragment)
     sanitizer.close()
     return sanitizer.get_html()
+
+
+def _looks_like_html_fragment(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    return bool(
+        re.search(
+            r"<(?:!doctype|html|body|head|meta|title|table|tr|td|th|tbody|thead|div|p|span|a|img|br|blockquote)\b|</[a-z][^>]*>",
+            clean,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _strip_duplicate_quoted_header_html(quoted_html: str, quoted_header: str) -> str:
@@ -2914,9 +3138,13 @@ def _strip_duplicate_quoted_header_html(quoted_html: str, quoted_header: str) ->
 
 def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> dict[str, str | bool]:
     raw = str(body_text or "").strip() or str(snippet or "").strip()
+    rich_source = str(html_body or "").strip()
+    if not rich_source and _looks_like_html_fragment(body_text):
+        rich_source = str(body_text or "").strip()
     if not raw:
         return {
             "primary_text": "",
+            "primary_html": "",
             "quoted_header": "",
             "quoted_text": "",
             "quoted_html": "",
@@ -2926,20 +3154,23 @@ def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> 
     if not match:
         return {
             "primary_text": _coalesce_display_paragraphs(raw),
+            "primary_html": _sanitize_rich_html_fragment(_extract_primary_html_fragment(rich_source)),
             "quoted_header": "",
             "quoted_text": "",
             "quoted_html": "",
             "has_quote": False,
         }
     primary_text = _coalesce_display_paragraphs(raw[: match.start()].strip())
+    primary_html = _sanitize_rich_html_fragment(_extract_primary_html_fragment(rich_source))
     quoted_header = " ".join(match.group("header").split())
     quoted_text = _coalesce_quoted_paragraphs(raw[match.end() :].strip())
     quoted_html = _strip_duplicate_quoted_header_html(
-        _sanitize_rich_quote_html(_extract_quoted_html_fragment(html_body)),
+        _sanitize_rich_html_fragment(_extract_quoted_html_fragment(rich_source)),
         quoted_header,
     )
     return {
         "primary_text": primary_text,
+        "primary_html": primary_html,
         "quoted_header": quoted_header if quoted_text else "",
         "quoted_text": quoted_text,
         "quoted_html": quoted_html,
@@ -3092,6 +3323,9 @@ def _draft_summary(row: sqlite3.Row) -> dict[str, Any]:
         "body_text": str(row["body_text"] or ""),
         "snippet": _draft_snippet(str(row["body_text"] or "")),
         "updated_at": str(row["happened_at"] or ""),
+        "in_reply_to": str(row["in_reply_to"] or ""),
+        "references": _json_value(str(row["references_json"] or "[]"), []),
+        "thread_key": str(row["thread_key"] or row["external_thread_id"] or ""),
     }
 
 
@@ -3204,6 +3438,9 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
     external_to = str(payload.get("to") or "").strip()
     external_cc = str(payload.get("cc") or "").strip()
     external_bcc = str(payload.get("bcc") or "").strip()
+    in_reply_to = str(payload.get("in_reply_to") or "").strip()
+    references = mail_metadata.message_id_tokens(payload.get("references") or [])
+    thread_key = str(payload.get("thread_key") or "").strip()
     raw_body_text = str(payload.get("body_text") or "")
     body_text = _compose_cmail_body_text(raw_body_text)
     html_body = _compose_cmail_html_body(raw_body_text)
@@ -3216,7 +3453,8 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             UPDATE communications
             SET subject = ?, happened_at = ?, status = 'draft', source = 'cmail_draft',
                 external_to = ?, external_cc = ?, external_bcc = ?, body_text = ?, html_body = ?,
-                snippet = ?, direction = 'outbound', channel = 'email'
+                snippet = ?, direction = 'outbound', channel = 'email',
+                in_reply_to = ?, references_json = ?, thread_key = ?
             WHERE id = ? AND source = 'cmail_draft'
             """,
             (
@@ -3228,6 +3466,9 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
                 body_text,
                 html_body,
                 snippet,
+                in_reply_to,
+                json.dumps(references),
+                thread_key,
                 draft_id,
             ),
         )
@@ -3253,8 +3494,9 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
         """
         INSERT INTO communications (
             subject, channel, direction, person, happened_at, status, notes, source,
-            external_from, external_to, external_cc, external_bcc, body_text, html_body, snippet
-        ) VALUES (?, 'email', 'outbound', '', ?, 'draft', '', 'cmail_draft', ?, ?, ?, ?, ?, ?, ?)
+            external_from, external_to, external_cc, external_bcc, body_text, html_body, snippet,
+            in_reply_to, references_json, thread_key
+        ) VALUES (?, 'email', 'outbound', '', ?, 'draft', '', 'cmail_draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             subject,
@@ -3266,6 +3508,9 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             body_text,
             html_body,
             snippet,
+            in_reply_to,
+            json.dumps(references),
+            thread_key,
         ),
     )
     draft_communication_id = int(cursor.lastrowid)
@@ -3324,6 +3569,9 @@ def send_cmail_draft(
         subject=subject,
         text=body_text,
         html=html_body,
+        in_reply_to=str(row["in_reply_to"] or ""),
+        references=_json_value(str(row["references_json"] or "[]"), []),
+        thread_key=str(row["thread_key"] or row["external_thread_id"] or ""),
         journal_db_path=db_path,
         config_path=config_path,
         attempt_immediately=False,
@@ -3344,7 +3592,9 @@ def send_cmail_draft(
 
 
 def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
+    direction = str(row["direction"] or "").lower()
     external_from = str(row["external_from"] or "")
+    external_to = str(row["external_to"] or "")
     external_reply_to = str(row["external_reply_to"] or "")
     external_cc = str(row["external_cc"] or "")
     subject = str(row["subject"] or "")
@@ -3353,7 +3603,11 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
     references = _json_value(str(row["references_json"] or "[]"), [])
     if message_id and message_id not in references:
         references = [*references, message_id]
-    reply_target = external_reply_to or external_from
+    reply_target = (
+        external_to
+        if direction == "outbound"
+        else (external_reply_to or external_from)
+    )
     common = {
         "subject": _reply_subject(subject),
         "in_reply_to": message_id,
