@@ -2656,6 +2656,40 @@ def _ensure_mail_contacts_backfilled(connection: sqlite3.Connection) -> None:
         "SELECT value FROM sync_state WHERE key = ?",
         (MAIL_CONTACTS_CLEANUP_SYNC_KEY,),
     ).fetchone()
+    contacts_present = connection.execute(
+        "SELECT 1 FROM mail_contacts LIMIT 1"
+    ).fetchone()
+    contacts_already_present = contacts_present is not None
+
+    # Older runtime DBs can already have a healthy contact index but still be
+    # missing the sync markers that newer builds expect. In that case, stamp the
+    # markers and avoid a needless rebuild on every open.
+    if contacts_already_present and (
+        not existing_marker
+        or not str(existing_marker["value"] or "").strip()
+        or not cleanup_marker
+        or not str(cleanup_marker["value"] or "").strip()
+    ):
+        marker_value = _utc_now_string()
+        connection.execute(
+            """
+            INSERT INTO sync_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (MAIL_CONTACTS_BACKFILLED_SYNC_KEY, marker_value),
+        )
+        connection.execute(
+            """
+            INSERT INTO sync_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (MAIL_CONTACTS_CLEANUP_SYNC_KEY, marker_value),
+        )
+        connection.commit()
+        return
+
     if not cleanup_marker or not str(cleanup_marker["value"] or "").strip():
         connection.execute(
             """

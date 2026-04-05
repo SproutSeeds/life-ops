@@ -428,6 +428,22 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual(1, len(drafts_payload["drafts"]))
                 self.assertEqual(self.draft_communication_id, drafts_payload["drafts"][0]["id"])
 
+                saved_out_of_band = mail_ui.save_cmail_draft(
+                    db_path=self.db_path,
+                    payload={
+                        "subject": "Out-of-band draft update",
+                        "to": "alex@example.com",
+                        "cc": "",
+                        "bcc": "",
+                        "body_text": "Saved outside the HTTP handler.",
+                    },
+                )
+                with urllib.request.urlopen(f"{base_url}/api/drafts") as response:
+                    refreshed_drafts_payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(
+                    any(int(entry["id"]) == int(saved_out_of_band["id"]) for entry in refreshed_drafts_payload["drafts"])
+                )
+
                 with urllib.request.urlopen(f"{base_url}/api/contacts?query=alice@example.com") as response:
                     contacts_payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual("alice@example.com", contacts_payload["contacts"][0]["email"])
@@ -492,7 +508,9 @@ class MailUiTests(unittest.TestCase):
                 self.assertFalse(resend_kwargs["attempt_immediately"])
                 with urllib.request.urlopen(f"{base_url}/api/drafts") as response:
                     drafts_payload = json.loads(response.read().decode("utf-8"))
-                self.assertEqual([], drafts_payload["drafts"])
+                self.assertFalse(
+                    any(int(entry["id"]) == int(self.draft_communication_id) for entry in drafts_payload["drafts"])
+                )
 
                 request = urllib.request.Request(
                     f"{base_url}/api/drafts",

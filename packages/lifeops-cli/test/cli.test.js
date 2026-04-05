@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -30,6 +30,14 @@ function createIo() {
       return stderr;
     },
   };
+}
+
+async function createFakeCmailHome() {
+  const home = await mkdtemp(path.join(os.tmpdir(), "lifeops-cmail-home-"));
+  const binDir = path.join(home, "venvs", "cmail", "bin");
+  await mkdir(binDir, { recursive: true });
+  await writeFile(path.join(binDir, "python"), "", "utf8");
+  return home;
 }
 
 test("lifeops init scaffolds starter files", async () => {
@@ -143,6 +151,125 @@ test("lifeops cmail delegates to the managed cmail service wrapper", async () =>
   assert.deepEqual(calls[0].args, ["./bin/cmail-service", "status"]);
 });
 
+test("lifeops cmail drafts delegates to the bundled backend python CLI", async () => {
+  const fakeHome = await createFakeCmailHome();
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const originalHome = process.env.LIFE_OPS_HOME;
+  process.env.LIFE_OPS_HOME = fakeHome;
+  try {
+    const exitCode = await runCli(
+      ["cmail", "drafts", "--format", "json"],
+      io,
+      {
+        runner: async (payload) => {
+          calls.push(payload);
+          io.stdout.write('{"drafts":[]}\n');
+          return 0;
+        },
+      },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(getStderr(), "");
+    assert.match(getStdout(), /"drafts":\[\]/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].command, /\/venvs\/cmail\/bin\/python$/);
+    assert.deepEqual(calls[0].args, ["-m", "life_ops", "cmail-drafts", "--format", "json"]);
+    assert.equal(calls[0].env.LIFE_OPS_HOME, fakeHome);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.LIFE_OPS_HOME;
+    } else {
+      process.env.LIFE_OPS_HOME = originalHome;
+    }
+  }
+});
+
+test("lifeops cmail draft-save preserves raw draft flags for backend CLI", async () => {
+  const fakeHome = await createFakeCmailHome();
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const originalHome = process.env.LIFE_OPS_HOME;
+  process.env.LIFE_OPS_HOME = fakeHome;
+  try {
+    const exitCode = await runCli(
+      ["cmail", "draft-save", "--to", "alexwg@alexwg.org", "--subject", "Hello", "--body", "Hi Alex"],
+      io,
+      {
+        runner: async (payload) => {
+          calls.push(payload);
+          io.stdout.write("saved\n");
+          return 0;
+        },
+      },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(getStderr(), "");
+    assert.match(getStdout(), /saved/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, [
+      "-m",
+      "life_ops",
+      "cmail-draft-save",
+      "--to",
+      "alexwg@alexwg.org",
+      "--subject",
+      "Hello",
+      "--body",
+      "Hi Alex",
+    ]);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.LIFE_OPS_HOME;
+    } else {
+      process.env.LIFE_OPS_HOME = originalHome;
+    }
+  }
+});
+
+test("lifeops cmail new-draft is a friendly alias for draft-save", async () => {
+  const fakeHome = await createFakeCmailHome();
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const originalHome = process.env.LIFE_OPS_HOME;
+  process.env.LIFE_OPS_HOME = fakeHome;
+  try {
+    const exitCode = await runCli(
+      ["cmail", "new-draft", "--to", "terry@example.com", "--subject", "Hello"],
+      io,
+      {
+        runner: async (payload) => {
+          calls.push(payload);
+          io.stdout.write("saved\n");
+          return 0;
+        },
+      },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(getStderr(), "");
+    assert.match(getStdout(), /saved/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, [
+      "-m",
+      "life_ops",
+      "cmail-draft-save",
+      "--to",
+      "terry@example.com",
+      "--subject",
+      "Hello",
+    ]);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.LIFE_OPS_HOME;
+    } else {
+      process.env.LIFE_OPS_HOME = originalHome;
+    }
+  }
+});
+
 test("lifeops cmail url prints the mailbox URL without spawning a process", async () => {
   const { io, getStdout, getStderr } = createIo();
   const exitCode = await runCli(["cmail", "url"], io);
@@ -170,4 +297,7 @@ test("lifeops cmail help is available from the shortcut entrypoint", async () =>
   assert.equal(getStderr(), "");
   assert.match(getStdout(), /self-hosted mail surface/i);
   assert.match(getStdout(), /Cloudflare\/Resend accounts/i);
+  assert.match(getStdout(), /cmail new-draft/);
+  assert.match(getStdout(), /cmail drafts/);
+  assert.match(getStdout(), /cmail draft-save/);
 });

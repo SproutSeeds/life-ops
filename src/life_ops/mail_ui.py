@@ -4594,10 +4594,7 @@ def _make_handler(
 
             if path == "/api/drafts":
                 try:
-                    drafts = _get_drafts_cache()
-                    if drafts is None:
-                        drafts = _refresh_drafts_cache()
-                    payload = {"drafts": drafts}
+                    payload = {"drafts": _refresh_drafts_cache()}
                 except TimeoutError as exc:
                     self._send_json({"error": str(exc)}, status_code=503)
                     return

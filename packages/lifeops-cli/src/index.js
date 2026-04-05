@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -99,6 +100,10 @@ function getCmailHelpText() {
     "  cmail plist",
     "  cmail url",
     "  cmail open",
+    "  cmail new-draft [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--format text|json]",
+    "  cmail drafts [--format text|json]",
+    "  cmail draft-save [--id 0] [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--format text|json]",
+    "  cmail draft-send --id 74222 [--format text|json]",
     "",
     "Notes:",
     "  CMAIL is the self-hosted mail surface for Life Ops.",
@@ -122,6 +127,14 @@ function getMissingCmailBackendText() {
     "  - your own local secrets and service install",
     "",
     "Reinstall `lifeops` or use a full local Life Ops checkout if this package is incomplete.",
+  ].join("\n");
+}
+
+function getMissingCmailInstallText() {
+  return [
+    "CMAIL backend environment not installed.",
+    "",
+    "Run `cmail install` first to bootstrap the local Python backend and managed service.",
   ].join("\n");
 }
 
@@ -305,11 +318,11 @@ async function runShareCommand({ options, io, cwd }) {
   return 0;
 }
 
-async function defaultProcessRunner({ command, args, cwd, io }) {
+async function defaultProcessRunner({ command, args, cwd, io, env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env: env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout.on("data", (chunk) => {
@@ -329,10 +342,39 @@ async function defaultProcessRunner({ command, args, cwd, io }) {
   });
 }
 
-async function runCmailCommand({ positionals, io, runner = defaultProcessRunner }) {
-  const subcommand = positionals[1] ?? "help";
+function resolveCmailPaths() {
+  const stateRoot = process.env.LIFE_OPS_HOME ?? path.join(os.homedir(), ".lifeops");
+  const repoRoot = path.resolve(packageDir, "..", "..");
+  const packagedBackendDir = path.join(packageDir, "backend");
+  const packagedBackendPython = path.join(stateRoot, "venvs", "cmail", "bin", "python");
+  const repoBackendPython = path.join(repoRoot, ".venv", "bin", "python");
+  return {
+    stateRoot,
+    serviceScript: path.join(packageDir, "bin", "cmail-service"),
+    packagedBackendDir,
+    packagedBackendPython,
+    repoRoot,
+    repoBackendPython,
+  };
+}
+
+async function runCmailCommand({
+  argv = [],
+  invokedFromLifeops = false,
+  io,
+  runner = defaultProcessRunner,
+}) {
+  const cmailArgv = invokedFromLifeops ? argv.slice(1) : argv;
+  const subcommand = cmailArgv[0] ?? "help";
   const serviceScript = path.join(packageDir, "bin", "cmail-service");
   const mailboxUrl = "http://127.0.0.1:4311";
+  const {
+    stateRoot,
+    packagedBackendDir,
+    packagedBackendPython,
+    repoRoot,
+    repoBackendPython,
+  } = resolveCmailPaths();
 
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
     io.stdout.write(`${getCmailHelpText()}\n`);
@@ -353,10 +395,6 @@ async function runCmailCommand({ positionals, io, runner = defaultProcessRunner 
     });
   }
 
-  if (!["status", "start", "stop", "restart", "install", "tail", "plist"].includes(subcommand)) {
-    throw new Error(`Unknown CMAIL command: ${subcommand}`);
-  }
-
   try {
     const details = await stat(serviceScript);
     if (!details.isFile()) {
@@ -366,11 +404,66 @@ async function runCmailCommand({ positionals, io, runner = defaultProcessRunner 
     throw new Error(getMissingCmailBackendText());
   }
 
+  if (["status", "start", "stop", "restart", "install", "tail", "plist"].includes(subcommand)) {
+    return runner({
+      command: "zsh",
+      args: ["./bin/cmail-service", subcommand],
+      cwd: packageDir,
+      io,
+    });
+  }
+
+  const backendCommands = {
+    "new-draft": "cmail-draft-save",
+    drafts: "cmail-drafts",
+    "draft-save": "cmail-draft-save",
+    "draft-send": "cmail-draft-send",
+  };
+  const backendCommand = backendCommands[subcommand];
+  if (!backendCommand) {
+    throw new Error(`Unknown CMAIL command: ${subcommand}`);
+  }
+
+  let backendPython = packagedBackendPython;
+  let backendRoot = packagedBackendDir;
+  let backendEnv = {
+    ...process.env,
+    LIFE_OPS_HOME: stateRoot,
+    LIFE_OPS_PACKAGE_ROOT: packagedBackendDir,
+  };
+  try {
+    const details = await stat(packagedBackendPython);
+    if (!details.isFile()) {
+      throw new Error("not a file");
+    }
+  } catch {
+    try {
+      const repoPythonDetails = await stat(repoBackendPython);
+      const repoSrcDetails = await stat(path.join(repoRoot, "src", "life_ops"));
+      if (!repoPythonDetails.isFile() || !repoSrcDetails.isDirectory()) {
+        throw new Error("repo fallback unavailable");
+      }
+      backendPython = repoBackendPython;
+      backendRoot = repoRoot;
+      backendEnv = {
+        ...process.env,
+        LIFE_OPS_PACKAGE_ROOT: repoRoot,
+        PYTHONPATH: path.join(repoRoot, "src"),
+      };
+    } catch {
+      throw new Error(getMissingCmailInstallText());
+    }
+  }
+
   return runner({
-    command: "zsh",
-    args: ["./bin/cmail-service", subcommand],
+    command: backendPython,
+    args: ["-m", "life_ops", backendCommand, ...cmailArgv.slice(1)],
     cwd: packageDir,
     io,
+    env: {
+      ...backendEnv,
+      LIFE_OPS_PACKAGE_ROOT: backendRoot,
+    },
   });
 }
 
@@ -389,7 +482,8 @@ export async function runCli(
 
     if (command === "cmail" && options.help) {
       return runCmailCommand({
-        positionals: ["cmail", "help"],
+        argv: ["cmail", "help"],
+        invokedFromLifeops: true,
         io,
         runner: runtime.runner,
       });
@@ -425,7 +519,8 @@ export async function runCli(
 
     if (command === "cmail") {
       return runCmailCommand({
-        positionals,
+        argv,
+        invokedFromLifeops: true,
         io,
         runner: runtime.runner,
       });
@@ -447,7 +542,7 @@ export async function runCmailCli(
   runtime = {},
 ) {
   return runCmailCommand({
-    positionals: ["cmail", ...argv],
+    argv,
     io,
     runner: runtime.runner,
   });

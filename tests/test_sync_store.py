@@ -154,6 +154,44 @@ class SyncStoreTests(unittest.TestCase):
             self.assertEqual(expected / "data" / "x_media", store.x_media_root())
             self.assertEqual(expected / "config", store.config_root())
 
+    def test_open_db_stamps_mail_contact_markers_when_contacts_already_exist(self) -> None:
+        store.upsert_communication_from_sync(
+            self.connection,
+            source="cloudflare_email",
+            external_id="msg-contact-marker-1",
+            subject="Marker repair",
+            channel="email",
+            happened_at=datetime(2026, 4, 5, 9, 0, tzinfo=timezone.utc),
+            follow_up_at=None,
+            direction="inbound",
+            person="Alex Wissner-Gross",
+            external_from="Alex Wissner-Gross <alexwg@alexwg.org>",
+            external_to="cody@frg.earth",
+        )
+        self.connection.execute(
+            "DELETE FROM sync_state WHERE key IN (?, ?)",
+            (store.MAIL_CONTACTS_BACKFILLED_SYNC_KEY, store.MAIL_CONTACTS_CLEANUP_SYNC_KEY),
+        )
+        self.connection.commit()
+        self.connection.close()
+
+        self.connection = store.open_db(self.db_path)
+
+        backfilled = self.connection.execute(
+            "SELECT value FROM sync_state WHERE key = ?",
+            (store.MAIL_CONTACTS_BACKFILLED_SYNC_KEY,),
+        ).fetchone()
+        cleanup = self.connection.execute(
+            "SELECT value FROM sync_state WHERE key = ?",
+            (store.MAIL_CONTACTS_CLEANUP_SYNC_KEY,),
+        ).fetchone()
+        contacts = store.list_mail_contacts(self.connection, query="alexwg@alexwg.org", limit=10)
+
+        self.assertTrue(str(backfilled["value"] or "").strip())
+        self.assertTrue(str(cleanup["value"] or "").strip())
+        self.assertEqual(1, len(contacts))
+        self.assertEqual("alexwg@alexwg.org", str(contacts[0]["email"]))
+
     def test_purge_deleted_communications_removes_archived_rows_and_vault_artifacts(self) -> None:
         raw_relative_path, _ = mail_vault.write_encrypted_vault_file(
             vault_root=self.vault_root,
