@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -584,6 +585,67 @@ class MailUiTests(unittest.TestCase):
             resend_send.call_args.kwargs["references"],
         )
         self.assertEqual("<thread@example.com>", resend_send.call_args.kwargs["thread_key"])
+
+    def test_draft_attachments_can_be_uploaded_downloaded_and_sent(self) -> None:
+        handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        attachment_bytes = b"npm i -g erdos-problems\n"
+        try:
+            with mock.patch(
+                "life_ops.mail_ui.store.attachment_vault_root",
+                return_value=self.vault_root,
+            ):
+                upload_request = urllib.request.Request(
+                    f"{base_url}/api/drafts/{self.draft_communication_id}/attachments",
+                    data=json.dumps(
+                        {
+                            "attachments": [
+                                {
+                                    "filename": "release-note.txt",
+                                    "mime_type": "text/plain",
+                                    "content_base64": base64.b64encode(attachment_bytes).decode("ascii"),
+                                }
+                            ]
+                        }
+                    ).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(upload_request) as response:
+                    upload_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(1, len(upload_payload["draft"]["attachments"]))
+                attachment = upload_payload["draft"]["attachments"][0]
+                self.assertEqual("release-note.txt", attachment["filename"])
+                self.assertEqual("text/plain", attachment["mime_type"])
+                self.assertTrue(attachment["download_url"])
+
+                with urllib.request.urlopen(f"{base_url}{attachment['download_url']}") as response:
+                    downloaded_bytes = response.read()
+                    content_type = response.headers.get_content_type()
+                    content_disposition = response.headers.get("Content-Disposition") or ""
+                self.assertEqual("text/plain", content_type)
+                self.assertEqual(attachment_bytes, downloaded_bytes)
+                self.assertIn('filename="release-note.txt"', content_disposition)
+
+                with mock.patch(
+                    "life_ops.mail_ui.resend_send_email",
+                    return_value={"status": "queued", "communication_id": 999},
+                ) as resend_send:
+                    result = mail_ui.send_cmail_draft(
+                        db_path=self.db_path,
+                        draft_id=self.draft_communication_id,
+                    )
+                self.assertEqual("queued", result["draft_status"])
+                attachment_paths = resend_send.call_args.kwargs["attachment_paths"]
+                self.assertEqual(1, len(attachment_paths))
+                self.assertEqual("release-note.txt", Path(attachment_paths[0]).name)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_delete_actions_hide_message_and_contact_from_inbox(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)

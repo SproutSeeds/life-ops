@@ -194,7 +194,18 @@ test("lifeops cmail draft-save preserves raw draft flags for backend CLI", async
   process.env.LIFE_OPS_HOME = fakeHome;
   try {
     const exitCode = await runCli(
-      ["cmail", "draft-save", "--to", "alexwg@alexwg.org", "--subject", "Hello", "--body", "Hi Alex"],
+      [
+        "cmail",
+        "draft-save",
+        "--to",
+        "alexwg@alexwg.org",
+        "--subject",
+        "Hello",
+        "--body",
+        "Hi Alex",
+        "--attach",
+        "./paper.pdf",
+      ],
       io,
       {
         runner: async (payload) => {
@@ -219,6 +230,8 @@ test("lifeops cmail draft-save preserves raw draft flags for backend CLI", async
       "Hello",
       "--body",
       "Hi Alex",
+      "--attach",
+      "./paper.pdf",
     ]);
   } finally {
     if (originalHome === undefined) {
@@ -300,4 +313,5 @@ test("lifeops cmail help is available from the shortcut entrypoint", async () =>
   assert.match(getStdout(), /cmail new-draft/);
   assert.match(getStdout(), /cmail drafts/);
   assert.match(getStdout(), /cmail draft-save/);
+  assert.match(getStdout(), /--attach \.\/file\.pdf/);
 });

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import mimetypes
 import re
+import shutil
 import sqlite3
+import tempfile
 import threading
 from datetime import datetime, timezone
 from email.utils import formataddr, getaddresses, parseaddr
@@ -14,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
 from life_ops import mail_vault
 from life_ops.resend_integration import resend_send_email
@@ -33,6 +39,8 @@ MAIL_UI_BACKGROUND_SYNC_INTERVAL_SECONDS = 2.0
 MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 2000
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 MAIL_UI_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 3.0
+MAX_DRAFT_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_DRAFT_ATTACHMENT_COUNT = 12
 _SUBJECT_PREFIX_RE = re.compile(r"^(?:(?:re|fwd?|aw|sv)\s*:\s*)+", re.IGNORECASE)
 _QUOTED_REPLY_HEADER_RE = re.compile(r"(?P<header>\bOn [^\n]{0,500}? wrote:)", re.IGNORECASE)
 _SIGNATURE_TAIL_RE = re.compile(r"(?:\s|^)--\s+[^\n]+$", re.DOTALL)
@@ -1049,6 +1057,48 @@ _HTML = """<!doctype html>
       gap: 12px;
       padding: 0 14px 14px;
       border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .draft-attachments-shell {
+      gap: 10px;
+    }
+    .draft-attachments-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .draft-attachment-list {
+      display: grid;
+      gap: 10px;
+    }
+    .draft-attachment-item {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #0d120f;
+    }
+    .draft-attachment-copy {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .draft-attachment-link {
+      color: var(--text);
+      font-weight: 600;
+      text-decoration: none;
+      word-break: break-word;
+    }
+    .draft-attachment-link:hover {
+      color: var(--accent);
+    }
+    .draft-attachment-meta, .draft-attachment-empty {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
     }
     .draft-actions {
       display: flex;
@@ -2118,6 +2168,7 @@ _HTML = """<!doctype html>
         in_reply_to: "",
         references: [],
         thread_key: "",
+        attachments: [],
       };
     }
 
@@ -2136,6 +2187,7 @@ _HTML = """<!doctype html>
         ? next.references.map((value) => String(value || "").trim()).filter(Boolean)
         : [];
       next.thread_key = String(next.thread_key || "");
+      next.attachments = Array.isArray(next.attachments) ? next.attachments : [];
       next.label = localDraftLabel(next.subject || next.label || "");
       next.snippet = localDraftSnippet(next.body_text);
       return next;
@@ -2327,14 +2379,23 @@ _HTML = """<!doctype html>
       }
     }
 
-    async function saveDraftFromForm() {
-      if (state.draftSaveInFlight) return;
+    function humanAttachmentSize(bytes) {
+      const value = Number(bytes || 0);
+      if (!Number.isFinite(value) || value <= 0) return "0 bytes";
+      if (value < 1024) return `${value} bytes`;
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+      return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    async function saveDraftFromForm(options = {}) {
+      const forceRemote = Boolean(options?.forceRemote);
+      if (state.draftSaveInFlight) return null;
       const subjectInput = $("draftSubject");
       const toInput = $("draftTo");
       const ccInput = $("draftCc");
       const bccInput = $("draftBcc");
       const bodyInput = $("draftBody");
-      if (!subjectInput || !toInput || !ccInput || !bccInput || !bodyInput) return;
+      if (!subjectInput || !toInput || !ccInput || !bccInput || !bodyInput) return null;
       state.draftSaveInFlight = true;
       state.draftStatus = "saving...";
       renderDraftStatus();
@@ -2364,7 +2425,27 @@ _HTML = """<!doctype html>
           in_reply_to: payload.in_reply_to,
           references: payload.references,
           thread_key: payload.thread_key,
+          attachments: Array.isArray(activeDraft.attachments) ? activeDraft.attachments : [],
         };
+        if (forceRemote) {
+          state.draftComposerSeed = null;
+          state.selectedDraftId = localId;
+          upsertDraft(localDraft);
+          const response = await postJson("/api/drafts", {
+            ...payload,
+            id: Number(activeDraft.id || 0) > 0 ? Number(activeDraft.id) : undefined,
+          });
+          const savedDraft = response?.draft || null;
+          if (!savedDraft) {
+            throw new Error("save failed");
+          }
+          replaceDraftId(localId, savedDraft);
+          upsertDraft(savedDraft);
+          state.draftStatus = "saved";
+          persistSelectionState();
+          renderCurrentSelection();
+          return savedDraft;
+        }
         state.draftComposerSeed = null;
         state.selectedDraftId = localId;
         upsertDraft(localDraft);
@@ -2377,10 +2458,89 @@ _HTML = """<!doctype html>
           payload,
         });
         flushDraftSaveQueue().catch(() => {});
+        return localDraft;
       } catch (error) {
         state.draftStatus = `save failed`;
+        return null;
       } finally {
         state.draftSaveInFlight = false;
+        renderDraftStatus();
+      }
+    }
+
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("failed to read attachment"));
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const marker = "base64,";
+          const index = result.indexOf(marker);
+          resolve(index === -1 ? result : result.slice(index + marker.length));
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function ensureSavedDraftForAttachments() {
+      const activeDraft = selectedDraft();
+      if (Number(activeDraft?.id || 0) > 0) {
+        return activeDraft;
+      }
+      const savedDraft = await saveDraftFromForm({ forceRemote: true });
+      if (!savedDraft || Number(savedDraft.id || 0) <= 0) {
+        throw new Error("save the draft before attaching files");
+      }
+      return savedDraft;
+    }
+
+    async function uploadDraftAttachments(fileList) {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+      state.draftStatus = "attaching...";
+      renderDraftStatus();
+      try {
+        const savedDraft = await ensureSavedDraftForAttachments();
+        const uploads = await Promise.all(files.map(async (file) => ({
+          filename: String(file.name || "attachment.bin"),
+          mime_type: String(file.type || "application/octet-stream"),
+          content_base64: await readFileAsBase64(file),
+        })));
+        const response = await postJson(`/api/drafts/${savedDraft.id}/attachments`, { attachments: uploads });
+        const updatedDraft = response?.draft || null;
+        if (updatedDraft) {
+          upsertDraft(updatedDraft);
+          state.selectedDraftId = Number(updatedDraft.id || savedDraft.id);
+          state.draftComposerSeed = null;
+        }
+        state.draftStatus = "saved";
+        persistSelectionState();
+        renderCurrentSelection();
+      } catch (error) {
+        state.draftStatus = String(error?.message || "attachment failed");
+        renderDraftStatus();
+      }
+    }
+
+    async function removeDraftAttachment(draftId, attachmentId) {
+      if (!draftId || !attachmentId) return;
+      state.draftStatus = "updating attachments...";
+      renderDraftStatus();
+      try {
+        const response = await postJson(`/api/drafts/${draftId}/attachments/delete`, {
+          attachment_id: attachmentId,
+        });
+        const updatedDraft = response?.draft || null;
+        if (updatedDraft) {
+          upsertDraft(updatedDraft);
+          state.selectedDraftId = Number(updatedDraft.id || draftId);
+          state.draftComposerSeed = null;
+        }
+        state.draftStatus = "saved";
+        persistSelectionState();
+        renderCurrentSelection();
+      } catch (error) {
+        state.draftStatus = String(error?.message || "attachment delete failed");
         renderDraftStatus();
       }
     }
@@ -2429,6 +2589,7 @@ _HTML = """<!doctype html>
 
     function renderDraftDetail(draft) {
       const entry = draft || blankDraft();
+      const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
       const detail = $("detailPanel");
       detail.classList.add("draft-mode");
       detail.innerHTML = `
@@ -2467,6 +2628,30 @@ _HTML = """<!doctype html>
                 <datalist id="draftContactSuggestions">${contactOptionMarkup(state.contacts)}</datalist>
               </div>
             </details>
+            <div class="draft-field draft-attachments-shell">
+              <div class="draft-attachments-head">
+                <label>Attachments</label>
+                <button class="secondary" type="button" id="draftAttachButton">attach files</button>
+              </div>
+              <input id="draftAttachInput" class="hidden" type="file" multiple>
+              <div class="draft-attachment-list">
+                ${
+                  attachments.length
+                    ? attachments.map((attachment) => `
+                      <div class="draft-attachment-item">
+                        <div class="draft-attachment-copy">
+                          <a class="draft-attachment-link" href="${escapeHtml(attachment.download_url || "")}" target="_blank" rel="noreferrer">
+                            ${escapeHtml(attachment.filename || "(unnamed attachment)")}
+                          </a>
+                          <div class="draft-attachment-meta">${escapeHtml(attachment.kind_label || "file")} · ${escapeHtml(humanAttachmentSize(attachment.size || 0))}</div>
+                        </div>
+                        <button class="delete-button" type="button" data-remove-draft-attachment="${escapeHtml(String(attachment.id || 0))}" title="Remove attachment">×</button>
+                      </div>
+                    `).join("")
+                    : '<div class="draft-attachment-empty">No attachments yet.</div>'
+                }
+              </div>
+            </div>
             <div class="draft-field draft-body-field">
               <label for="draftBody">Body</label>
               <textarea id="draftBody" placeholder="Write your email here...">${escapeHtml(entry.body_text || "")}</textarea>
@@ -2517,6 +2702,24 @@ _HTML = """<!doctype html>
           loadContacts({ query, limit: 20 }).catch(() => {
             updateDraftContactSuggestions(state.contacts);
           });
+        });
+      }
+      const attachButton = $("draftAttachButton");
+      const attachInput = $("draftAttachInput");
+      if (attachButton && attachInput) {
+        attachButton.addEventListener("click", () => attachInput.click());
+        attachInput.addEventListener("change", async () => {
+          const files = Array.from(attachInput.files || []);
+          attachInput.value = "";
+          if (!files.length) return;
+          await uploadDraftAttachments(files);
+        });
+      }
+      for (const removeButton of detail.querySelectorAll("[data-remove-draft-attachment]")) {
+        removeButton.addEventListener("click", async () => {
+          const attachmentId = Number(removeButton.getAttribute("data-remove-draft-attachment") || 0);
+          if (!attachmentId || !entry.id) return;
+          await removeDraftAttachment(Number(entry.id), attachmentId);
         });
       }
       const sendButton = $("sendDraftButton");
@@ -2655,6 +2858,7 @@ _HTML = """<!doctype html>
                     </div>
                     <div><strong>${escapeHtml(attachment.filename || "(unnamed)")}</strong></div>
                     <div>${escapeHtml(attachment.mime_type || "")} · ${escapeHtml(String(attachment.size || 0))} bytes</div>
+                    <div><a href="${escapeHtml(attachment.download_url || "")}" target="_blank" rel="noreferrer">open attachment</a></div>
                     ${attachment.text_preview ? `<div class="attachment-text">${escapeHtml(attachment.text_preview)}</div>` : ""}
                   </div>
                 `).join("")}
@@ -2926,6 +3130,252 @@ def _attachment_kind_label(mime_type: str) -> str:
     if "zip" in lower or "archive" in lower:
         return "archive"
     return "file"
+
+
+def _safe_attachment_filename(filename: str, *, fallback: str = "attachment.bin") -> str:
+    clean = Path(str(filename or "").strip()).name.strip()
+    clean = clean.replace("\x00", "")
+    return clean or fallback
+
+
+def _attachment_download_disposition(filename: str, mime_type: str) -> str:
+    safe_filename = _safe_attachment_filename(filename)
+    lower = str(mime_type or "").lower()
+    inline = (
+        lower.startswith("image/")
+        or lower.startswith("text/")
+        or lower == "application/pdf"
+    )
+    token = "inline" if inline else "attachment"
+    escaped = safe_filename.replace("\\", "_").replace('"', "'")
+    return f'{token}; filename="{escaped}"'
+
+
+def _attachment_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    attachment_id = int(row["id"])
+    mime_type = str(row["mime_type"] or "")
+    preview_url = f"/api/attachments/{attachment_id}/content" if mime_type.lower().startswith("image/") else ""
+    download_url = f"/api/attachments/{attachment_id}/content"
+    return {
+        "id": attachment_id,
+        "filename": _safe_attachment_filename(str(row["filename"] or "")),
+        "mime_type": mime_type,
+        "size": int(row["size"] or 0),
+        "relative_path": str(row["relative_path"] or ""),
+        "ingest_status": str(row["ingest_status"] or ""),
+        "extraction_method": str(row["extraction_method"] or ""),
+        "text_preview": str(row["extracted_text"] or "")[:320],
+        "kind_label": _attachment_kind_label(mime_type),
+        "preview_url": preview_url,
+        "download_url": download_url,
+    }
+
+
+def _attachment_rows_for_communication(connection: sqlite3.Connection, *, communication_id: int) -> list[sqlite3.Row]:
+    return store.list_communication_attachments(connection, communication_id=communication_id, limit=MAX_DRAFT_ATTACHMENT_COUNT * 4)
+
+
+def _sync_communication_attachments_json(connection: sqlite3.Connection, *, communication_id: int) -> list[dict[str, Any]]:
+    rows = _attachment_rows_for_communication(connection, communication_id=communication_id)
+    attachments_json = [
+        {
+            "id": int(row["id"]),
+            "filename": _safe_attachment_filename(str(row["filename"] or "")),
+            "mime_type": str(row["mime_type"] or ""),
+            "size": int(row["size"] or 0),
+            "relative_path": str(row["relative_path"] or ""),
+            "kind_label": _attachment_kind_label(str(row["mime_type"] or "")),
+        }
+        for row in rows
+    ]
+    connection.execute(
+        "UPDATE communications SET attachments_json = ? WHERE id = ?",
+        (json.dumps(attachments_json), int(communication_id)),
+    )
+    return attachments_json
+
+
+def _extract_attachment_text_from_bytes(*, raw_bytes: bytes, filename: str, mime_type: str) -> tuple[str, str]:
+    clean_filename = _safe_attachment_filename(filename)
+    suffix = Path(clean_filename).suffix or (mimetypes.guess_extension(str(mime_type or "")) or "")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="cmail-attachment-", suffix=suffix, delete=False) as handle:
+            handle.write(raw_bytes)
+            temp_path = Path(handle.name)
+        return extract_text_from_saved_attachment(temp_path, mime_type=str(mime_type or "application/octet-stream"))
+    except Exception:
+        return "", ""
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _assert_draft_attachment_capacity(connection: sqlite3.Connection, *, draft_id: int, incoming_count: int) -> None:
+    existing_count = len(_attachment_rows_for_communication(connection, communication_id=int(draft_id)))
+    if existing_count + max(0, int(incoming_count)) > MAX_DRAFT_ATTACHMENT_COUNT:
+        raise ValueError(f"draft attachments are limited to {MAX_DRAFT_ATTACHMENT_COUNT} files")
+
+
+def _store_draft_attachment_bytes(
+    connection: sqlite3.Connection,
+    *,
+    draft_id: int,
+    filename: str,
+    mime_type: str,
+    raw_bytes: bytes,
+) -> dict[str, Any]:
+    clean_filename = _safe_attachment_filename(filename)
+    if not raw_bytes:
+        raise ValueError(f"{clean_filename} is empty")
+    if len(raw_bytes) > MAX_DRAFT_ATTACHMENT_BYTES:
+        raise ValueError(f"{clean_filename} exceeds the {MAX_DRAFT_ATTACHMENT_BYTES // (1024 * 1024)} MB draft attachment limit")
+    effective_mime_type = str(mime_type or mimetypes.guess_type(clean_filename)[0] or "application/octet-stream").strip().lower()
+    sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    existing = connection.execute(
+        """
+        SELECT *
+        FROM communication_attachments
+        WHERE communication_id = ? AND source = 'cmail_draft' AND sha256 = ? AND filename = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(draft_id), sha256, clean_filename),
+    ).fetchone()
+    if existing is not None:
+        _sync_communication_attachments_json(connection, communication_id=int(draft_id))
+        connection.commit()
+        return _attachment_summary_from_row(existing)
+
+    token = sha256[:12]
+    relative_path, _ = mail_vault.write_encrypted_vault_file(
+        vault_root=store.attachment_vault_root(),
+        relative_dir=Path("cmail_draft") / f"communication-{int(draft_id)}" / token,
+        logical_filename=clean_filename,
+        raw_bytes=raw_bytes,
+        metadata={"source": "cmail_draft", "communication_id": int(draft_id), "filename": clean_filename},
+    )
+    extracted_text, extraction_method = _extract_attachment_text_from_bytes(
+        raw_bytes=raw_bytes,
+        filename=clean_filename,
+        mime_type=effective_mime_type,
+    )
+    attachment_id = store.upsert_communication_attachment(
+        connection,
+        external_key=f"cmail_draft:{int(draft_id)}:{sha256}:{clean_filename}",
+        communication_id=int(draft_id),
+        source="cmail_draft",
+        external_message_id=f"draft:{int(draft_id)}",
+        external_attachment_id=sha256,
+        part_id=token,
+        filename=clean_filename,
+        mime_type=effective_mime_type,
+        size=len(raw_bytes),
+        relative_path=str(relative_path),
+        extracted_text=extracted_text,
+        extracted_text_path="",
+        extraction_method=extraction_method,
+        ingest_status="stored",
+        error_text="",
+        sha256=sha256,
+    )
+    _sync_communication_attachments_json(connection, communication_id=int(draft_id))
+    connection.commit()
+    row = connection.execute(
+        "SELECT * FROM communication_attachments WHERE id = ?",
+        (int(attachment_id),),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"draft attachment {attachment_id} not found after save")
+    return _attachment_summary_from_row(row)
+
+
+def _store_draft_attachment_path(
+    connection: sqlite3.Connection,
+    *,
+    draft_id: int,
+    path_value: str | Path,
+) -> dict[str, Any]:
+    attachment_path = Path(str(path_value)).expanduser()
+    if not attachment_path.exists() or not attachment_path.is_file():
+        raise FileNotFoundError(f"attachment not found: {attachment_path}")
+    return _store_draft_attachment_bytes(
+        connection,
+        draft_id=int(draft_id),
+        filename=attachment_path.name,
+        mime_type=mimetypes.guess_type(str(attachment_path))[0] or "application/octet-stream",
+        raw_bytes=attachment_path.read_bytes(),
+    )
+
+
+def _draft_attachment_rows(connection: sqlite3.Connection, *, draft_id: int) -> list[sqlite3.Row]:
+    return _attachment_rows_for_communication(connection, communication_id=int(draft_id))
+
+
+def _draft_attachment_summaries(connection: sqlite3.Connection, *, draft_id: int) -> list[dict[str, Any]]:
+    return [_attachment_summary_from_row(row) for row in _draft_attachment_rows(connection, draft_id=int(draft_id))]
+
+
+def _add_draft_attachments(
+    connection: sqlite3.Connection,
+    *,
+    draft_id: int,
+    uploads: list[dict[str, Any]] | None = None,
+    attachment_paths: list[str | Path] | None = None,
+) -> list[dict[str, Any]]:
+    uploads = [item for item in (uploads or []) if isinstance(item, dict)]
+    attachment_paths = [item for item in (attachment_paths or []) if str(item or "").strip()]
+    if not uploads and not attachment_paths:
+        return _draft_attachment_summaries(connection, draft_id=int(draft_id))
+    _assert_draft_attachment_capacity(
+        connection,
+        draft_id=int(draft_id),
+        incoming_count=len(uploads) + len(attachment_paths),
+    )
+    for upload in uploads:
+        encoded = str(upload.get("content_base64") or "").strip()
+        if not encoded:
+            raise ValueError("draft attachment payload is missing content")
+        try:
+            raw_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("draft attachment payload is not valid base64") from exc
+        _store_draft_attachment_bytes(
+            connection,
+            draft_id=int(draft_id),
+            filename=str(upload.get("filename") or ""),
+            mime_type=str(upload.get("mime_type") or ""),
+            raw_bytes=raw_bytes,
+        )
+    for attachment_path in attachment_paths:
+        _store_draft_attachment_path(connection, draft_id=int(draft_id), path_value=attachment_path)
+    return _draft_attachment_summaries(connection, draft_id=int(draft_id))
+
+
+def _delete_draft_attachment(connection: sqlite3.Connection, *, draft_id: int, attachment_id: int) -> list[dict[str, Any]]:
+    row = connection.execute(
+        """
+        SELECT id, relative_path
+        FROM communication_attachments
+        WHERE id = ? AND communication_id = ? AND source = 'cmail_draft'
+        """,
+        (int(attachment_id), int(draft_id)),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"draft attachment {attachment_id} not found")
+    relative_path = str(row["relative_path"] or "")
+    connection.execute(
+        "DELETE FROM communication_attachments WHERE id = ?",
+        (int(attachment_id),),
+    )
+    _sync_communication_attachments_json(connection, communication_id=int(draft_id))
+    connection.commit()
+    if relative_path:
+        mail_vault.delete_encrypted_vault_file(
+            vault_root=store.attachment_vault_root(),
+            relative_path=relative_path,
+        )
+    return _draft_attachment_summaries(connection, draft_id=int(draft_id))
 
 
 def _reply_subject(subject: str) -> str:
@@ -3312,9 +3762,10 @@ def _address_field_values(value: str) -> list[str]:
     return formatted
 
 
-def _draft_summary(row: sqlite3.Row) -> dict[str, Any]:
+def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    draft_id = int(row["id"])
     return {
-        "id": int(row["id"]),
+        "id": draft_id,
         "subject": str(row["subject"] or ""),
         "label": _draft_label(str(row["subject"] or "")),
         "to": str(row["external_to"] or ""),
@@ -3326,6 +3777,7 @@ def _draft_summary(row: sqlite3.Row) -> dict[str, Any]:
         "in_reply_to": str(row["in_reply_to"] or ""),
         "references": _json_value(str(row["references_json"] or "[]"), []),
         "thread_key": str(row["thread_key"] or row["external_thread_id"] or ""),
+        "attachments": _draft_attachment_summaries(connection, draft_id=draft_id),
     }
 
 
@@ -3429,7 +3881,7 @@ def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         status="draft",
         limit=None,
     )
-    return [_draft_summary(row) for row in rows if str(row["status"] or "") != "deleted"]
+    return [_draft_summary(connection, row) for row in rows if str(row["status"] or "") != "deleted"]
 
 
 def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3442,6 +3894,11 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
     references = mail_metadata.message_id_tokens(payload.get("references") or [])
     thread_key = str(payload.get("thread_key") or "").strip()
     raw_body_text = str(payload.get("body_text") or "")
+    attachment_paths = [
+        str(item).strip()
+        for item in (payload.get("attachment_paths") or [])
+        if str(item).strip()
+    ]
     body_text = _compose_cmail_body_text(raw_body_text)
     html_body = _compose_cmail_html_body(raw_body_text)
     happened_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -3488,7 +3945,12 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
         row = store.get_communication_by_id(connection, draft_id)
         if row is None:
             raise KeyError(f"draft {draft_id} not found")
-        return _draft_summary(row)
+        if attachment_paths:
+            _add_draft_attachments(connection, draft_id=draft_id, attachment_paths=attachment_paths)
+            row = store.get_communication_by_id(connection, draft_id)
+            if row is None:
+                raise KeyError(f"draft {draft_id} not found")
+        return _draft_summary(connection, row)
 
     cursor = connection.execute(
         """
@@ -3528,7 +3990,12 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
     row = store.get_communication_by_id(connection, draft_communication_id)
     if row is None:
         raise KeyError("draft create failed")
-    return _draft_summary(row)
+    if attachment_paths:
+        _add_draft_attachments(connection, draft_id=draft_communication_id, attachment_paths=attachment_paths)
+        row = store.get_communication_by_id(connection, draft_communication_id)
+        if row is None:
+            raise KeyError("draft create failed")
+    return _draft_summary(connection, row)
 
 
 def list_cmail_drafts(*, db_path: Path) -> list[dict[str, Any]]:
@@ -3547,6 +4014,8 @@ def send_cmail_draft(
     draft_id: int,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
+    temp_attachment_dir: Path | None = None
+    temp_attachment_paths: list[Path] = []
     with store.open_db(db_path) as connection:
         row = store.get_communication_by_id(connection, int(draft_id))
         if row is None or str(row["source"] or "") != "cmail_draft":
@@ -3561,22 +4030,47 @@ def send_cmail_draft(
         bcc_values = _address_field_values(str(row["external_bcc"] or ""))
         if not to_values:
             raise ValueError("add a recipient first")
+        attachment_rows = _draft_attachment_rows(connection, draft_id=int(draft_id))
+        if attachment_rows:
+            temp_attachment_dir = Path(tempfile.mkdtemp(prefix="cmail-send-"))
+        for attachment in attachment_rows:
+            raw_bytes = mail_vault.read_encrypted_vault_file(
+                vault_root=store.attachment_vault_root(),
+                relative_path=str(attachment["relative_path"] or ""),
+            )
+            clean_filename = _safe_attachment_filename(str(attachment["filename"] or ""), fallback=f"attachment-{int(attachment['id'])}.bin")
+            if temp_attachment_dir is None:
+                temp_attachment_dir = Path(tempfile.mkdtemp(prefix="cmail-send-"))
+            temp_path = temp_attachment_dir / clean_filename
+            counter = 1
+            while temp_path.exists():
+                stem = Path(clean_filename).stem or f"attachment-{int(attachment['id'])}"
+                suffix = Path(clean_filename).suffix
+                temp_path = temp_attachment_dir / f"{stem}-{counter}{suffix}"
+                counter += 1
+            temp_path.write_bytes(raw_bytes)
+            temp_attachment_paths.append(temp_path)
 
-    delivery = resend_send_email(
-        to=to_values,
-        cc=cc_values,
-        bcc=bcc_values,
-        subject=subject,
-        text=body_text,
-        html=html_body,
-        in_reply_to=str(row["in_reply_to"] or ""),
-        references=_json_value(str(row["references_json"] or "[]"), []),
-        thread_key=str(row["thread_key"] or row["external_thread_id"] or ""),
-        journal_db_path=db_path,
-        config_path=config_path,
-        attempt_immediately=False,
-        apply_signature=False,
-    )
+    try:
+        delivery = resend_send_email(
+            to=to_values,
+            cc=cc_values,
+            bcc=bcc_values,
+            subject=subject,
+            text=body_text,
+            html=html_body,
+            in_reply_to=str(row["in_reply_to"] or ""),
+            references=_json_value(str(row["references_json"] or "[]"), []),
+            thread_key=str(row["thread_key"] or row["external_thread_id"] or ""),
+            attachment_paths=[str(path) for path in temp_attachment_paths],
+            journal_db_path=db_path,
+            config_path=config_path,
+            attempt_immediately=False,
+            apply_signature=False,
+        )
+    finally:
+        if temp_attachment_dir is not None:
+            shutil.rmtree(temp_attachment_dir, ignore_errors=True)
 
     with store.open_db(db_path) as connection:
         store.set_communication_status(
@@ -3656,23 +4150,10 @@ def _communication_detail(connection: Any, communication_id: int) -> dict[str, A
         source=str(row["source"] or ""),
     )
 
-    attachments = []
-    for attachment in store.list_communication_attachments(connection, communication_id=communication_id, limit=200):
-        mime_type = str(attachment["mime_type"] or "")
-        attachments.append(
-            {
-                "id": int(attachment["id"]),
-                "filename": str(attachment["filename"] or ""),
-                "mime_type": mime_type,
-                "size": int(attachment["size"] or 0),
-                "relative_path": str(attachment["relative_path"] or ""),
-                "ingest_status": str(attachment["ingest_status"] or ""),
-                "extraction_method": str(attachment["extraction_method"] or ""),
-                "text_preview": str(attachment["extracted_text"] or "")[:320],
-                "kind_label": _attachment_kind_label(mime_type),
-                "preview_url": f"/api/attachments/{int(attachment['id'])}/content" if mime_type.lower().startswith("image/") else "",
-            }
-        )
+    attachments = [
+        _attachment_summary_from_row(attachment)
+        for attachment in store.list_communication_attachments(connection, communication_id=communication_id, limit=200)
+    ]
 
     thread_key = str(row["thread_key"] or row["external_thread_id"] or row["message_id"] or "")
     thread_rows: list[dict[str, Any]] = []
@@ -3746,8 +4227,6 @@ def _read_attachment_content(connection: Any, attachment_id: int) -> tuple[bytes
         raise KeyError(f"attachment {attachment_id} not found")
     relative_path = str(row["relative_path"] or "")
     mime_type = str(row["mime_type"] or "application/octet-stream")
-    if not mime_type.lower().startswith("image/"):
-        raise ValueError("only image attachment previews are exposed in the minimal UI")
     raw_bytes = mail_vault.read_encrypted_vault_file(
         vault_root=store.attachment_vault_root(),
         relative_path=relative_path,
@@ -4511,10 +4990,12 @@ def _make_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_bytes(self, body: bytes, *, content_type: str) -> None:
+        def _send_bytes(self, body: bytes, *, content_type: str, content_disposition: str | None = None) -> None:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if content_disposition:
+                self.send_header("Content-Disposition", content_disposition)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
@@ -4602,6 +5083,12 @@ def _make_handler(
                 return
 
             if path.startswith("/api/drafts/") and path.endswith("/send"):
+                self._send_json({"error": "method_not_allowed"}, status_code=405)
+                return
+
+            if path.startswith("/api/drafts/") and (
+                path.endswith("/attachments") or path.endswith("/attachments/delete")
+            ):
                 self._send_json({"error": "method_not_allowed"}, status_code=405)
                 return
 
@@ -4805,18 +5292,26 @@ def _make_handler(
                     connection = snapshot_cache.get_connection()
                     try:
                         raw_bytes, mime_type = _read_attachment_content(connection, attachment_id)
+                        row = connection.execute(
+                            "SELECT filename FROM communication_attachments WHERE id = ?",
+                            (attachment_id,),
+                        ).fetchone()
                     finally:
                         connection.close()
                 except KeyError as exc:
                     self._send_json({"error": str(exc)}, status_code=404)
                     return
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=415)
-                    return
                 except TimeoutError as exc:
                     self._send_json({"error": str(exc)}, status_code=503)
                     return
-                self._send_bytes(raw_bytes, content_type=mime_type)
+                self._send_bytes(
+                    raw_bytes,
+                    content_type=mime_type,
+                    content_disposition=_attachment_download_disposition(
+                        str(row["filename"] or "") if row is not None else "attachment.bin",
+                        mime_type,
+                    ),
+                )
                 return
 
             self._send_json({"error": "not_found"}, status_code=404)
@@ -4940,6 +5435,74 @@ def _make_handler(
                     self._send_json({"error": str(exc)}, status_code=500)
                     return
                 self._send_json(result)
+                return
+
+            if path.startswith("/api/drafts/") and path.endswith("/attachments"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) != 4:
+                    self._send_json({"error": "invalid_draft_attachment_path"}, status_code=400)
+                    return
+                try:
+                    draft_id = int(parts[2])
+                except ValueError:
+                    self._send_json({"error": "invalid_draft_id"}, status_code=400)
+                    return
+                uploads = payload.get("attachments") or []
+                if not isinstance(uploads, list):
+                    self._send_json({"error": "attachments_must_be_a_list"}, status_code=400)
+                    return
+                try:
+                    with store.open_db(db_path) as connection:
+                        row = store.get_communication_by_id(connection, draft_id)
+                        if row is None or str(row["source"] or "") != "cmail_draft":
+                            raise KeyError(f"draft {draft_id} not found")
+                        _add_draft_attachments(connection, draft_id=draft_id, uploads=uploads)
+                        refreshed = store.get_communication_by_id(connection, draft_id)
+                        if refreshed is None:
+                            raise KeyError(f"draft {draft_id} not found")
+                        draft = _draft_summary(connection, refreshed)
+                    cached_drafts = _get_drafts_cache() or []
+                    next_drafts = [entry for entry in cached_drafts if int(entry.get("id") or 0) != int(draft.get("id") or 0)]
+                    next_drafts.append(draft)
+                    _set_drafts_cache(next_drafts)
+                except KeyError as exc:
+                    self._send_json({"error": str(exc)}, status_code=404)
+                    return
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                self._send_json({"draft": draft})
+                return
+
+            if path.startswith("/api/drafts/") and path.endswith("/attachments/delete"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) != 5:
+                    self._send_json({"error": "invalid_draft_attachment_delete_path"}, status_code=400)
+                    return
+                try:
+                    draft_id = int(parts[2])
+                    attachment_id = int(payload.get("attachment_id") or 0)
+                except ValueError:
+                    self._send_json({"error": "invalid_attachment_id"}, status_code=400)
+                    return
+                if not attachment_id:
+                    self._send_json({"error": "missing_attachment_id"}, status_code=400)
+                    return
+                try:
+                    with store.open_db(db_path) as connection:
+                        _delete_draft_attachment(connection, draft_id=draft_id, attachment_id=attachment_id)
+                        refreshed = store.get_communication_by_id(connection, draft_id)
+                        if refreshed is None:
+                            raise KeyError(f"draft {draft_id} not found")
+                        draft = _draft_summary(connection, refreshed)
+                    cached_drafts = _get_drafts_cache() or []
+                    next_drafts = [entry for entry in cached_drafts if int(entry.get("id") or 0) != int(draft.get("id") or 0)]
+                    next_drafts.append(draft)
+                    _set_drafts_cache(next_drafts)
+                except KeyError as exc:
+                    self._send_json({"error": str(exc)}, status_code=404)
+                    return
+                self._send_json({"draft": draft})
                 return
 
             self._send_json({"error": "not_found"}, status_code=404)

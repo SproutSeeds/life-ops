@@ -126,5 +126,12 @@ cmail restart
 cmail open
 ```
 
+Drafts can also be created from anywhere on the machine, including attachments:
+
+```bash
+cmail new-draft --to alex@example.com --subject "A note" --body-file ./note.txt --attach ./paper.pdf --format json
+cmail draft-save --id 74222 --attach ./figure.png --format json
+```
+
 This is intended for a self-hosted local mailbox running on your machine.
 The install flow bootstraps the bundled backend into your local Life Ops home before starting the service.

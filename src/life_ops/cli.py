@@ -490,6 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmail_draft_save_parser.add_argument("--subject", default="")
     cmail_draft_save_parser.add_argument("--body", default="")
     cmail_draft_save_parser.add_argument("--body-file", type=Path, default=None)
+    cmail_draft_save_parser.add_argument("--attach", action="append", default=[])
     cmail_draft_save_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     cmail_draft_send_parser = subparsers.add_parser(
@@ -2593,6 +2594,7 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
                 "bcc": args.bcc,
                 "subject": args.subject,
                 "body_text": body_text,
+                "attachment_paths": args.attach,
             },
         )
         if args.format == "json":
