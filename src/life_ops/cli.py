@@ -76,16 +76,21 @@ from life_ops.mail_ui import (
     DEFAULT_MAIL_UI_HOST,
     DEFAULT_MAIL_UI_LIMIT,
     DEFAULT_MAIL_UI_PORT,
+    get_cmail_draft_scaffold,
     list_cmail_drafts,
     save_cmail_draft,
     send_cmail_draft,
     serve_mail_ui,
 )
 from life_ops.cmail_runtime import (
+    DEFAULT_CMAIL_RUNTIME_SEAL_INTERVAL_SECONDS,
+    DEFAULT_CMAIL_RUNTIME_SEND_INTERVAL_SECONDS,
+    DEFAULT_CMAIL_RUNTIME_SYNC_INTERVAL_SECONDS,
     default_cmail_runtime_db_path,
     ensure_cmail_runtime_db,
     ensure_cmail_runtime_list_items,
     resolve_cmail_db_path,
+    run_cmail_health_check,
     seal_cmail_runtime_db,
     serve_cmail_service,
 )
@@ -459,9 +464,9 @@ def build_parser() -> argparse.ArgumentParser:
     cmail_serve_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
     cmail_serve_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
     cmail_serve_parser.add_argument("--limit", type=int, default=DEFAULT_MAIL_UI_LIMIT)
-    cmail_serve_parser.add_argument("--sync-interval", type=float, default=2.0)
-    cmail_serve_parser.add_argument("--send-interval", type=float, default=2.0)
-    cmail_serve_parser.add_argument("--seal-interval", type=float, default=30.0)
+    cmail_serve_parser.add_argument("--sync-interval", type=float, default=DEFAULT_CMAIL_RUNTIME_SYNC_INTERVAL_SECONDS)
+    cmail_serve_parser.add_argument("--send-interval", type=float, default=DEFAULT_CMAIL_RUNTIME_SEND_INTERVAL_SECONDS)
+    cmail_serve_parser.add_argument("--seal-interval", type=float, default=DEFAULT_CMAIL_RUNTIME_SEAL_INTERVAL_SECONDS)
 
     cmail_runtime_seal_parser = subparsers.add_parser(
         "cmail-runtime-seal",
@@ -470,6 +475,18 @@ def build_parser() -> argparse.ArgumentParser:
     cmail_runtime_seal_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
     cmail_runtime_seal_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
     cmail_runtime_seal_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    cmail_health_check_parser = subparsers.add_parser(
+        "cmail-health-check",
+        help="Audit the managed CMAIL runtime for queue drift, stale correspondence artifacts, and local service health.",
+    )
+    cmail_health_check_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_health_check_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
+    cmail_health_check_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
+    cmail_health_check_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
+    cmail_health_check_parser.add_argument("--repair", action="store_true")
+    cmail_health_check_parser.add_argument("--strict", action="store_true")
+    cmail_health_check_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     cmail_drafts_parser = subparsers.add_parser(
         "cmail-drafts",
@@ -491,6 +508,13 @@ def build_parser() -> argparse.ArgumentParser:
     cmail_draft_save_parser.add_argument("--body", default="")
     cmail_draft_save_parser.add_argument("--body-file", type=Path, default=None)
     cmail_draft_save_parser.add_argument("--attach", action="append", default=[])
+    cmail_draft_save_parser.add_argument("--reply-to-communication-id", type=int, default=0)
+    cmail_draft_save_parser.add_argument(
+        "--reply-scope",
+        choices=["reply", "reply_all"],
+        default="reply",
+        help="When reply-to-communication-id is set, derive the draft from the selected reply scaffold.",
+    )
     cmail_draft_save_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     cmail_draft_send_parser = subparsers.add_parser(
@@ -1005,6 +1029,42 @@ def _render_cmail_draft_saved_text(record: dict) -> str:
     ]
     if updated_at:
         lines.append(f"- updated: {updated_at}")
+    return "\n".join(lines)
+
+
+def _render_cmail_health_check_text(result: dict) -> str:
+    lines = [
+        "CMAIL health check",
+        f"- ok: {result.get('ok')}",
+        f"- runtime_db_path: {result.get('runtime_db_path')}",
+    ]
+    service_health = result.get("service_health") or {}
+    lines.append(f"- service_ok: {service_health.get('ok')}")
+    if service_health.get("url"):
+        lines.append(f"- service_url: {service_health.get('url')}")
+    if service_health.get("error"):
+        lines.append(f"- service_error: {service_health.get('error')}")
+    resend_after = result.get("resend_queue_after") or {}
+    lines.append(f"- resend_due_count: {resend_after.get('due_count')}")
+    lines.append(f"- resend_active_alerts: {resend_after.get('active_alert_count')}")
+    cleanup = result.get("cleanup") or {}
+    orphaned = cleanup.get("orphaned_resend_ids") or []
+    superseded = cleanup.get("superseded_draft_ids") or []
+    restored = cleanup.get("restored_draft_ids") or []
+    if orphaned:
+        lines.append(f"- cleaned_orphaned_resend_ids: {orphaned}")
+    if superseded:
+        lines.append(f"- cleaned_superseded_draft_ids: {superseded}")
+    if restored:
+        lines.append(f"- restored_draft_ids: {restored}")
+    backup = result.get("backup") or {}
+    if backup.get("last_external_backup_at"):
+        lines.append(f"- last_external_backup_at: {backup.get('last_external_backup_at')}")
+    lines.append(f"- backup_stale: {backup.get('stale')}")
+    for warning in result.get("warnings") or []:
+        lines.append(f"- warning: {warning}")
+    for action in result.get("actions") or []:
+        lines.append(f"- action: {action}")
     return "\n".join(lines)
 
 
@@ -2565,6 +2625,22 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
             return json.dumps(result, indent=2)
         return _render_sync_summary("CMAIL runtime sealed", result)
 
+    if command == "cmail-health-check":
+        result = run_cmail_health_check(
+            runtime_db_path=resolve_cmail_db_path(args.db),
+            canonical_db_path=args.canonical_db,
+            host=args.host,
+            port=args.port,
+            repair=bool(args.repair),
+        )
+        if bool(args.strict) and not bool(result.get("ok")):
+            if args.format == "json":
+                raise RuntimeError(json.dumps(result, indent=2))
+            raise RuntimeError(_render_cmail_health_check_text(result))
+        if args.format == "json":
+            return json.dumps(result, indent=2)
+        return _render_cmail_health_check_text(result)
+
     if command == "cmail-drafts":
         target_db_path = resolve_cmail_db_path(args.db)
         ensure_cmail_runtime_db(
@@ -2585,17 +2661,30 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
         body_text = args.body
         if args.body_file is not None:
             body_text = args.body_file.read_text()
+        payload = {
+            "id": args.id,
+            "to": args.to,
+            "cc": args.cc,
+            "bcc": args.bcc,
+            "subject": args.subject,
+            "body_text": body_text,
+            "attachment_paths": args.attach,
+        }
+        if int(args.reply_to_communication_id or 0) > 0:
+            scaffold = get_cmail_draft_scaffold(
+                db_path=target_db_path,
+                communication_id=int(args.reply_to_communication_id),
+                mode=str(args.reply_scope or "reply"),
+            )
+            payload["to"] = args.to or str(scaffold.get("to") or "")
+            payload["cc"] = args.cc or str(scaffold.get("cc") or "")
+            payload["subject"] = args.subject or str(scaffold.get("subject") or "")
+            payload["in_reply_to"] = str(scaffold.get("in_reply_to") or "")
+            payload["references"] = list(scaffold.get("references") or [])
+            payload["thread_key"] = str(scaffold.get("thread_key") or "")
         record = save_cmail_draft(
             db_path=target_db_path,
-            payload={
-                "id": args.id,
-                "to": args.to,
-                "cc": args.cc,
-                "bcc": args.bcc,
-                "subject": args.subject,
-                "body_text": body_text,
-                "attachment_paths": args.attach,
-            },
+            payload=payload,
         )
         if args.format == "json":
             return json.dumps(record, indent=2)
@@ -4029,7 +4118,6 @@ def run(args: argparse.Namespace) -> str:
 
 
 def main() -> None:
-    credentials.load_registered_secrets()
     parser = build_parser()
     args = parser.parse_args()
     try:

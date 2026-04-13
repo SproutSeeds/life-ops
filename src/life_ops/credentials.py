@@ -12,6 +12,9 @@ from typing import Any, Optional
 
 KEYCHAIN_SERVICE = "life-ops"
 INSECURE_FILE_BACKEND_ENV = "LIFE_OPS_ALLOW_INSECURE_FILE_SECRETS"
+LIFE_OPS_HOME_ENV = "LIFE_OPS_HOME"
+SERVICE_SECRETS_PATH_ENV = "LIFE_OPS_SERVICE_SECRETS_PATH"
+DEFAULT_SERVICE_SECRETS_FILENAME = "service-secrets.json"
 
 
 def credentials_root() -> Path:
@@ -20,6 +23,16 @@ def credentials_root() -> Path:
 
 def registry_path() -> Path:
     return credentials_root() / "keys.json"
+
+
+def default_service_secrets_path() -> Path:
+    override = str(os.getenv(SERVICE_SECRETS_PATH_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    life_ops_home = str(os.getenv(LIFE_OPS_HOME_ENV) or "").strip()
+    if life_ops_home:
+        return Path(life_ops_home).expanduser() / "config" / DEFAULT_SERVICE_SECRETS_FILENAME
+    return Path.home() / ".lifeops" / "config" / DEFAULT_SERVICE_SECRETS_FILENAME
 
 
 def _now_iso() -> str:
@@ -62,6 +75,25 @@ def _save_registry(registry: dict[str, dict[str, Any]], path: Optional[Path] = N
     except OSError:
         pass
     return target
+
+
+def _load_service_secrets(path: Optional[Path] = None) -> dict[str, str]:
+    target = path or default_service_secrets_path()
+    if not target.exists():
+        return {}
+    try:
+        raw = json.loads(target.read_text() or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    service_secrets: dict[str, str] = {}
+    for key, value in raw.items():
+        clean_key = str(key or "").strip()
+        clean_value = str(value or "").strip()
+        if clean_key and clean_value:
+            service_secrets[clean_key] = clean_value
+    return service_secrets
 
 
 def _has_macos_keychain() -> bool:
@@ -207,6 +239,10 @@ def resolve_secret(*, name: str, path: Optional[Path] = None) -> Optional[str]:
     if env_value:
         return env_value
 
+    service_value = _load_service_secrets().get(clean_name)
+    if service_value:
+        return service_value
+
     registry = _load_registry(path)
     entry = registry.get(clean_name)
     if not entry:
@@ -218,6 +254,50 @@ def resolve_secret(*, name: str, path: Optional[Path] = None) -> Optional[str]:
     if backend == "file":
         return str(entry.get("value") or "").strip() or None
     return None
+
+
+def export_secret_values(
+    *,
+    names: Optional[list[str]] = None,
+    path: Optional[Path] = None,
+) -> dict[str, Any]:
+    selected_names = [str(name).strip() for name in (names or []) if str(name).strip()]
+    available_names = selected_names or [row["name"] for row in list_secrets(path=path)]
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for name in available_names:
+        value = resolve_secret(name=name, path=path)
+        if value is None:
+            missing.append(name)
+            continue
+        values[name] = value
+    return {
+        "names": list(values.keys()),
+        "missing": missing,
+        "values": values,
+    }
+
+
+def write_service_secret_snapshot(
+    *,
+    names: Optional[list[str]] = None,
+    path: Optional[Path] = None,
+    target: Optional[Path] = None,
+) -> dict[str, Any]:
+    export = export_secret_values(names=names, path=path)
+    target_path = target or default_service_secrets_path()
+    _ensure_private_file(target_path)
+    target_path.write_text(json.dumps(export["values"], indent=2, sort_keys=True) + "\n")
+    try:
+        target_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    return {
+        "path": str(target_path),
+        "names": export["names"],
+        "missing": export["missing"],
+        "count": len(export["names"]),
+    }
 
 
 def load_registered_secrets(*, path: Optional[Path] = None, overwrite: bool = False) -> dict[str, str]:

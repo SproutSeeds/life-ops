@@ -75,7 +75,7 @@ function getHelpText() {
     "  lifeops init [dir] [--force]",
     "  lifeops agenda --input ./lifeops.items.json [--days 7] [--timezone America/Chicago] [--format text|json]",
     "  lifeops share --project ./lifeops.project.json --recipients ./lifeops.recipients.json [--sender-name Cody] [--base-time 2026-03-26T00:00:00.000Z] [--format text|json] [--output-dir ./out]",
-    "  lifeops cmail <status|start|stop|restart|install|tail|plist|url|open>",
+    "  lifeops cmail <status|start|stop|restart|install|tail|plist|url|open|audit>",
     "  lifeops version",
     "",
     "Notes:",
@@ -100,6 +100,7 @@ function getCmailHelpText() {
     "  cmail plist",
     "  cmail url",
     "  cmail open",
+    "  cmail audit [--repair] [--strict] [--format text|json]",
     "  cmail new-draft [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--attach ./file.pdf] [--format text|json]",
     "  cmail drafts [--format text|json]",
     "  cmail draft-save [--id 0] [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--attach ./file.pdf] [--format text|json]",
@@ -108,6 +109,7 @@ function getCmailHelpText() {
     "Notes:",
     "  CMAIL is the self-hosted mail surface for Life Ops.",
     "  It runs as a managed local service on http://127.0.0.1:4311.",
+    "  A scheduled watchdog audit runs morning, afternoon, and evening as a fail-safe.",
     "  `cmail install` bootstraps the bundled Python backend into a local user-owned environment.",
     "  You bring your own domain, Cloudflare/Resend accounts, and API keys.",
     "  Life Ops does not ship any FRG credentials or pay provider costs on your behalf.",
@@ -404,10 +406,10 @@ async function runCmailCommand({
     throw new Error(getMissingCmailBackendText());
   }
 
-  if (["status", "start", "stop", "restart", "install", "tail", "plist"].includes(subcommand)) {
+  if (["status", "start", "stop", "restart", "install", "tail", "plist", "audit"].includes(subcommand)) {
     return runner({
       command: "zsh",
-      args: ["./bin/cmail-service", subcommand],
+      args: ["./bin/cmail-service", subcommand, ...cmailArgv.slice(1)],
       cwd: packageDir,
       io,
     });

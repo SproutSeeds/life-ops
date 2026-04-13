@@ -2,18 +2,26 @@
 set -euo pipefail
 
 PACKAGE_DIR="${0:A:h:h}"
+SCRIPT_PATH="${0:A}"
 LABEL="${LIFE_OPS_CMAIL_LABEL:-com.frg.lifeops.cmail}"
+WATCHDOG_LABEL="${LABEL}.watchdog"
 STATE_ROOT="${LIFE_OPS_HOME:-${HOME}/.lifeops}"
+STATE_BIN_DIR="${STATE_ROOT}/bin"
 AGENT_DIR="${HOME}/Library/LaunchAgents"
 PLIST_PATH="${AGENT_DIR}/${LABEL}.plist"
+WATCHDOG_PLIST_PATH="${AGENT_DIR}/${WATCHDOG_LABEL}.plist"
 SERVICE_LOG_DIR="${HOME}/Library/Logs/life-ops"
 STDOUT_PATH="${SERVICE_LOG_DIR}/cmail-service.out.log"
 STDERR_PATH="${SERVICE_LOG_DIR}/cmail-service.err.log"
+WATCHDOG_STDOUT_PATH="${SERVICE_LOG_DIR}/cmail-watchdog.out.log"
+WATCHDOG_STDERR_PATH="${SERVICE_LOG_DIR}/cmail-watchdog.err.log"
+WATCHDOG_RUNNER_PATH="${STATE_BIN_DIR}/cmail-watchdog"
 UID_VALUE="$(id -u)"
-PYTHON_BIN="${LIFE_OPS_PYTHON_BIN:-$(command -v python3 || true)}"
+PYTHON_BIN="${LIFE_OPS_PYTHON_BIN:-}"
 VENV_DIR="${STATE_ROOT}/venvs/cmail"
 VENV_PYTHON="${VENV_DIR}/bin/python"
 BACKEND_DIR="${PACKAGE_DIR}/backend"
+SERVICE_SECRETS_PATH="${STATE_ROOT}/config/service-secrets.json"
 
 if [[ ! -f "${BACKEND_DIR}/pyproject.toml" ]]; then
   REPO_BACKEND_DIR="${PACKAGE_DIR:h:h}/src"
@@ -34,6 +42,7 @@ Commands:
   restart   Restart the installed service
   uninstall Stop the service and remove the LaunchAgent plist
   status    Show launchctl status for the service
+  audit     Run a one-off CMAIL health audit and repair drift when possible
   tail      Tail the service logs
   plist     Print the expected LaunchAgent plist path
 EOF
@@ -60,15 +69,73 @@ ensure_python() {
   fi
 }
 
+resolve_python_bin() {
+  local candidates=()
+  if [[ -n "${PYTHON_BIN}" ]]; then
+    candidates+=("${PYTHON_BIN}")
+  fi
+  candidates+=(
+    "${HOME}/.pyenv/shims/python3"
+    "/opt/homebrew/bin/python3"
+    "$(command -v python3 || true)"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 ensure_venv() {
   ensure_backend
+  PYTHON_BIN="$(resolve_python_bin || true)"
   ensure_python
   mkdir -p "${SERVICE_LOG_DIR}" "${STATE_ROOT}"
+  local rebuild_venv=0
   if [[ ! -x "${VENV_PYTHON}" ]]; then
+    rebuild_venv=1
+  else
+    local desired_version current_version
+    desired_version="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    current_version="$("${VENV_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if [[ "${desired_version}" != "${current_version}" ]]; then
+      rebuild_venv=1
+    fi
+  fi
+  if [[ "${rebuild_venv}" -eq 1 ]]; then
+    rm -rf "${VENV_DIR}"
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
   fi
   "${VENV_PYTHON}" -m pip install --upgrade pip setuptools wheel >/dev/null
-  "${VENV_PYTHON}" -m pip install --upgrade "${BACKEND_DIR}" >/dev/null
+  "${VENV_PYTHON}" -m pip install --upgrade --force-reinstall "${BACKEND_DIR}" >/dev/null
+}
+
+refresh_service_secrets() {
+  if [[ ! -x "${VENV_PYTHON}" ]]; then
+    echo "CMAIL backend environment not installed at ${VENV_PYTHON}. Run install first."
+    exit 1
+  fi
+  LIFE_OPS_HOME="${STATE_ROOT}" LIFE_OPS_SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}" \
+    "${VENV_PYTHON}" -c '
+from pathlib import Path
+from life_ops.cmail_runtime import write_cmail_service_secret_snapshot
+result = write_cmail_service_secret_snapshot(target=Path("'"${SERVICE_SECRETS_PATH}"'"))
+print(f"Secrets: {result['\''count'\'']} written to {result['\''path'\'']}")
+if result["missing"]:
+    print("Missing: " + ", ".join(result["missing"]))
+'
+}
+
+run_health_audit() {
+  if [[ ! -x "${VENV_PYTHON}" ]]; then
+    echo "CMAIL backend environment not installed at ${VENV_PYTHON}. Run install first."
+    exit 1
+  fi
+  LIFE_OPS_HOME="${STATE_ROOT}" LIFE_OPS_PACKAGE_ROOT="${BACKEND_DIR}" LIFE_OPS_SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}" \
+    "${VENV_PYTHON}" -m life_ops cmail-health-check --repair --format json "${@}"
 }
 
 render_plist() {
@@ -81,9 +148,10 @@ render_plist() {
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>LIFE_OPS_HOME='${STATE_ROOT}' LIFE_OPS_PACKAGE_ROOT='${BACKEND_DIR}' '${VENV_PYTHON}' -m life_ops cmail-serve</string>
+    <string>${VENV_PYTHON}</string>
+    <string>-m</string>
+    <string>life_ops</string>
+    <string>cmail-serve</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -95,6 +163,8 @@ render_plist() {
     <string>${STATE_ROOT}</string>
     <key>LIFE_OPS_PACKAGE_ROOT</key>
     <string>${BACKEND_DIR}</string>
+    <key>LIFE_OPS_SERVICE_SECRETS_PATH</key>
+    <string>${SERVICE_SECRETS_PATH}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -109,29 +179,161 @@ render_plist() {
 EOF
 }
 
+render_watchdog_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${WATCHDOG_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${WATCHDOG_RUNNER_PATH}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LIFE_OPS_HOME</key>
+    <string>${STATE_ROOT}</string>
+    <key>LIFE_OPS_PACKAGE_ROOT</key>
+    <string>${BACKEND_DIR}</string>
+    <key>LIFE_OPS_SERVICE_SECRETS_PATH</key>
+    <string>${SERVICE_SECRETS_PATH}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>8</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>14</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>20</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>${WATCHDOG_STDOUT_PATH}</string>
+  <key>StandardErrorPath</key>
+  <string>${WATCHDOG_STDERR_PATH}</string>
+</dict>
+</plist>
+EOF
+}
+
+render_watchdog_runner() {
+  cat <<EOF
+#!/bin/zsh
+set -euo pipefail
+
+LABEL="${LABEL}"
+PLIST_PATH="${PLIST_PATH}"
+UID_VALUE="\$(id -u)"
+STATE_ROOT="${STATE_ROOT}"
+BACKEND_DIR="${BACKEND_DIR}"
+SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}"
+VENV_PYTHON="${VENV_PYTHON}"
+
+refresh_service_secrets() {
+  LIFE_OPS_HOME="\${STATE_ROOT}" LIFE_OPS_SERVICE_SECRETS_PATH="\${SERVICE_SECRETS_PATH}" \\
+    "\${VENV_PYTHON}" -c '
+from pathlib import Path
+from life_ops.cmail_runtime import write_cmail_service_secret_snapshot
+write_cmail_service_secret_snapshot(target=Path("'"${SERVICE_SECRETS_PATH}"'"))
+'
+}
+
+run_health_audit() {
+  LIFE_OPS_HOME="\${STATE_ROOT}" LIFE_OPS_PACKAGE_ROOT="\${BACKEND_DIR}" LIFE_OPS_SERVICE_SECRETS_PATH="\${SERVICE_SECRETS_PATH}" \\
+    "\${VENV_PYTHON}" -m life_ops cmail-health-check --repair --strict --format json "\$@"
+}
+
+refresh_service_secrets
+if run_health_audit "\$@"; then
+  exit 0
+fi
+
+echo "[cmail-watchdog] health audit failed; restarting \${LABEL}" >&2
+if [[ ! -f "\${PLIST_PATH}" ]]; then
+  echo "[cmail-watchdog] main service plist missing at \${PLIST_PATH}" >&2
+  exit 1
+fi
+
+launchctl bootout "gui/\${UID_VALUE}" "\${PLIST_PATH}" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/\${UID_VALUE}" "\${PLIST_PATH}"
+launchctl kickstart -k "gui/\${UID_VALUE}/\${LABEL}" >/dev/null 2>&1 || true
+sleep 3
+run_health_audit "\$@"
+EOF
+}
+
+write_plist() {
+  mkdir -p "${AGENT_DIR}"
+  render_plist > "${PLIST_PATH}"
+}
+
+write_watchdog_plist() {
+  mkdir -p "${AGENT_DIR}"
+  render_watchdog_plist > "${WATCHDOG_PLIST_PATH}"
+}
+
+write_watchdog_runner() {
+  mkdir -p "${STATE_BIN_DIR}"
+  render_watchdog_runner > "${WATCHDOG_RUNNER_PATH}"
+  chmod +x "${WATCHDOG_RUNNER_PATH}"
+}
+
 command_name="${1:-status}"
 
 case "${command_name}" in
   install)
     ensure_venv
-    mkdir -p "${AGENT_DIR}"
-    render_plist > "${PLIST_PATH}"
+    refresh_service_secrets
+    write_plist
+    write_watchdog_runner
+    write_watchdog_plist
     launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}"
     launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Installed and started ${LABEL}."
     echo "Plist: ${PLIST_PATH}"
+    echo "Watchdog plist: ${WATCHDOG_PLIST_PATH}"
     echo "Home: ${STATE_ROOT}"
     echo "Backend: ${BACKEND_DIR}"
     echo "Python: ${VENV_PYTHON}"
+    echo "Service secrets: ${SERVICE_SECRETS_PATH}"
     ;;
   start)
     if [[ ! -f "${PLIST_PATH}" ]]; then
       echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
       exit 1
     fi
+    refresh_service_secrets
+    write_plist
+    write_watchdog_runner
+    write_watchdog_plist
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Started ${LABEL}."
     ;;
   stop)
@@ -140,6 +342,7 @@ case "${command_name}" in
       exit 0
     fi
     launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     echo "Stopped ${LABEL}."
     ;;
   restart)
@@ -147,32 +350,72 @@ case "${command_name}" in
       echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
       exit 1
     fi
+    refresh_service_secrets
+    write_plist
+    write_watchdog_runner
+    write_watchdog_plist
     launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}"
     launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Restarted ${LABEL}."
     ;;
   uninstall)
     launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     rm -f "${PLIST_PATH}"
+    rm -f "${WATCHDOG_PLIST_PATH}"
+    rm -f "${WATCHDOG_RUNNER_PATH}"
     echo "Uninstalled ${LABEL}."
     ;;
   status)
     echo "Label: ${LABEL}"
     echo "Plist: ${PLIST_PATH}"
+    echo "Watchdog label: ${WATCHDOG_LABEL}"
+    echo "Watchdog plist: ${WATCHDOG_PLIST_PATH}"
+    echo "Watchdog runner: ${WATCHDOG_RUNNER_PATH}"
     echo "Home: ${STATE_ROOT}"
     echo "Backend: ${BACKEND_DIR}"
     echo "Python: ${VENV_PYTHON}"
+    echo "Service secrets: ${SERVICE_SECRETS_PATH}"
     if [[ -f "${PLIST_PATH}" ]]; then
       launchctl print "gui/${UID_VALUE}/${LABEL}" 2>/dev/null || echo "launchctl: service not loaded"
     else
       echo "launchctl: plist not installed"
     fi
+    if [[ -f "${WATCHDOG_PLIST_PATH}" ]]; then
+      launchctl print "gui/${UID_VALUE}/${WATCHDOG_LABEL}" 2>/dev/null || echo "launchctl: watchdog not loaded"
+    else
+      echo "launchctl: watchdog plist not installed"
+    fi
+    ;;
+  audit)
+    refresh_service_secrets
+    run_health_audit "${@:2}"
+    ;;
+  watchdog-run)
+    refresh_service_secrets
+    if run_health_audit --strict "${@:2}"; then
+      exit 0
+    fi
+    echo "[cmail-watchdog] health audit failed; restarting ${LABEL}" >&2
+    if [[ ! -f "${PLIST_PATH}" ]]; then
+      echo "[cmail-watchdog] main service plist missing at ${PLIST_PATH}" >&2
+      exit 1
+    fi
+    write_plist
+    launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    sleep 3
+    run_health_audit --strict "${@:2}"
     ;;
   tail)
     mkdir -p "${SERVICE_LOG_DIR}"
-    touch "${STDOUT_PATH}" "${STDERR_PATH}"
-    exec tail -f "${STDOUT_PATH}" "${STDERR_PATH}"
+    touch "${STDOUT_PATH}" "${STDERR_PATH}" "${WATCHDOG_STDOUT_PATH}" "${WATCHDOG_STDERR_PATH}"
+    exec tail -f "${STDOUT_PATH}" "${STDERR_PATH}" "${WATCHDOG_STDOUT_PATH}" "${WATCHDOG_STDERR_PATH}"
     ;;
   plist)
     echo "${PLIST_PATH}"

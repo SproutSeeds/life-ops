@@ -9,7 +9,7 @@ LOG_DIR="${ROOT_DIR}/data/logs"
 SERVICE_LOG_DIR="${HOME}/Library/Logs/life-ops"
 STDOUT_PATH="${SERVICE_LOG_DIR}/cloudflare-mail-sync-service.out.log"
 STDERR_PATH="${SERVICE_LOG_DIR}/cloudflare-mail-sync-service.err.log"
-START_INTERVAL="${LIFE_OPS_CLOUDFLARE_SYNC_INTERVAL_SECONDS:-30}"
+START_INTERVAL="${LIFE_OPS_CLOUDFLARE_SYNC_INTERVAL_SECONDS:-300}"
 UID_VALUE="$(id -u)"
 
 mkdir -p "${LOG_DIR}"

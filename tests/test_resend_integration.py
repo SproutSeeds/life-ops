@@ -345,6 +345,40 @@ class ResendIntegrationTests(unittest.TestCase):
             json.loads(row["cc_json"]),
         )
 
+    def test_resend_send_email_suppresses_orphaned_row_when_queue_setup_fails(self) -> None:
+        self._write_config(token="resend-token")
+
+        with mock.patch(
+            "life_ops.resend_integration._queue_outbound_mail_artifacts",
+            side_effect=RuntimeError("artifact staging failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "artifact staging failed"):
+                resend_integration.resend_send_email(
+                    to=["friend@example.com"],
+                    subject="Hello",
+                    text="Test email",
+                    journal_db_path=self.db_path,
+                    config_path=self.config_path,
+                    attempt_immediately=False,
+                )
+
+        with store.open_db(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, status, deleted_at, notes
+                FROM communications
+                WHERE source = 'resend_email'
+                ORDER BY id DESC
+                """
+            ).fetchall()
+            queue_rows = store.list_mail_delivery_queue(connection, provider="resend", status="all", limit=20)
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual("deleted", str(rows[0]["status"] or ""))
+        self.assertTrue(str(rows[0]["deleted_at"] or ""))
+        self.assertIn("Suppressed orphaned outbound Resend artifact before queue creation", str(rows[0]["notes"] or ""))
+        self.assertEqual([], queue_rows)
+
     def test_resend_send_email_keeps_failed_delivery_queued_for_retry(self) -> None:
         self._write_config(token="resend-token")
 
@@ -416,6 +450,63 @@ class ResendIntegrationTests(unittest.TestCase):
         self.assertEqual("sent", queue_row["status"])
         self.assertEqual("email-processed", queue_row["provider_message_id"])
         self.assertEqual("sent", communication["status"])
+
+    def test_process_resend_delivery_queue_ignores_retained_sent_rows_when_loading_due_work(self) -> None:
+        self._write_config(token="resend-token")
+        queued_artifacts = {
+            "raw_relative_path": "resend_email/outbound.json",
+            "raw_sha256": "abc123",
+            "saved_attachment_ids": [],
+            "stored_attachments": [],
+        }
+        with mock.patch(
+            "life_ops.resend_integration._queue_outbound_mail_artifacts",
+            return_value=queued_artifacts,
+        ):
+            created = resend_integration.resend_send_email(
+                to=["friend@example.com"],
+                subject="Queue only",
+                text="Hello queue",
+                journal_db_path=self.db_path,
+                config_path=self.config_path,
+                attempt_immediately=False,
+            )
+
+        with store.open_db(self.db_path) as connection:
+            for index in range(30):
+                store.enqueue_mail_delivery(
+                    connection,
+                    queue_key=f"sent-filler-{index}",
+                    provider="resend",
+                    communication_id=int(created["communication_id"]),
+                    payload={},
+                    metadata={},
+                    status="sent",
+                    attempt_count=1,
+                    max_attempts=8,
+                    next_attempt_at=f"2026-01-01T00:00:{index:02d}Z",
+                    provider_message_id=f"sent-{index}",
+                )
+
+        with mock.patch(
+            "life_ops.resend_integration._resend_request_json",
+            return_value={"id": "email-processed"},
+        ), mock.patch(
+            "life_ops.resend_integration._save_delivery_receipt_manifest",
+            return_value={"raw_relative_path": "resend_email/delivery.json", "raw_sha256": "def456"},
+        ):
+            processed = resend_integration.process_resend_delivery_queue(
+                db_path=self.db_path,
+                config_path=self.config_path,
+                limit=25,
+            )
+
+        self.assertEqual(1, processed["processed_count"])
+        self.assertEqual(int(created["queue_id"]), int(processed["processed"][0]["queue_id"]))
+        with store.open_db(self.db_path) as connection:
+            queue_row = store.get_mail_delivery_queue_item(connection, queue_id=int(created["queue_id"]))
+        assert queue_row is not None
+        self.assertEqual("sent", queue_row["status"])
 
     def test_resend_queue_status_distinguishes_active_from_retained_rows(self) -> None:
         self._write_config(token="resend-token")

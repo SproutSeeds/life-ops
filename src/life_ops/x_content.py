@@ -393,14 +393,21 @@ def _generate_image_payload(
     raise ValueError("provider must be one of: openai, xai")
 
 
-def _relative_asset_path(*, asset_id: int, asset_title: str, content_item_id: Optional[int], output_format: str) -> Path:
+def _asset_output_paths(
+    *,
+    asset_id: int,
+    asset_title: str,
+    content_item_id: Optional[int],
+    output_format: str,
+) -> tuple[Path, Path]:
     extension = "jpg" if output_format == "jpeg" else output_format
+    base = store.life_ops_home()
     directory = store.x_media_root()
     if content_item_id is not None:
         directory = directory / f"content-{content_item_id}"
     filename = f"{asset_id}-{_slugify(asset_title)[:48]}.{extension}"
     absolute = directory / filename
-    return absolute.relative_to(store.repo_root())
+    return absolute, absolute.relative_to(base)
 
 
 def generate_x_media_asset(
@@ -477,13 +484,12 @@ def generate_x_media_asset(
         raise RuntimeError(f"{active_provider} image generation did not return a base64 image payload.")
 
     image_bytes = base64.b64decode(encoded_image)
-    relative_path = _relative_asset_path(
+    absolute_path, relative_path = _asset_output_paths(
         asset_id=asset_id,
         asset_title=str(asset["title"] or ""),
         content_item_id=int(asset["content_item_id"]) if asset["content_item_id"] is not None else None,
         output_format=resolved_output_format,
     )
-    absolute_path = store.repo_root() / relative_path
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
     absolute_path.write_bytes(image_bytes)
 

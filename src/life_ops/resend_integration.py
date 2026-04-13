@@ -578,13 +578,19 @@ def process_resend_delivery_queue(
                 if row is not None:
                     queue_rows.append(row)
         else:
-            queue_rows = store.list_mail_delivery_queue(
-                connection,
-                provider="resend",
-                status="all",
-                due_before=started_at,
-                limit=max(1, int(limit)),
-            )
+            queue_rows = connection.execute(
+                """
+                SELECT mail_delivery_queue.*, communications.subject, communications.external_to
+                FROM mail_delivery_queue
+                LEFT JOIN communications ON communications.id = mail_delivery_queue.communication_id
+                WHERE mail_delivery_queue.provider = ?
+                  AND mail_delivery_queue.status IN ('queued', 'retrying')
+                  AND mail_delivery_queue.next_attempt_at <= ?
+                ORDER BY mail_delivery_queue.next_attempt_at, mail_delivery_queue.id
+                LIMIT ?
+                """,
+                ("resend", started_at, max(1, int(limit))),
+            ).fetchall()
         eligible_rows = [
             row
             for row in queue_rows
@@ -901,50 +907,65 @@ def resend_send_email(
             raw_relative_path="",
             raw_sha256="",
         )
-        artifact_summary = _queue_outbound_mail_artifacts(
-            connection=connection,
-            communication_id=communication_id,
-            queue_key=queue_key,
-            payload_snapshot={
-                "provider": "resend",
-                "queued_at": _utc_now_string(),
-                "request": {
-                    key: value
-                    for key, value in payload.items()
-                    if key != "attachments"
+        try:
+            artifact_summary = _queue_outbound_mail_artifacts(
+                connection=connection,
+                communication_id=communication_id,
+                queue_key=queue_key,
+                payload_snapshot={
+                    "provider": "resend",
+                    "queued_at": _utc_now_string(),
+                    "request": {
+                        key: value
+                        for key, value in payload.items()
+                        if key != "attachments"
+                    },
                 },
-            },
-            attachment_specs=attachment_specs,
-        )
-        connection.execute(
-            "UPDATE communications SET raw_relative_path = ?, raw_sha256 = ? WHERE id = ?",
-            (
-                artifact_summary["raw_relative_path"],
-                artifact_summary["raw_sha256"],
-                communication_id,
-            ),
-        )
-        queue_id = store.enqueue_mail_delivery(
-            connection,
-            queue_key=queue_key,
-            provider="resend",
-            communication_id=communication_id,
-            payload={
-                "queued_at": _utc_now_string(),
-                "request": {
-                    key: value
-                    for key, value in payload.items()
-                    if key != "attachments"
+                attachment_specs=attachment_specs,
+            )
+            connection.execute(
+                "UPDATE communications SET raw_relative_path = ?, raw_sha256 = ? WHERE id = ?",
+                (
+                    artifact_summary["raw_relative_path"],
+                    artifact_summary["raw_sha256"],
+                    communication_id,
+                ),
+            )
+            queue_id = store.enqueue_mail_delivery(
+                connection,
+                queue_key=queue_key,
+                provider="resend",
+                communication_id=communication_id,
+                payload={
+                    "queued_at": _utc_now_string(),
+                    "request": {
+                        key: value
+                        for key, value in payload.items()
+                        if key != "attachments"
+                    },
+                    "stored_attachments": artifact_summary["stored_attachments"],
                 },
-                "stored_attachments": artifact_summary["stored_attachments"],
-            },
-            metadata={"thread_key": derived_thread_key, "message_id": outbound_message_id},
-            status="queued",
-            attempt_count=0,
-            max_attempts=max(1, int(max_attempts)),
-            next_attempt_at=_utc_now_string(),
-        )
-        connection.commit()
+                metadata={"thread_key": derived_thread_key, "message_id": outbound_message_id},
+                status="queued",
+                attempt_count=0,
+                max_attempts=max(1, int(max_attempts)),
+                next_attempt_at=_utc_now_string(),
+            )
+            connection.commit()
+        except Exception as exc:
+            note = f"Suppressed orphaned outbound Resend artifact before queue creation: {exc}"
+            connection.execute(
+                """
+                UPDATE communications
+                SET status = 'deleted',
+                    deleted_at = ?,
+                    notes = ?
+                WHERE id = ?
+                """,
+                (_utc_now_string(), note, communication_id),
+            )
+            connection.commit()
+            raise
 
     delivery_result: dict[str, Any] = {
         "queued": True,

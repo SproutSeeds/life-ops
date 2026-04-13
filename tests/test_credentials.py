@@ -16,6 +16,7 @@ class CredentialsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.registry_path = Path(self.temp_dir.name) / "keys.json"
+        self.service_secrets_path = Path(self.temp_dir.name) / "service-secrets.json"
         self.original_env = dict(os.environ)
 
     def tearDown(self) -> None:
@@ -76,6 +77,33 @@ class CredentialsTests(unittest.TestCase):
                     backend="auto",
                     path=self.registry_path,
                 )
+
+    def test_write_service_secret_snapshot_persists_resolved_values(self) -> None:
+        credentials.set_secret(
+            name="OPENAI_API_KEY",
+            value="sk-test-service",
+            backend="file",
+            path=self.registry_path,
+            allow_insecure_file_backend=True,
+        )
+
+        snapshot = credentials.write_service_secret_snapshot(
+            names=["OPENAI_API_KEY"],
+            path=self.registry_path,
+            target=self.service_secrets_path,
+        )
+
+        self.assertEqual(["OPENAI_API_KEY"], snapshot["names"])
+        self.assertTrue(self.service_secrets_path.exists())
+        self.assertEqual("sk-test-service", credentials.resolve_secret(name="OPENAI_API_KEY", path=self.registry_path))
+
+    def test_resolve_secret_uses_service_snapshot_before_registry(self) -> None:
+        self.service_secrets_path.write_text('{"OPENAI_API_KEY":"sk-from-service"}\n')
+        os.environ[credentials.SERVICE_SECRETS_PATH_ENV] = str(self.service_secrets_path)
+
+        resolved = credentials.resolve_secret(name="OPENAI_API_KEY", path=self.registry_path)
+
+        self.assertEqual("sk-from-service", resolved)
 
 
 if __name__ == "__main__":

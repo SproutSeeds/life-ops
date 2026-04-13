@@ -490,6 +490,7 @@ def write_db_bytes(db_path: Path, plaintext: bytes) -> Path:
         _write_text_atomic(manifest_path, json.dumps(payload, indent=2) + "\n")
         remove_plaintext_db_artifacts(db_path)
         return manifest_path
+    remove_plaintext_db_artifacts(db_path)
     db_path.write_bytes(plaintext)
     return db_path
 
@@ -628,11 +629,11 @@ def attachment_filename_is_low_signal(filename: str) -> bool:
 
 def _configure_connection(connection: sqlite3.Connection, *, encrypted_storage: bool) -> None:
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
     if encrypted_storage:
         connection.execute("PRAGMA journal_mode = MEMORY")
     else:
         connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA busy_timeout = 30000")
     connection.execute("PRAGMA foreign_keys = ON")
 
 

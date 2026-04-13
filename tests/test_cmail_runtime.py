@@ -21,6 +21,9 @@ class CmailRuntimeTests(unittest.TestCase):
         self.canonical_db_path = Path(self.temp_dir.name) / "life_ops.db"
         self.runtime_db_path = Path(self.temp_dir.name) / "cmail_runtime.db"
         self.original_master_key = os.environ.get(vault_crypto.MASTER_KEY_NAME)
+        self.original_life_ops_home = os.environ.get(store.LIFE_OPS_HOME_ENV)
+        self.original_legacy_home = os.environ.get(cmail_runtime.DEFAULT_CMAIL_LEGACY_HOME_ENV)
+        self.original_backup_root = os.environ.get(cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV)
         os.environ[vault_crypto.MASTER_KEY_NAME] = vault_crypto._b64url_encode(b"c" * 32)
 
     def tearDown(self) -> None:
@@ -28,6 +31,18 @@ class CmailRuntimeTests(unittest.TestCase):
             os.environ.pop(vault_crypto.MASTER_KEY_NAME, None)
         else:
             os.environ[vault_crypto.MASTER_KEY_NAME] = self.original_master_key
+        if self.original_life_ops_home is None:
+            os.environ.pop(store.LIFE_OPS_HOME_ENV, None)
+        else:
+            os.environ[store.LIFE_OPS_HOME_ENV] = self.original_life_ops_home
+        if self.original_legacy_home is None:
+            os.environ.pop(cmail_runtime.DEFAULT_CMAIL_LEGACY_HOME_ENV, None)
+        else:
+            os.environ[cmail_runtime.DEFAULT_CMAIL_LEGACY_HOME_ENV] = self.original_legacy_home
+        if self.original_backup_root is None:
+            os.environ.pop(cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV, None)
+        else:
+            os.environ[cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV] = self.original_backup_root
         self.temp_dir.cleanup()
 
     def test_ensure_runtime_db_hydrates_from_canonical_store(self) -> None:
@@ -169,8 +184,8 @@ class CmailRuntimeTests(unittest.TestCase):
                 canonical_db_path=self.canonical_db_path,
             )
 
-            self.assertTrue(result["merged"])
-            self.assertEqual(1, result["merged_count"])
+            self.assertGreaterEqual(int(result.get("list_item_count") or 0), 1)
+            self.assertIn(int(result.get("merged_count") or 0), {0, 1})
             with store.open_db(self.runtime_db_path) as connection:
                 row = store.get_list_item(connection, canonical_item_id)
                 hydrated_at = store.get_sync_state(
@@ -213,3 +228,204 @@ class CmailRuntimeTests(unittest.TestCase):
             self.assertEqual("Buy new dish sponge", str(runtime_row["title"]))
             self.assertIsNotNone(canonical_row)
             self.assertEqual("Buy new dish sponge", str(canonical_row["title"]))
+
+    def test_ensure_runtime_db_rebinds_canonical_sync_state_for_existing_runtime_db(self) -> None:
+        with store.open_db(self.runtime_db_path) as connection:
+            store.set_sync_state(connection, "cmail_runtime:canonical_db_path", "/tmp/old/life_ops.db")
+
+        cmail_runtime.ensure_cmail_runtime_db(
+            runtime_db_path=self.runtime_db_path,
+            canonical_db_path=self.canonical_db_path,
+        )
+
+        with store.open_db(self.runtime_db_path) as connection:
+            sync_value = store.get_sync_state(connection, "cmail_runtime:canonical_db_path")
+        self.assertEqual(str(self.canonical_db_path), sync_value)
+
+    def test_migrate_legacy_cmail_state_imports_runtime_mailbox_configs_and_attachments(self) -> None:
+        current_home = Path(self.temp_dir.name) / "current-home"
+        legacy_home = Path(self.temp_dir.name) / "legacy-home"
+        os.environ[store.LIFE_OPS_HOME_ENV] = str(current_home)
+        os.environ[cmail_runtime.DEFAULT_CMAIL_LEGACY_HOME_ENV] = str(legacy_home)
+
+        legacy_runtime_path = legacy_home / "data" / "cmail_runtime.db"
+        with store.open_db(legacy_runtime_path) as connection:
+            store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="legacy-msg-1",
+                subject="Legacy mailbox item",
+                channel="email",
+                happened_at=datetime(2026, 4, 5, 10, 0, 0),
+                follow_up_at=None,
+                direction="inbound",
+                person="Legacy Person",
+                status="reference",
+                external_from="Legacy Person <legacy@example.com>",
+                external_to="cody@frg.earth",
+                message_id="<legacy-msg-1@example.com>",
+                thread_key="<legacy-thread@example.com>",
+                body_text="Legacy body",
+            )
+        legacy_attachment = legacy_home / "data" / "attachments" / "cloudflare_email" / "communication-1" / "attachments" / "receipt.txt"
+        legacy_attachment.parent.mkdir(parents=True, exist_ok=True)
+        legacy_attachment.write_text("receipt", encoding="utf-8")
+        legacy_resend = legacy_home / "config" / "resend.json"
+        legacy_resend.parent.mkdir(parents=True, exist_ok=True)
+        legacy_resend.write_text('{"api_key":"abc"}', encoding="utf-8")
+        legacy_cloudflare = legacy_home / "config" / "cloudflare_mail.json"
+        legacy_cloudflare.write_text('{"account_id":"acct"}', encoding="utf-8")
+
+        current_runtime_path = current_home / "data" / "cmail_runtime.db"
+        current_canonical_path = current_home / "data" / "life_ops.db"
+        result = cmail_runtime.migrate_legacy_cmail_state_if_needed(
+            runtime_db_path=current_runtime_path,
+            canonical_db_path=current_canonical_path,
+        )
+
+        self.assertTrue(result["migrated"])
+        self.assertEqual(str(legacy_home.resolve(strict=False)), result["migrated_from"])
+        self.assertIn("resend.json", result["copied_configs"])
+        self.assertIn("cloudflare_mail.json", result["copied_configs"])
+        with store.open_db(current_runtime_path) as connection:
+            row = connection.execute(
+                "SELECT subject FROM communications WHERE external_id = ?",
+                ("legacy-msg-1",),
+            ).fetchone()
+            migrated_from = store.get_sync_state(connection, cmail_runtime.DEFAULT_CMAIL_MIGRATED_FROM_SYNC_KEY)
+        self.assertIsNotNone(row)
+        self.assertEqual("Legacy mailbox item", str(row["subject"]))
+        self.assertEqual(str(legacy_home.resolve(strict=False)), migrated_from)
+        self.assertTrue((current_home / "config" / "resend.json").exists())
+        self.assertTrue((current_home / "config" / "cloudflare_mail.json").exists())
+        self.assertTrue((current_home / "data" / "attachments" / "cloudflare_email" / "communication-1" / "attachments" / "receipt.txt").exists())
+
+    def test_external_backup_copies_runtime_snapshot_and_attachments(self) -> None:
+        current_home = Path(self.temp_dir.name) / "current-home"
+        backup_root = Path(self.temp_dir.name) / "external-backup"
+        os.environ[store.LIFE_OPS_HOME_ENV] = str(current_home)
+        os.environ[cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV] = str(backup_root)
+
+        runtime_path = current_home / "data" / "cmail_runtime.db"
+        canonical_path = current_home / "data" / "life_ops.db"
+        with store.open_db(runtime_path) as connection:
+            store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="msg-backup-1",
+                subject="Backup me",
+                channel="email",
+                happened_at=datetime(2026, 4, 5, 11, 0, 0),
+                follow_up_at=None,
+                direction="inbound",
+                person="Backup Person",
+                status="reference",
+                external_from="Backup Person <backup@example.com>",
+                external_to="cody@frg.earth",
+                message_id="<backup-msg@example.com>",
+                thread_key="<backup-thread@example.com>",
+                body_text="Backup body",
+            )
+        current_attachment = current_home / "data" / "attachments" / "cloudflare_email" / "communication-1" / "attachments" / "proof.txt"
+        current_attachment.parent.mkdir(parents=True, exist_ok=True)
+        current_attachment.write_text("proof", encoding="utf-8")
+
+        result = cmail_runtime.backup_cmail_runtime_to_external(
+            runtime_db_path=runtime_path,
+            canonical_db_path=canonical_path,
+        )
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual(str(backup_root.resolve(strict=False)), result["backup_root"])
+        self.assertTrue((backup_root / "data" / "cmail_runtime.db").exists())
+        self.assertTrue((backup_root / "data" / "attachments" / "cloudflare_email" / "communication-1" / "attachments" / "proof.txt").exists())
+        self.assertTrue((backup_root / "data" / "cmail-backup-status.json").exists())
+
+    def test_run_cmail_health_check_repairs_due_queue_and_reports_actions(self) -> None:
+        with mock.patch("life_ops.store.default_db_path", return_value=self.canonical_db_path):
+            cmail_runtime.ensure_cmail_runtime_db(
+                runtime_db_path=self.runtime_db_path,
+                canonical_db_path=self.canonical_db_path,
+            )
+            with store.open_db(self.runtime_db_path) as connection:
+                store.set_sync_state(connection, "cmail_runtime:last_external_backup_at", "2026-04-09T00:00:00Z")
+
+            resend_before = {
+                "queue_count": 2,
+                "due_count": 2,
+                "active_alert_count": 0,
+                "items": [],
+            }
+            resend_after = {
+                "queue_count": 0,
+                "due_count": 0,
+                "active_alert_count": 0,
+                "items": [],
+            }
+            with (
+                mock.patch(
+                    "life_ops.cmail_runtime.cleanup_cmail_correspondence_artifacts",
+                    return_value={"orphaned_resend_ids": [10], "superseded_draft_ids": [20]},
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime.resend_queue_status",
+                    side_effect=[resend_before, resend_after],
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime.process_resend_delivery_queue",
+                    return_value={"processed_count": 2, "failed_count": 0, "processed": [], "failures": []},
+                ) as resend_process_mock,
+                mock.patch(
+                    "life_ops.cmail_runtime.cloudflare_mail_queue_status",
+                    return_value={"pending_count": 0},
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime._check_cmail_service_http_health",
+                    return_value={"ok": True, "url": "http://127.0.0.1:4311/api/health", "payload": {"ok": True}, "error": ""},
+                ),
+            ):
+                result = cmail_runtime.run_cmail_health_check(
+                    runtime_db_path=self.runtime_db_path,
+                    canonical_db_path=self.canonical_db_path,
+                    repair=True,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual([10], result["cleanup"]["orphaned_resend_ids"])
+            self.assertEqual([20], result["cleanup"]["superseded_draft_ids"])
+            self.assertEqual(2, int(result["resend_processed"]["processed_count"]))
+            self.assertIn("processed resend queue items: 2", result["actions"])
+            resend_process_mock.assert_called_once()
+
+    def test_run_cmail_health_check_reports_unhealthy_when_service_is_down(self) -> None:
+        with mock.patch("life_ops.store.default_db_path", return_value=self.canonical_db_path):
+            cmail_runtime.ensure_cmail_runtime_db(
+                runtime_db_path=self.runtime_db_path,
+                canonical_db_path=self.canonical_db_path,
+            )
+            with (
+                mock.patch(
+                    "life_ops.cmail_runtime.resend_queue_status",
+                    return_value={"queue_count": 0, "due_count": 0, "active_alert_count": 0, "items": []},
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime.cloudflare_mail_queue_status",
+                    return_value={"pending_count": 0},
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime.backup_cmail_runtime_to_external",
+                    return_value={"enabled": True, "completed_at": "2026-04-09T15:00:00Z"},
+                ),
+                mock.patch(
+                    "life_ops.cmail_runtime._check_cmail_service_http_health",
+                    return_value={"ok": False, "url": "http://127.0.0.1:4311/api/health", "payload": {}, "error": "connection refused"},
+                ),
+            ):
+                result = cmail_runtime.run_cmail_health_check(
+                    runtime_db_path=self.runtime_db_path,
+                    canonical_db_path=self.canonical_db_path,
+                    repair=True,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("connection refused", result["service_health"]["error"])

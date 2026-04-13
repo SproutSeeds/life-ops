@@ -45,10 +45,56 @@ _SUBJECT_PREFIX_RE = re.compile(r"^(?:(?:re|fwd?|aw|sv)\s*:\s*)+", re.IGNORECASE
 _QUOTED_REPLY_HEADER_RE = re.compile(r"(?P<header>\bOn [^\n]{0,500}? wrote:)", re.IGNORECASE)
 _SIGNATURE_TAIL_RE = re.compile(r"(?:\s|^)--\s+[^\n]+$", re.DOTALL)
 _GMAIL_QUOTE_RE = re.compile(r"""<div\b[^>]*\bclass\s*=\s*(["'])[^"']*\bgmail_quote\b[^"']*\1[^>]*>""", re.IGNORECASE)
-_CMAIL_SIGNATURE_TEXT = "Best,\n\nCody Mitchell\nFractal Research Group\nhttps://frg.earth\ncody@frg.earth"
+_PLAIN_TEXT_URL_RE = re.compile(r"(?P<url>\bhttps?://[^\s<>'\"]+|\bmailto:[^\s<>'\"]+|\bwww\.[^\s<>'\"]+)", re.IGNORECASE)
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}"
+_CMAIL_SIGNATURE_TEXT = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group\n"
+    "https://frg.earth\n"
+    "https://www.npmjs.com/~sproutseeds\n"
+    "https://github.com/SproutSeeds\n"
+    "cody@frg.earth"
+)
+_CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_SPACED = "Best,\n\nCody Mitchell\nFractal Research Group\nhttps://frg.earth\ncody@frg.earth"
+_CMAIL_LEGACY_SIGNATURE_TEXT_SPACED = "Best,\n\nCody Mitchell\nFractal Research Group\ncody@frg.earth"
 _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE = "Best,\nCody Mitchell\nFractal Research Group\nhttps://frg.earth\ncody@frg.earth"
 _CMAIL_LEGACY_SIGNATURE_TEXT = "Best,\nCody Mitchell\nFractal Research Group\ncody@frg.earth"
-_CMAIL_SIGNATURE_HTML = """
+_CMAIL_KNOWN_SIGNATURE_TEXTS = (
+    _CMAIL_SIGNATURE_TEXT,
+    _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_SPACED,
+    _CMAIL_LEGACY_SIGNATURE_TEXT_SPACED,
+    _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE,
+    _CMAIL_LEGACY_SIGNATURE_TEXT,
+)
+_CMAIL_SIGNATURE_EMAIL_HTML = """
+<div style="margin-top:24px;">
+  <p style="margin:0 0 24px 0; color:#111111; font:500 15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">Best,</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="padding:0 14px 0 0; vertical-align:top;">
+        <img
+          src="https://frg.earth/branding/frg-bimi-iris-floating.png"
+          alt="Fractal Research Group iris mark"
+          width="44"
+          height="44"
+          style="display:block; width:44px; height:44px; border:0;"
+        >
+      </td>
+      <td style="vertical-align:top; color:#111111; font:500 14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
+        <div style="font-weight:700;">Cody Mitchell</div>
+        <div>Fractal Research Group</div>
+        <div><a href="https://frg.earth" style="color:#1155cc; text-decoration:none;">frg.earth</a></div>
+        <div><a href="https://www.npmjs.com/~sproutseeds" style="color:#1155cc; text-decoration:none;">npmjs.com/~sproutseeds</a></div>
+        <div><a href="https://github.com/SproutSeeds" style="color:#1155cc; text-decoration:none;">github.com/SproutSeeds</a></div>
+        <div><a href="mailto:cody@frg.earth" style="color:#111111; text-decoration:none;">cody@frg.earth</a></div>
+      </td>
+    </tr>
+  </table>
+</div>
+""".strip()
+
+_CMAIL_SIGNATURE_PREVIEW_HTML = """
 <div style="margin-top:24px;">
   <p style="margin:0 0 24px 0; color:#edf2eb; font:500 15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">Best,</p>
   <table role="presentation" cellpadding="0" cellspacing="0" border="0">
@@ -66,6 +112,8 @@ _CMAIL_SIGNATURE_HTML = """
         <div style="font-weight:700;">Cody Mitchell</div>
         <div>Fractal Research Group</div>
         <div><a href="https://frg.earth" style="color:#b8ff4d; text-decoration:none;">frg.earth</a></div>
+        <div><a href="https://www.npmjs.com/~sproutseeds" style="color:#b8ff4d; text-decoration:none;">npmjs.com/~sproutseeds</a></div>
+        <div><a href="https://github.com/SproutSeeds" style="color:#b8ff4d; text-decoration:none;">github.com/SproutSeeds</a></div>
         <div><a href="mailto:cody@frg.earth" style="color:#edf2eb; text-decoration:none;">cody@frg.earth</a></div>
       </td>
     </tr>
@@ -526,10 +574,28 @@ _HTML = """<!doctype html>
       background: var(--accent-soft);
     }
     .thread:hover { background: rgba(255,255,255,0.03); }
+    .thread-main {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
     .thread .subject {
       font-size: 16px;
       font-weight: 650;
       line-height: 1.35;
+    }
+    .unread-orb {
+      width: 8px;
+      height: 8px;
+      min-width: 8px;
+      border-radius: 999px;
+      background: rgba(246, 248, 244, 0.96);
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+      flex: 0 0 auto;
+    }
+    .unread-orb.hidden {
+      display: none;
     }
     .delete-button {
       appearance: none;
@@ -1164,15 +1230,16 @@ _HTML = """<!doctype html>
     const CORRESPONDENCE_QUERY_STORAGE_KEY = "lifeops.mail.correspondenceQuery";
     const SELECTED_DRAFT_STORAGE_KEY = "lifeops.mail.selectedDraft";
     const EXPANDED_QUOTED_MESSAGES_STORAGE_KEY = "lifeops.mail.expandedQuotedMessages";
+    const VIEWED_MESSAGE_IDS_STORAGE_KEY = "lifeops.mail.viewedMessageIds";
+    const VIEWED_MESSAGE_IDS_SEEDED_STORAGE_KEY = "lifeops.mail.viewedMessageIdsSeeded";
     const PENDING_DELETE_CONTACTS_STORAGE_KEY = "lifeops.mail.pendingDeletedContacts";
     const PENDING_DELETE_MESSAGES_STORAGE_KEY = "lifeops.mail.pendingDeletedMessages";
     const DELETE_QUEUE_STORAGE_KEY = "lifeops.mail.deleteQueue";
     const DRAFT_SAVE_QUEUE_STORAGE_KEY = "lifeops.mail.draftSaveQueue";
     const SERVER_BOOTSTRAP_OVERVIEW = __INITIAL_OVERVIEW_JSON__;
     const CMAIL_SIGNATURE_TEXT = __CMAIL_SIGNATURE_TEXT_JSON__;
-    const CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE = __CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_JSON__;
-    const CMAIL_LEGACY_SIGNATURE_TEXT = __CMAIL_LEGACY_SIGNATURE_TEXT_JSON__;
-    const CMAIL_SIGNATURE_HTML = __CMAIL_SIGNATURE_HTML_JSON__;
+    const CMAIL_KNOWN_SIGNATURE_TEXTS = __CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__;
+    const CMAIL_SIGNATURE_PREVIEW_HTML = __CMAIL_SIGNATURE_PREVIEW_HTML_JSON__;
     const CORRESPONDENCE_SOURCE = "correspondence";
 
     function loadStoredSet(storageKey) {
@@ -1239,11 +1306,16 @@ _HTML = """<!doctype html>
 
     function normalizeDraftPreviewBody(text) {
       let clean = String(text || "").trimEnd();
-      for (const signature of [CMAIL_SIGNATURE_TEXT, CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE, CMAIL_LEGACY_SIGNATURE_TEXT]) {
-        const marker = String(signature || "").trim();
-        if (marker && clean.endsWith(marker)) {
-          clean = clean.slice(0, clean.length - marker.length).trimEnd();
-          break;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const signature of CMAIL_KNOWN_SIGNATURE_TEXTS) {
+          const marker = String(signature || "").trim();
+          if (marker && clean.endsWith(marker)) {
+            clean = clean.slice(0, clean.length - marker.length).trimEnd();
+            changed = true;
+            break;
+          }
         }
       }
       return clean;
@@ -1263,7 +1335,7 @@ _HTML = """<!doctype html>
     function composeDraftPreviewHtml(bodyText) {
       const unsigned = normalizeDraftPreviewBody(bodyText);
       const bodyMarkup = paragraphHtml(unsigned);
-      return bodyMarkup ? `${bodyMarkup}${CMAIL_SIGNATURE_HTML}` : CMAIL_SIGNATURE_HTML;
+      return bodyMarkup ? `${bodyMarkup}${CMAIL_SIGNATURE_PREVIEW_HTML}` : CMAIL_SIGNATURE_PREVIEW_HTML;
     }
 
     function persistPendingDeleteState() {
@@ -1356,6 +1428,18 @@ _HTML = """<!doctype html>
       }
     }
 
+    function persistViewedMessageIds() {
+      try {
+        window.localStorage.setItem(
+          VIEWED_MESSAGE_IDS_STORAGE_KEY,
+          JSON.stringify(Array.from(state.viewedMessageIds)),
+        );
+        window.localStorage.setItem(VIEWED_MESSAGE_IDS_SEEDED_STORAGE_KEY, "1");
+      } catch (_error) {
+        // Ignore local storage failures.
+      }
+    }
+
     function persistSelectionState() {
       try {
         if (state.selectedContactKey) {
@@ -1398,6 +1482,41 @@ _HTML = """<!doctype html>
       });
     }
 
+    function contactLatestTimestamp(contact) {
+      const directValue = timestampValue(contact?.happened_at || "");
+      if (directValue > 0) return directValue;
+      const threadValues = Array.isArray(contact?.threads)
+        ? contact.threads.map((thread) => timestampValue(thread?.latest_happened_at || "")).filter((value) => value > 0)
+        : [];
+      if (threadValues.length) return Math.max(...threadValues);
+      const messageValues = messagesForContact(String(contact?.contact_key || ""))
+        .map((message) => timestampValue(message?.happened_at || ""))
+        .filter((value) => value > 0);
+      return messageValues.length ? Math.max(...messageValues) : 0;
+    }
+
+    function displayedContacts(contacts) {
+      return filterContacts(contacts || [])
+        .slice()
+        .sort((left, right) => {
+          const leftUnread = contactHasUnread(String(left?.contact_key || "")) ? 1 : 0;
+          const rightUnread = contactHasUnread(String(right?.contact_key || "")) ? 1 : 0;
+          if (leftUnread !== rightUnread) {
+            return rightUnread - leftUnread;
+          }
+          const happenedDelta = contactLatestTimestamp(right) - contactLatestTimestamp(left);
+          if (happenedDelta !== 0) {
+            return happenedDelta;
+          }
+          return String(left?.contact_label || left?.contact_email || left?.contact_key || "")
+            .localeCompare(
+              String(right?.contact_label || right?.contact_email || right?.contact_key || ""),
+              undefined,
+              { sensitivity: "base" },
+            );
+        });
+    }
+
     const state = {
       activeView: loadStoredText(ACTIVE_VIEW_STORAGE_KEY) === "drafts" ? "drafts" : "inbox",
       correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
@@ -1417,6 +1536,8 @@ _HTML = """<!doctype html>
       deleteQueue: loadDeleteQueue(),
       draftSaveQueue: loadDraftSaveQueue(),
       expandedQuotedMessageIds: loadStoredSet(EXPANDED_QUOTED_MESSAGES_STORAGE_KEY),
+      viewedMessageIds: loadStoredSet(VIEWED_MESSAGE_IDS_STORAGE_KEY),
+      viewedMessageIdsSeeded: loadStoredText(VIEWED_MESSAGE_IDS_SEEDED_STORAGE_KEY) === "1",
       detailCache: new Map(),
       pendingDetailLoads: new Map(),
       prefetchScheduled: false,
@@ -1559,6 +1680,63 @@ _HTML = """<!doctype html>
           state.pendingDetailLoads.delete(key);
         }
       }
+    }
+
+    function messageIsUnread(message) {
+      if (!message) return false;
+      if (String(message.direction || "").toLowerCase() === "outbound") return false;
+      const readKeys = messageReadKeys(message);
+      if (!readKeys.length) return false;
+      return !readKeys.some((key) => state.viewedMessageIds.has(key));
+    }
+
+    function contactHasUnread(contactKey) {
+      return messagesForContact(contactKey).some((message) => messageIsUnread(message));
+    }
+
+    function primeViewedMessagesFromOverview(payload) {
+      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      let changed = false;
+      let seededNow = false;
+      if (!state.viewedMessageIdsSeeded) {
+        for (const message of messages) {
+          for (const readKey of messageReadKeys(message)) {
+            if (state.viewedMessageIds.has(readKey)) continue;
+            state.viewedMessageIds.add(readKey);
+            changed = true;
+          }
+        }
+        state.viewedMessageIdsSeeded = true;
+        seededNow = true;
+      } else {
+        for (const message of messages) {
+          if (String(message?.direction || "").toLowerCase() !== "outbound") continue;
+          for (const readKey of messageReadKeys(message)) {
+            if (state.viewedMessageIds.has(readKey)) continue;
+            state.viewedMessageIds.add(readKey);
+            changed = true;
+          }
+        }
+      }
+      if (changed || seededNow) {
+        persistViewedMessageIds();
+      }
+    }
+
+    function markMessageViewed(messageOrId) {
+      const readKeys = typeof messageOrId === "object"
+        ? messageReadKeys(messageOrId)
+        : [`local-id:${String(messageOrId || "").trim()}`].filter((key) => key !== "local-id:");
+      let changed = false;
+      for (const readKey of readKeys) {
+        if (!readKey || state.viewedMessageIds.has(readKey)) continue;
+        state.viewedMessageIds.add(readKey);
+        changed = true;
+      }
+      if (!changed) return false;
+      state.viewedMessageIdsSeeded = true;
+      persistViewedMessageIds();
+      return true;
     }
 
     function normalizedSubject(subject) {
@@ -1892,16 +2070,17 @@ _HTML = """<!doctype html>
     }
 
     function renderContactList(payload) {
-      const contacts = filterContacts(payload.contacts || []);
+      const contacts = displayedContacts(payload.contacts || []);
       const signature = JSON.stringify([
         state.correspondenceQuery || "",
         contacts.map((contact) => [
-        contact.contact_key,
-        contact.latest_message_id,
-        contact.count,
-        contact.happened_at,
-        (contact.threads || []).map((thread) => [thread.thread_key, thread.latest_message_id, thread.count]),
-      ]),
+          contact.contact_key,
+          contact.latest_message_id,
+          contact.count,
+          contact.happened_at,
+          contactHasUnread(contact.contact_key) ? 1 : 0,
+          (contact.threads || []).map((thread) => [thread.thread_key, thread.latest_message_id, thread.count]),
+        ]),
       ]);
       $("threadCount").textContent = `${contacts.length} contact${contacts.length === 1 ? "" : "s"}`;
       if (!contacts.length) {
@@ -1918,7 +2097,10 @@ _HTML = """<!doctype html>
       state.listSignature = signature;
       $("threadList").innerHTML = contacts.map((contact) => `
         <div class="thread ${contact.contact_key === state.selectedContactKey ? "active" : ""}" data-contact-key="${escapeHtml(contact.contact_key)}">
-          <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
+          <div class="thread-main">
+            <span class="unread-orb ${contactHasUnread(contact.contact_key) ? "" : "hidden"}" aria-hidden="true"></span>
+            <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
+          </div>
           <button class="delete-button" type="button" data-delete-contact="${escapeHtml(contact.contact_key)}" title="Archive this correspondence">×</button>
         </div>
       `).join("");
@@ -2007,6 +2189,33 @@ _HTML = """<!doctype html>
       return String(message?.external_from || "").trim() || String(message?.contact_label || "").trim();
     }
 
+    function messageReadKeys(message) {
+      if (!message) return [];
+      const keys = [];
+      const pushKey = (prefix, value) => {
+        const clean = String(value || "").trim();
+        if (clean) keys.push(`${prefix}:${clean}`);
+      };
+      pushKey("read", message.read_key);
+      pushKey("message-id", message.message_id);
+      pushKey("external-id", message.external_id);
+      const fallbackParts = [
+        String(message.source || "").trim(),
+        String(message.direction || "").trim(),
+        String(message.contact_key || "").trim(),
+        String(message.thread_key || "").trim(),
+        String(message.happened_at || "").trim(),
+        String(message.subject || "").trim(),
+      ].filter(Boolean);
+      if (fallbackParts.length >= 4) {
+        pushKey("fallback", fallbackParts.join("|"));
+      }
+      pushKey("local-id", message.id);
+      const legacyId = String(message.id || "").trim();
+      if (legacyId) keys.push(legacyId);
+      return Array.from(new Set(keys));
+    }
+
     function contactRecord(contactKey) {
       return (state.overview?.contacts || []).find((contact) => contact.contact_key === contactKey) || null;
     }
@@ -2042,7 +2251,7 @@ _HTML = """<!doctype html>
         renderDraftSelection();
         return;
       }
-      const contacts = filterContacts(state.overview?.contacts || []);
+      const contacts = displayedContacts(state.overview?.contacts || []);
       const selectedContactStillPresent = contacts.some((contact) => contact.contact_key === state.selectedContactKey);
       if (!selectedContactStillPresent) {
         state.selectedContactKey = contacts[0]?.contact_key ?? null;
@@ -2747,7 +2956,7 @@ _HTML = """<!doctype html>
 
     function updateCorrespondenceSearch(value) {
       state.correspondenceQuery = String(value || "").slice(0, 200);
-      const contacts = filterContacts(state.overview?.contacts || []);
+      const contacts = displayedContacts(state.overview?.contacts || []);
       if (!contacts.length) {
         state.selectedContactKey = null;
         state.selectedId = null;
@@ -2839,6 +3048,7 @@ _HTML = """<!doctype html>
 
     function renderDetail(message) {
       state.detail = message;
+      markMessageViewed(message);
       const detail = $("detailPanel");
       detail.classList.remove("draft-mode");
       const contact = contactRecord(state.selectedContactKey);
@@ -2890,7 +3100,7 @@ _HTML = """<!doctype html>
             <select id="messageSelect" aria-label="Select a message from this contact">
               ${messages.map((entry) => `
                 <option value="${entry.id}" ${entry.id === state.selectedId ? "selected" : ""}>
-                  ${escapeHtml(`${messageDirectionLabel(entry)} · ${entry.subject || "(no subject)"} — ${humanTimestamp(entry.happened_at || "")}`)}
+                  ${escapeHtml(`${messageIsUnread(entry) ? "● " : ""}${messageDirectionLabel(entry)} · ${entry.subject || "(no subject)"} — ${humanTimestamp(entry.happened_at || "")}`)}
                 </option>
               `).join("")}
             </select>
@@ -2962,6 +3172,7 @@ _HTML = """<!doctype html>
       });
       if (sync) params.set("sync", "1");
       state.overview = normalizeOverviewPayload(await fetchJson(`/api/overview?${params.toString()}`), { allowPendingResolution: true });
+      primeViewedMessagesFromOverview(state.overview);
       persistOverviewCache(state.overview);
       state.mailboxVersionSignature = mailboxVersionSignature(state.overview);
       pruneDetailCache();
@@ -3065,6 +3276,7 @@ _HTML = """<!doctype html>
         }
       }
       state.overview = normalizeOverviewPayload(nextOverview, { allowPendingResolution: false });
+      primeViewedMessagesFromOverview(state.overview);
       persistOverviewCache(state.overview);
       state.mailboxVersionSignature = mailboxVersionSignature(state.overview);
       renderSyncBadge(state.overview);
@@ -3444,6 +3656,28 @@ def _thread_group_key(message: dict[str, Any]) -> str:
     return f"message:{message.get('id')}"
 
 
+def _communication_read_key(row: Any) -> str:
+    message_id = str(row["message_id"] or "").strip()
+    if message_id:
+        return f"message-id:{message_id}"
+    external_id = str(row["external_id"] or "").strip()
+    if external_id:
+        return f"external-id:{external_id}"
+    fallback_parts = [
+        str(row["source"] or "").strip(),
+        str(row["direction"] or "").strip(),
+        str(row["external_from"] or "").strip(),
+        str(row["external_to"] or "").strip(),
+        str(row["thread_key"] or row["external_thread_id"] or "").strip(),
+        str(row["happened_at"] or "").strip(),
+        str(row["subject"] or "").strip(),
+    ]
+    fallback = "|".join(part for part in fallback_parts if part)
+    if fallback:
+        return f"fallback:{fallback}"
+    return f"local-id:{int(row['id'])}"
+
+
 def _coalesce_display_paragraphs(text: str) -> str:
     paragraphs: list[str] = []
     current_parts: list[str] = []
@@ -3563,6 +3797,56 @@ def _sanitize_rich_html_fragment(html_fragment: str) -> str:
     return sanitizer.get_html()
 
 
+def _linkify_plain_text_line(text: str) -> str:
+    raw = str(text or "")
+    parts: list[str] = []
+    last_index = 0
+    linked = False
+    for match in _PLAIN_TEXT_URL_RE.finditer(raw):
+        url = str(match.group("url") or "")
+        if not url:
+            continue
+        parts.append(html_escape(raw[last_index : match.start()]))
+        trailing = ""
+        while url and url[-1] in _TRAILING_URL_PUNCTUATION:
+            trailing = url[-1] + trailing
+            url = url[:-1]
+        href = url if url.lower().startswith(("http://", "https://", "mailto:")) else f"https://{url}"
+        safe_href = _SafeHtmlFragmentSanitizer._safe_href(href)
+        if safe_href:
+            parts.append(
+                f'<a href="{html_escape(safe_href, quote=True)}" target="_blank" rel="noreferrer noopener">'
+                f"{html_escape(url)}</a>"
+            )
+            linked = True
+        else:
+            parts.append(html_escape(str(match.group("url") or "")))
+            trailing = ""
+        parts.append(html_escape(trailing))
+        last_index = match.end()
+    if not linked:
+        return ""
+    parts.append(html_escape(raw[last_index:]))
+    return "".join(parts)
+
+
+def _linkify_plain_text_html(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean or not _PLAIN_TEXT_URL_RE.search(clean):
+        return ""
+    paragraphs: list[str] = []
+    for paragraph in re.split(r"\n{2,}", clean):
+        lines = [line for line in paragraph.split("\n")]
+        rendered_lines: list[str] = []
+        for line in lines:
+            linked_line = _linkify_plain_text_line(line)
+            rendered_lines.append(linked_line if linked_line else html_escape(line))
+        rendered = "<br>".join(rendered_lines).strip()
+        if rendered:
+            paragraphs.append(f"<p>{rendered}</p>")
+    return "".join(paragraphs)
+
+
 def _looks_like_html_fragment(text: str) -> bool:
     clean = str(text or "").strip()
     if not clean:
@@ -3602,9 +3886,11 @@ def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> 
         }
     match = _QUOTED_REPLY_HEADER_RE.search(raw)
     if not match:
+        primary_text = _coalesce_display_paragraphs(raw)
+        primary_html = _sanitize_rich_html_fragment(_extract_primary_html_fragment(rich_source))
         return {
-            "primary_text": _coalesce_display_paragraphs(raw),
-            "primary_html": _sanitize_rich_html_fragment(_extract_primary_html_fragment(rich_source)),
+            "primary_text": primary_text,
+            "primary_html": primary_html or _linkify_plain_text_html(primary_text),
             "quoted_header": "",
             "quoted_text": "",
             "quoted_html": "",
@@ -3618,6 +3904,10 @@ def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> 
         _sanitize_rich_html_fragment(_extract_quoted_html_fragment(rich_source)),
         quoted_header,
     )
+    if not primary_html:
+        primary_html = _linkify_plain_text_html(primary_text)
+    if not quoted_html:
+        quoted_html = _linkify_plain_text_html(quoted_text)
     return {
         "primary_text": primary_text,
         "primary_html": primary_html,
@@ -3638,6 +3928,8 @@ def _communication_summary(row: Any) -> dict[str, Any]:
     )
     return {
         "id": int(row["id"]),
+        "external_id": str(row["external_id"] or ""),
+        "read_key": _communication_read_key(row),
         "subject": str(row["subject"] or ""),
         "direction": str(row["direction"] or "inbound"),
         "status": str(row["status"] or ""),
@@ -3837,10 +4129,15 @@ def _sorted_drafts(drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _strip_trailing_cmail_signature(body_text: str) -> str:
     clean = str(body_text or "").rstrip()
-    for signature in (_CMAIL_SIGNATURE_TEXT, _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE, _CMAIL_LEGACY_SIGNATURE_TEXT):
-        marker = signature.strip()
-        if clean.endswith(marker):
-            return clean[: -len(marker)].rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for signature in _CMAIL_KNOWN_SIGNATURE_TEXTS:
+            marker = signature.strip()
+            if clean.endswith(marker):
+                clean = clean[: -len(marker)].rstrip()
+                changed = True
+                break
     return clean
 
 
@@ -3857,7 +4154,7 @@ def _paragraph_html(text: str) -> str:
         return ""
     paragraphs = [part.strip() for part in re.split(r"\n{2,}", clean) if part.strip()]
     return "".join(
-        f'<p style="margin:0 0 16px 0; color:#edf2eb; font:500 15px/1.7 -apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;">'
+        f'<p style="margin:0 0 16px 0; color:#111111; font:400 16px/1.7 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;">'
         f"{html_escape(paragraph).replace(chr(10), '<br>')}"
         "</p>"
         for paragraph in paragraphs
@@ -3868,8 +4165,8 @@ def _compose_cmail_html_body(body_text: str) -> str:
     unsigned = _strip_trailing_cmail_signature(body_text)
     body_markup = _paragraph_html(unsigned)
     if body_markup:
-        return f"{body_markup}\n{_CMAIL_SIGNATURE_HTML}"
-    return _CMAIL_SIGNATURE_HTML
+        return f"{body_markup}\n{_CMAIL_SIGNATURE_EMAIL_HTML}"
+    return _CMAIL_SIGNATURE_EMAIL_HTML
 
 
 def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -3911,7 +4208,7 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             SET subject = ?, happened_at = ?, status = 'draft', source = 'cmail_draft',
                 external_to = ?, external_cc = ?, external_bcc = ?, body_text = ?, html_body = ?,
                 snippet = ?, direction = 'outbound', channel = 'email',
-                in_reply_to = ?, references_json = ?, thread_key = ?
+                in_reply_to = ?, references_json = ?, thread_key = ?, deleted_at = NULL
             WHERE id = ? AND source = 'cmail_draft'
             """,
             (
@@ -4003,6 +4300,28 @@ def list_cmail_drafts(*, db_path: Path) -> list[dict[str, Any]]:
         return _list_cmail_drafts(connection)
 
 
+def get_cmail_draft_scaffold(
+    *,
+    db_path: Path,
+    communication_id: int,
+    mode: str = "reply",
+) -> dict[str, Any]:
+    with store.open_db(db_path) as connection:
+        detail = _communication_detail(connection, communication_id)
+    drafts = detail.get("drafts") or {}
+    scaffold = drafts.get(mode)
+    if not isinstance(scaffold, dict):
+        raise KeyError(f"draft scaffold {mode!r} not found for communication {communication_id}")
+    return {
+        "subject": str(scaffold.get("subject") or ""),
+        "to": str(scaffold.get("to") or ""),
+        "cc": str(scaffold.get("cc") or ""),
+        "in_reply_to": str(scaffold.get("in_reply_to") or ""),
+        "references": list(scaffold.get("references") or []),
+        "thread_key": str(scaffold.get("thread_key") or ""),
+    }
+
+
 def save_cmail_draft(*, db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     with store.open_db(db_path) as connection:
         return _save_cmail_draft(connection, payload)
@@ -4024,7 +4343,7 @@ def send_cmail_draft(
             raise ValueError(f"draft {draft_id} is not sendable")
         subject = str(row["subject"] or "")
         body_text = str(row["body_text"] or "")
-        html_body = str(row["html_body"] or "")
+        html_body = _compose_cmail_html_body(str(row["body_text"] or ""))
         to_values = _address_field_values(str(row["external_to"] or ""))
         cc_values = _address_field_values(str(row["external_cc"] or ""))
         bcc_values = _address_field_values(str(row["external_bcc"] or ""))
@@ -4076,7 +4395,7 @@ def send_cmail_draft(
         store.set_communication_status(
             connection,
             communication_id=int(draft_id),
-            status=str(delivery.get("status") or "queued"),
+            status="deleted",
         )
     return {
         "draft_id": int(draft_id),
@@ -4179,6 +4498,8 @@ def _communication_detail(connection: Any, communication_id: int) -> dict[str, A
 
     return {
         "id": int(row["id"]),
+        "external_id": str(row["external_id"] or ""),
+        "read_key": _communication_read_key(row),
         "subject": str(row["subject"] or ""),
         "channel": str(row["channel"] or ""),
         "direction": str(row["direction"] or ""),
@@ -4384,6 +4705,7 @@ def _cloudflare_queue_status_from_connection(connection: sqlite3.Connection) -> 
 
 
 def _list_correspondence_rows(connection: sqlite3.Connection, *, limit: int | None) -> list[sqlite3.Row]:
+    suppressed_ids = set(_orphaned_resend_correspondence_ids(connection))
     query = """
         SELECT communications.*, organizations.name AS organization_name
         FROM communications
@@ -4401,12 +4723,247 @@ def _list_correspondence_rows(connection: sqlite3.Connection, *, limit: int | No
     if limit is not None:
         query += " LIMIT ?"
         params.append(max(1, int(limit)))
-    return connection.execute(query, params).fetchall()
+    rows = connection.execute(query, params).fetchall()
+    if not suppressed_ids:
+        return rows
+    return [row for row in rows if int(row["id"]) not in suppressed_ids]
+
+
+def _orphaned_resend_correspondence_ids(connection: sqlite3.Connection) -> list[int]:
+    orphaned_rows = connection.execute(
+        """
+        SELECT communications.id
+        FROM communications
+        WHERE communications.channel = 'email'
+          AND communications.source = ?
+          AND communications.direction = 'outbound'
+          AND communications.status IN ('queued', 'retrying', 'sending')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM mail_delivery_queue
+            WHERE mail_delivery_queue.provider = 'resend'
+              AND mail_delivery_queue.communication_id = communications.id
+          )
+        ORDER BY communications.id
+        """,
+        (DEFAULT_MAIL_UI_OUTBOUND_SOURCE,),
+    ).fetchall()
+    return [int(row["id"]) for row in orphaned_rows]
+
+
+def _cleanup_orphaned_resend_correspondence(db_path: Path) -> list[int]:
+    with store.open_db(db_path) as connection:
+        orphaned_ids = _orphaned_resend_correspondence_ids(connection)
+        if not orphaned_ids:
+            return []
+
+        deleted_at = store._utc_now_string()
+        note = "Suppressed orphaned outbound Resend artifact with no live queue entry."
+        placeholders = ", ".join("?" for _ in orphaned_ids)
+        connection.execute(
+            f"""
+            UPDATE communications
+            SET status = 'deleted',
+                deleted_at = COALESCE(deleted_at, ?),
+                notes = CASE
+                    WHEN TRIM(COALESCE(notes, '')) = '' THEN ?
+                    WHEN instr(notes, ?) > 0 THEN notes
+                    ELSE notes || char(10) || ?
+                END
+            WHERE id IN ({placeholders})
+            """,
+            (deleted_at, note, note, note, *orphaned_ids),
+        )
+        connection.commit()
+        return orphaned_ids
+
+
+def _recipient_match_key(value: str) -> tuple[str, ...]:
+    addresses: list[str] = []
+    for _name, email in getaddresses([str(value or "").replace(";", ",")]):
+        clean_email = str(email or "").strip().lower()
+        if clean_email:
+            addresses.append(clean_email)
+    if not addresses:
+        addresses = [
+            part.strip().lower()
+            for part in re.split(r"[,;]+", str(value or ""))
+            if part.strip()
+        ]
+    return tuple(sorted(dict.fromkeys(addresses)))
+
+
+def _superseded_cmail_draft_ids(connection: sqlite3.Connection) -> list[int]:
+    draft_rows = connection.execute(
+        """
+        SELECT id, external_to, subject, body_text, in_reply_to, thread_key
+        FROM communications
+        WHERE channel = 'email'
+          AND source = 'cmail_draft'
+          AND direction = 'outbound'
+          AND status IN ('queued', 'retrying', 'sending')
+        ORDER BY id
+        """,
+    ).fetchall()
+    if not draft_rows:
+        return []
+
+    outbound_rows = connection.execute(
+        """
+        SELECT id, external_to, subject, body_text, in_reply_to, thread_key
+        FROM communications
+        WHERE channel = 'email'
+          AND source = ?
+          AND direction = 'outbound'
+          AND status IN ('queued', 'retrying', 'sent')
+        ORDER BY id
+        """,
+        (DEFAULT_MAIL_UI_OUTBOUND_SOURCE,),
+    ).fetchall()
+
+    superseded_ids: list[int] = []
+    for draft in draft_rows:
+        draft_id = int(draft["id"])
+        draft_recipients = _recipient_match_key(str(draft["external_to"] or ""))
+        if not draft_recipients:
+            continue
+        draft_in_reply_to = str(draft["in_reply_to"] or "")
+        draft_thread_key = str(draft["thread_key"] or "")
+        for outbound in outbound_rows:
+            if int(outbound["id"]) <= draft_id:
+                continue
+            if _recipient_match_key(str(outbound["external_to"] or "")) != draft_recipients:
+                continue
+            if str(outbound["subject"] or "") != str(draft["subject"] or ""):
+                continue
+            if str(outbound["body_text"] or "") != str(draft["body_text"] or ""):
+                continue
+            if draft_in_reply_to and str(outbound["in_reply_to"] or "") != draft_in_reply_to:
+                continue
+            if draft_thread_key and str(outbound["thread_key"] or "") != draft_thread_key:
+                continue
+            superseded_ids.append(draft_id)
+            break
+    return superseded_ids
+
+
+def _cleanup_superseded_cmail_drafts(db_path: Path) -> list[int]:
+    with store.open_db(db_path) as connection:
+        superseded_ids = _superseded_cmail_draft_ids(connection)
+        if not superseded_ids:
+            return []
+
+        deleted_at = store._utc_now_string()
+        note = "Retired CMAIL draft after outbound handoff created the real resend_email correspondence."
+        placeholders = ", ".join("?" for _ in superseded_ids)
+        connection.execute(
+            f"""
+            UPDATE communications
+            SET status = 'deleted',
+                deleted_at = COALESCE(deleted_at, ?),
+                notes = CASE
+                    WHEN TRIM(COALESCE(notes, '')) = '' THEN ?
+                    WHEN instr(notes, ?) > 0 THEN notes
+                    ELSE notes || char(10) || ?
+                END
+            WHERE id IN ({placeholders})
+            """,
+            (deleted_at, note, note, note, *superseded_ids),
+        )
+        connection.commit()
+        return superseded_ids
+
+
+def _cleanup_active_cmail_draft_deleted_markers(db_path: Path) -> list[int]:
+    with store.open_db(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM communications
+            WHERE channel = 'email'
+              AND source = 'cmail_draft'
+              AND direction = 'outbound'
+              AND status = 'draft'
+              AND deleted_at IS NOT NULL
+            ORDER BY id
+            """
+        ).fetchall()
+        draft_ids = [int(row["id"]) for row in rows]
+        if not draft_ids:
+            return []
+        placeholders = ", ".join("?" for _ in draft_ids)
+        connection.execute(
+            f"UPDATE communications SET deleted_at = NULL WHERE id IN ({placeholders})",
+            draft_ids,
+        )
+        connection.commit()
+        return draft_ids
+
+
+def cleanup_cmail_correspondence_artifacts(*, db_path: Path) -> dict[str, list[int]]:
+    orphaned_resend_ids = _cleanup_orphaned_resend_correspondence(db_path)
+    superseded_draft_ids = _cleanup_superseded_cmail_drafts(db_path)
+    restored_draft_ids = _cleanup_active_cmail_draft_deleted_markers(db_path)
+    return {
+        "orphaned_resend_ids": orphaned_resend_ids,
+        "superseded_draft_ids": superseded_draft_ids,
+        "restored_draft_ids": restored_draft_ids,
+    }
 
 
 def _correspondence_mailbox_version_from_connection(connection: sqlite3.Connection) -> dict[str, Any]:
-    messages = [_communication_summary(row) for row in _list_correspondence_rows(connection, limit=None)]
-    return _mailbox_version_from_messages(messages)
+    params: list[Any] = [DEFAULT_MAIL_UI_SOURCE, DEFAULT_MAIL_UI_OUTBOUND_SOURCE]
+    suppressed_ids = _orphaned_resend_correspondence_ids(connection)
+    suppressed_clause = ""
+    if suppressed_ids:
+        placeholders = ", ".join("?" for _ in suppressed_ids)
+        suppressed_clause = f" AND communications.id NOT IN ({placeholders})"
+        params.extend(int(value) for value in suppressed_ids)
+    where_clause = f"""
+        communications.channel = 'email'
+        AND communications.status != 'deleted'
+        AND (
+            (communications.source = ? AND communications.direction = 'inbound')
+            OR
+            (communications.source = ? AND communications.direction = 'outbound')
+        )
+        {suppressed_clause}
+    """
+    count_row = connection.execute(
+        f"""
+        SELECT
+            COUNT(*) AS message_count,
+            MAX(id) AS latest_message_id,
+            MAX(happened_at) AS latest_happened_at
+        FROM communications
+        WHERE {where_clause}
+        """,
+        params,
+    ).fetchone()
+    contact_row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS contact_count
+        FROM (
+            SELECT
+                LOWER(TRIM(
+                    CASE
+                        WHEN direction = 'outbound' THEN COALESCE(NULLIF(external_to, ''), NULLIF(person, ''), NULLIF(source, ''), 'unknown recipient')
+                        ELSE COALESCE(NULLIF(external_from, ''), NULLIF(person, ''), NULLIF(source, ''), 'unknown sender')
+                    END
+                )) AS contact_key
+            FROM communications
+            WHERE {where_clause}
+            GROUP BY contact_key
+        ) grouped_contacts
+        """,
+        params,
+    ).fetchone()
+    return {
+        "message_count": int((count_row["message_count"] if count_row is not None else 0) or 0),
+        "contact_count": int((contact_row["contact_count"] if contact_row is not None else 0) or 0),
+        "latest_message_id": int((count_row["latest_message_id"] if count_row is not None else 0) or 0),
+        "latest_happened_at": str((count_row["latest_happened_at"] if count_row is not None else "") or ""),
+    }
 
 
 def _build_correspondence_overview_from_connection(
@@ -4763,9 +5320,8 @@ def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
         )
         .replace("__INITIAL_OVERVIEW_JSON__", json.dumps(initial_overview or {}))
         .replace("__CMAIL_SIGNATURE_TEXT_JSON__", json.dumps(_CMAIL_SIGNATURE_TEXT))
-        .replace("__CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_JSON__", json.dumps(_CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE))
-        .replace("__CMAIL_LEGACY_SIGNATURE_TEXT_JSON__", json.dumps(_CMAIL_LEGACY_SIGNATURE_TEXT))
-        .replace("__CMAIL_SIGNATURE_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_HTML))
+        .replace("__CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__", json.dumps(list(_CMAIL_KNOWN_SIGNATURE_TEXTS)))
+        .replace("__CMAIL_SIGNATURE_PREVIEW_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_PREVIEW_HTML))
     )
 
 
@@ -4806,6 +5362,19 @@ def _make_handler(
     overview_cache_lock = threading.Lock()
     drafts_cache_state: dict[str, Any] = {"drafts": None}
     drafts_cache_lock = threading.Lock()
+
+    def _run_startup_mailbox_maintenance() -> None:
+        try:
+            cleanup_result = cleanup_cmail_correspondence_artifacts(db_path=db_path)
+        except Exception:
+            cleanup_result = {"orphaned_resend_ids": [], "superseded_draft_ids": [], "restored_draft_ids": []}
+        cleaned_ids = cleanup_result.get("orphaned_resend_ids") or []
+        superseded_draft_ids = cleanup_result.get("superseded_draft_ids") or []
+        restored_draft_ids = cleanup_result.get("restored_draft_ids") or []
+        if cleaned_ids or superseded_draft_ids or restored_draft_ids:
+            snapshot_cache.invalidate()
+            with overview_cache_lock:
+                overview_cache_state["default_payload"] = None
 
     def _is_default_overview_request(
         *,
@@ -4969,7 +5538,13 @@ def _make_handler(
             next_thread = threading.Thread(target=_run_heartbeat, daemon=True, name="life-ops-mail-ui-heartbeat")
             heartbeat_request_state["thread"] = next_thread
             next_thread.start()
-            return True
+        return True
+
+    threading.Thread(
+        target=_run_startup_mailbox_maintenance,
+        daemon=True,
+        name="life-ops-mail-ui-startup-maintenance",
+    ).start()
 
     class MailUIHandler(BaseHTTPRequestHandler):
         def _send_json(self, payload: dict[str, Any], status_code: int = 200) -> None:
@@ -5524,32 +6099,44 @@ def serve_mail_ui(
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     enable_background_remote_sync: bool = True,
 ) -> None:
+    print(f"[mail_ui] preparing handler for http://{host}:{port}", flush=True)
     handler = _make_handler(
         db_path=db_path,
         limit=limit,
         enable_background_remote_sync=enable_background_remote_sync,
     )
     snapshot_cache = getattr(handler, "_snapshot_cache", None)
-    if snapshot_cache is not None:
-        try:
-            warm_connection = snapshot_cache.get_connection()
-        finally:
-            if "warm_connection" in locals():
-                warm_connection.close()
     prime_overview_cache = getattr(handler, "_prime_overview_cache", None)
-    if callable(prime_overview_cache):
-        try:
-            prime_overview_cache()
-        except Exception:
-            pass
     prime_drafts_cache = getattr(handler, "_prime_drafts_cache", None)
-    if callable(prime_drafts_cache):
-        try:
-            prime_drafts_cache()
-        except Exception:
-            pass
+    print("[mail_ui] binding HTTP server", flush=True)
     server = ThreadingHTTPServer((host, port), handler)
+    print("[mail_ui] HTTP server bound", flush=True)
+    def _warm_caches_after_bind() -> None:
+        if snapshot_cache is not None:
+            try:
+                warm_connection = snapshot_cache.get_connection()
+            finally:
+                if "warm_connection" in locals():
+                    warm_connection.close()
+        if callable(prime_overview_cache):
+            try:
+                prime_overview_cache()
+            except Exception:
+                pass
+        if callable(prime_drafts_cache):
+            try:
+                prime_drafts_cache()
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_warm_caches_after_bind,
+        name="life-ops-mail-ui-warm",
+        daemon=True,
+    ).start()
+    print("[mail_ui] cache warm thread started", flush=True)
     try:
+        print("[mail_ui] serve_forever entering", flush=True)
         server.serve_forever()
     finally:  # pragma: no cover
         server.server_close()

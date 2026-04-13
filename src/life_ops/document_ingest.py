@@ -244,7 +244,10 @@ def _decode_text_bytes(raw_bytes: bytes, *, mime_type: str) -> str:
 
 
 def _run_capture(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise RuntimeError(str(exc)) from exc
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"command failed: {' '.join(command)}")
     return result.stdout
@@ -375,6 +378,18 @@ def _summarize_binary_file(path: Path, *, mime_type: str) -> str:
     )
 
 
+def _summarize_pdf_file(path: Path) -> str:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return "\n".join(
+        [
+            "PDF attachment (text extraction unavailable)",
+            f"size: {_format_size(path.stat().st_size)}",
+            f"sha256: {digest}",
+            f"magic_header_hex: {_read_binary_header(path, 16)}",
+        ]
+    )
+
+
 def extract_text_from_saved_attachment(path: Path, *, mime_type: str) -> tuple[str, str]:
     suffix = path.suffix.lower()
     effective_mime = mime_type or mimetypes.guess_type(path.name)[0] or ""
@@ -386,7 +401,10 @@ def extract_text_from_saved_attachment(path: Path, *, mime_type: str) -> tuple[s
     if "html" in effective_mime or suffix in {".htm", ".html"}:
         return _html_to_text(_read_text_file(path)), "html_text"
     if effective_mime == "application/pdf" or suffix == ".pdf":
-        return _run_capture(["pdftotext", str(path), "-"]), "pdf_text"
+        try:
+            return _run_capture(["pdftotext", str(path), "-"]), "pdf_text"
+        except RuntimeError:
+            return _summarize_pdf_file(path), "pdf_summary"
     if suffix == ".zip" or (suffix in ARCHIVE_SUFFIXES and zipfile.is_zipfile(path)):
         return _summarize_zip_archive(path), "archive_summary"
     if suffix in {".tar", ".tgz", ".gz", ".bz2", ".xz"}:

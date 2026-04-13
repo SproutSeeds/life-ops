@@ -1,11 +1,11 @@
 {
   "name": "lifeops",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Primary public Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
   "type": "module",
   "bin": {
-    "lifeops": "./bin/lifeops.js",
-    "cmail": "./bin/cmail.js"
+    "lifeops": "bin/lifeops.js",
+    "cmail": "bin/cmail.js"
   },
   "exports": {
     ".": {

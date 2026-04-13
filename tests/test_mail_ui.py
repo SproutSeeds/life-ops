@@ -30,6 +30,26 @@ PNG_BYTES = bytes.fromhex(
 
 
 class MailUiTests(unittest.TestCase):
+    def test_strip_trailing_cmail_signature_handles_legacy_blank_line_variant(self) -> None:
+        legacy_signature = (
+            "Hello there.\n\n"
+            "Best,\n\n"
+            "Cody Mitchell\n"
+            "Fractal Research Group\n"
+            "https://frg.earth\n"
+            "cody@frg.earth"
+        )
+        self.assertEqual("Hello there.", mail_ui._strip_trailing_cmail_signature(legacy_signature))
+        duplicated = f"{legacy_signature}\n\n{mail_ui._CMAIL_SIGNATURE_TEXT}"
+        self.assertEqual("Hello there.", mail_ui._strip_trailing_cmail_signature(duplicated))
+
+    def test_compose_cmail_html_body_uses_email_safe_colors(self) -> None:
+        html = mail_ui._compose_cmail_html_body("Hello there.")
+
+        self.assertIn("color:#111111", html)
+        self.assertIn("https://github.com/SproutSeeds", html)
+        self.assertNotIn("color:#edf2eb", html)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "life_ops.db"
@@ -287,6 +307,58 @@ class MailUiTests(unittest.TestCase):
         self.assertNotIn(self.draft_communication_id, [message["id"] for message in payload["messages"]])
         self.assertNotIn(self.manual_communication_id, [message["id"] for message in payload["messages"]])
 
+    def test_correspondence_mailbox_version_counts_beyond_visible_page(self) -> None:
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            limit=1,
+        )
+
+        self.assertEqual(1, payload["message_count"])
+        self.assertEqual(4, payload["mailbox_version"]["message_count"])
+        self.assertEqual(2, payload["mailbox_version"]["contact_count"])
+        self.assertEqual(self.outbound_communication_id, payload["mailbox_version"]["latest_message_id"])
+
+    def test_build_correspondence_overview_suppresses_orphaned_resend_queue_artifacts(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            orphaned_id = store.upsert_communication_from_sync(
+                connection,
+                source="resend_email",
+                external_id="queued:<orphaned@example.com>",
+                subject="Orphaned resend artifact",
+                channel="email",
+                happened_at=datetime(2026, 3, 30, 11, 0, 0),
+                follow_up_at=None,
+                direction="outbound",
+                person="Ghost Queue",
+                organization_name="FRG",
+                status="queued",
+                external_from="Cody <cody@frg.earth>",
+                external_to="ghost@example.com",
+                message_id="<orphaned@example.com>",
+                thread_key="<orphaned@example.com>",
+                snippet="This should not show up as live correspondence.",
+                body_text="This queued resend row never reached the real delivery queue.",
+                category="research",
+                priority_level="normal",
+                priority_score=10,
+            )
+
+        cleaned_ids = mail_ui._cleanup_orphaned_resend_correspondence(self.db_path)
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            limit=20,
+        )
+
+        self.assertEqual([orphaned_id], cleaned_ids)
+        self.assertNotIn(orphaned_id, [message["id"] for message in payload["messages"]])
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, orphaned_id)
+        self.assertIsNotNone(row)
+        self.assertEqual("deleted", str(row["status"] or ""))
+        self.assertIn("orphaned outbound Resend artifact", str(row["notes"] or ""))
+
     def test_mail_contacts_are_persisted_and_searchable(self) -> None:
         with store.open_db(self.db_path) as connection:
             contacts = store.list_mail_contacts(connection, limit=20)
@@ -345,6 +417,33 @@ class MailUiTests(unittest.TestCase):
         self.assertNotIn("<style", str(body_display["primary_html"]))
         self.assertNotIn("<!DOCTYPE", str(body_display["primary_html"]))
 
+    def test_body_display_linkifies_plain_text_urls_safely(self) -> None:
+        body_display = mail_ui._body_display(
+            "Activate here: https://urs.earthdata.nasa.gov/activate/abc_123. Then visit www.frg.earth/docs or mailto:cody@frg.earth",
+        )
+
+        self.assertFalse(body_display["has_quote"])
+        self.assertIn(
+            'href="https://urs.earthdata.nasa.gov/activate/abc_123"',
+            str(body_display["primary_html"]),
+        )
+        self.assertIn('href="https://www.frg.earth/docs"', str(body_display["primary_html"]))
+        self.assertIn('href="mailto:cody@frg.earth"', str(body_display["primary_html"]))
+        self.assertIn("</a>.", str(body_display["primary_html"]))
+        self.assertNotIn("javascript:", str(body_display["primary_html"]))
+
+    def test_body_display_linkifies_plain_text_quoted_urls_safely(self) -> None:
+        body_display = mail_ui._body_display(
+            "Looks good.\n\nOn Wed, Apr 1, 2026 at 12:45 PM Cody <cody@frg.earth> wrote:\n> See https://github.com/SproutSeeds/erdos-problems.",
+        )
+
+        self.assertTrue(body_display["has_quote"])
+        self.assertIn(
+            'href="https://github.com/SproutSeeds/erdos-problems"',
+            str(body_display["quoted_html"]),
+        )
+        self.assertIn("</a>.", str(body_display["quoted_html"]))
+
     def test_http_endpoints_expose_threads_drafts_and_image_previews(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
         server = HTTPServer(("127.0.0.1", 0), handler)
@@ -364,6 +463,11 @@ class MailUiTests(unittest.TestCase):
                 self.assertIn('id="correspondenceSearch"', html)
                 self.assertIn('placeholder="search name or email"', html)
                 self.assertIn('data-reply-message="${message.id}"', html)
+                self.assertIn("lifeops.mail.viewedMessageIds", html)
+                self.assertIn(".unread-orb", html)
+                self.assertIn("function displayedContacts(contacts)", html)
+                self.assertIn('messageIsUnread(entry) ? "● " : ""', html)
+                self.assertIn("function messageReadKeys(message)", html)
                 self.assertNotIn("all sources", html)
                 self.assertNotIn("quick drafts", html)
                 self.assertNotIn("__MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__", html)
@@ -380,6 +484,8 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual(3, overview["message_count"])
                 self.assertEqual("healthy", overview["cloudflare_sync"]["status"])
                 self.assertEqual(self.latest_communication_id, overview["contacts"][0]["latest_message_id"])
+                self.assertEqual("msg-002", overview["messages"][0]["external_id"])
+                self.assertEqual("message-id:<msg-002@example.com>", overview["messages"][0]["read_key"])
                 self.assertEqual(
                     [self.latest_communication_id, self.root_communication_id, self.other_thread_communication_id],
                     overview["contacts"][0]["message_ids"],
@@ -396,6 +502,7 @@ class MailUiTests(unittest.TestCase):
                 with urllib.request.urlopen(f"{base_url}/api/communications/{self.latest_communication_id}") as response:
                     detail = json.loads(response.read().decode("utf-8"))
                 self.assertEqual("Re: Structured mail test", detail["subject"])
+                self.assertEqual("message-id:<msg-002@example.com>", detail["read_key"])
                 self.assertEqual("Alice Example <alice@example.com>", detail["external_from"])
                 self.assertEqual("Replies Desk <reply@example.com>", detail["drafts"]["reply"]["to"])
                 self.assertEqual("Bob Example <bob@example.com>", detail["drafts"]["reply_all"]["cc"])
@@ -473,12 +580,16 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual("Updated draft to Terence Tao", saved_payload["draft"]["subject"])
                 self.assertEqual("tao@example.com", saved_payload["draft"]["to"])
                 self.assertIn("https://frg.earth", saved_payload["draft"]["body_text"])
+                self.assertIn("https://www.npmjs.com/~sproutseeds", saved_payload["draft"]["body_text"])
+                self.assertIn("https://github.com/SproutSeeds", saved_payload["draft"]["body_text"])
                 with store.open_db(self.db_path) as connection:
                     saved_row = store.get_communication_by_id(connection, self.draft_communication_id)
                     tao_contacts = store.list_mail_contacts(connection, query="tao@example.com", limit=20)
                 self.assertIsNotNone(saved_row)
                 self.assertIn("frg-bimi-iris-floating.png", str(saved_row["html_body"]))
                 self.assertIn("https://frg.earth", str(saved_row["html_body"]))
+                self.assertIn("https://www.npmjs.com/~sproutseeds", str(saved_row["html_body"]))
+                self.assertIn("https://github.com/SproutSeeds", str(saved_row["html_body"]))
                 self.assertEqual("tao@example.com", str(tao_contacts[0]["email"]))
 
                 with mock.patch(
@@ -504,7 +615,13 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual("queued", send_payload["draft_status"])
                 resend_kwargs = resend_send_mock.call_args.kwargs
                 self.assertIn("https://frg.earth", resend_kwargs["text"])
+                self.assertIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["text"])
+                self.assertIn("https://github.com/SproutSeeds", resend_kwargs["text"])
                 self.assertIn("frg-bimi-iris-floating.png", resend_kwargs["html"])
+                self.assertIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["html"])
+                self.assertIn("https://github.com/SproutSeeds", resend_kwargs["html"])
+                self.assertIn("color:#111111", resend_kwargs["html"])
+                self.assertNotIn("color:#edf2eb", resend_kwargs["html"])
                 self.assertFalse(resend_kwargs["apply_signature"])
                 self.assertFalse(resend_kwargs["attempt_immediately"])
                 with urllib.request.urlopen(f"{base_url}/api/drafts") as response:
@@ -512,6 +629,10 @@ class MailUiTests(unittest.TestCase):
                 self.assertFalse(
                     any(int(entry["id"]) == int(self.draft_communication_id) for entry in drafts_payload["drafts"])
                 )
+                with store.open_db(self.db_path) as connection:
+                    sent_draft_row = store.get_communication_by_id(connection, self.draft_communication_id)
+                self.assertEqual("deleted", str(sent_draft_row["status"]))
+                self.assertTrue(str(sent_draft_row["deleted_at"] or ""))
 
                 request = urllib.request.Request(
                     f"{base_url}/api/drafts",
@@ -585,6 +706,43 @@ class MailUiTests(unittest.TestCase):
             resend_send.call_args.kwargs["references"],
         )
         self.assertEqual("<thread@example.com>", resend_send.call_args.kwargs["thread_key"])
+        self.assertIn("color:#111111", resend_send.call_args.kwargs["html"])
+        self.assertNotIn("color:#edf2eb", resend_send.call_args.kwargs["html"])
+        with store.open_db(self.db_path) as connection:
+            sent_draft_row = store.get_communication_by_id(connection, int(saved["id"]))
+        self.assertEqual("deleted", str(sent_draft_row["status"]))
+        self.assertTrue(str(sent_draft_row["deleted_at"] or ""))
+
+    def test_send_cmail_draft_rebuilds_email_safe_html_body_from_body_text(self) -> None:
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                "subject": "Legacy styled draft",
+                "to": "friend@example.com",
+                "body_text": "Hello there.",
+            },
+        )
+        with store.open_db(self.db_path) as connection:
+            connection.execute(
+                "UPDATE communications SET html_body = ? WHERE id = ?",
+                (
+                    '<p style="color:#edf2eb">Hello there.</p><div style="color:#edf2eb">Old preview signature</div>',
+                    int(saved["id"]),
+                ),
+            )
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 1001},
+        ) as resend_send:
+            result = mail_ui.send_cmail_draft(
+                db_path=self.db_path,
+                draft_id=int(saved["id"]),
+            )
+
+        self.assertEqual("queued", result["draft_status"])
+        self.assertIn("color:#111111", resend_send.call_args.kwargs["html"])
+        self.assertNotIn("color:#edf2eb", resend_send.call_args.kwargs["html"])
 
     def test_draft_attachments_can_be_uploaded_downloaded_and_sent(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
@@ -642,10 +800,93 @@ class MailUiTests(unittest.TestCase):
                 attachment_paths = resend_send.call_args.kwargs["attachment_paths"]
                 self.assertEqual(1, len(attachment_paths))
                 self.assertEqual("release-note.txt", Path(attachment_paths[0]).name)
+                with store.open_db(self.db_path) as connection:
+                    sent_draft_row = store.get_communication_by_id(connection, self.draft_communication_id)
+                self.assertEqual("deleted", str(sent_draft_row["status"]))
+                self.assertTrue(str(sent_draft_row["deleted_at"] or ""))
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_cleanup_superseded_cmail_drafts_hides_ghost_queued_rows(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            draft_row = store.get_communication_by_id(connection, self.draft_communication_id)
+            self.assertIsNotNone(draft_row)
+            connection.execute(
+                """
+                UPDATE communications
+                SET status = 'queued',
+                    external_to = 'hmm10@pitt.edu,ninamorse@pitt.edu'
+                WHERE id = ?
+                """,
+                (self.draft_communication_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO communications (
+                    subject, channel, direction, person, happened_at, status, notes, source,
+                    external_from, external_to, external_cc, external_bcc, body_text, html_body, snippet,
+                    message_id, in_reply_to, references_json, thread_key
+                ) VALUES (?, 'email', 'outbound', '', ?, 'sent', '', ?, ?, ?, '', '', ?, ?, ?, ?, ?, '[]', ?)
+                """,
+                (
+                    str(draft_row["subject"] or ""),
+                    "2026-04-09T15:46:19Z",
+                    mail_ui.DEFAULT_MAIL_UI_OUTBOUND_SOURCE,
+                    "Cody <cody@frg.earth>",
+                    "hmm10@pitt.edu, ninamorse@pitt.edu",
+                    str(draft_row["body_text"] or ""),
+                    str(draft_row["html_body"] or ""),
+                    str(draft_row["snippet"] or ""),
+                    "<lifeops-superseded@example.com>",
+                    str(draft_row["in_reply_to"] or ""),
+                    str(draft_row["thread_key"] or ""),
+                ),
+            )
+            connection.commit()
+
+        cleaned_ids = mail_ui._cleanup_superseded_cmail_drafts(self.db_path)
+        self.assertEqual([self.draft_communication_id], cleaned_ids)
+
+        with store.open_db(self.db_path) as connection:
+            cleaned_row = store.get_communication_by_id(connection, self.draft_communication_id)
+        self.assertEqual("deleted", str(cleaned_row["status"]))
+        self.assertTrue(str(cleaned_row["deleted_at"] or ""))
+
+    def test_active_cmail_drafts_do_not_keep_stale_deleted_marker(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            connection.execute(
+                "UPDATE communications SET deleted_at = ? WHERE id = ?",
+                ("2026-04-10T05:41:39Z", self.draft_communication_id),
+            )
+            connection.commit()
+
+        restored_ids = mail_ui._cleanup_active_cmail_draft_deleted_markers(self.db_path)
+        self.assertEqual([self.draft_communication_id], restored_ids)
+        with store.open_db(self.db_path) as connection:
+            restored_row = store.get_communication_by_id(connection, self.draft_communication_id)
+        self.assertEqual("", str(restored_row["deleted_at"] or ""))
+
+        with store.open_db(self.db_path) as connection:
+            connection.execute(
+                "UPDATE communications SET deleted_at = ? WHERE id = ?",
+                ("2026-04-10T05:41:39Z", self.draft_communication_id),
+            )
+            connection.commit()
+        mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                "id": self.draft_communication_id,
+                "subject": "Still active",
+                "to": "friend@example.com",
+                "body_text": "Keep this draft.",
+            },
+        )
+        with store.open_db(self.db_path) as connection:
+            saved_row = store.get_communication_by_id(connection, self.draft_communication_id)
+        self.assertEqual("draft", str(saved_row["status"] or ""))
+        self.assertEqual("", str(saved_row["deleted_at"] or ""))
 
     def test_delete_actions_hide_message_and_contact_from_inbox(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)

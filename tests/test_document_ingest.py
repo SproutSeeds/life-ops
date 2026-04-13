@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -392,6 +393,20 @@ class DocumentIngestTests(unittest.TestCase):
         self.assertEqual("media_summary", audio_method)
         self.assertIn("Media file", audio_text)
         self.assertIn("audio/mpeg", audio_text)
+
+    def test_extract_text_from_saved_attachment_falls_back_when_pdftotext_missing(self) -> None:
+        pdf_path = Path(self.temp_dir.name) / "sample.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n")
+
+        with mock.patch("life_ops.document_ingest.subprocess.run", side_effect=FileNotFoundError("pdftotext")):
+            extracted_text, method = extract_text_from_saved_attachment(
+                pdf_path,
+                mime_type="application/pdf",
+            )
+
+        self.assertEqual("pdf_summary", method)
+        self.assertIn("PDF attachment (text extraction unavailable)", extracted_text)
+        self.assertIn("sha256:", extracted_text)
 
     def test_backfill_profile_attachments_resumes_with_local_cursor(self) -> None:
         newer_id = store.upsert_communication_from_sync(

@@ -48,7 +48,7 @@ class XContentTests(unittest.TestCase):
     def test_generate_x_media_asset_saves_file_and_updates_record(self) -> None:
         fake_png = base64.b64encode(b"fake-image-bytes").decode("ascii")
 
-        with mock.patch("life_ops.store.repo_root", return_value=self.repo_root):
+        with mock.patch("life_ops.store.life_ops_home", return_value=self.repo_root):
             with store.open_db(self.db_path) as connection:
                 package = create_x_article_package(
                     connection,
@@ -87,7 +87,7 @@ class XContentTests(unittest.TestCase):
     def test_generate_x_media_asset_supports_xai_provider(self) -> None:
         fake_jpg = base64.b64encode(b"fake-jpg-bytes").decode("ascii")
 
-        with mock.patch("life_ops.store.repo_root", return_value=self.repo_root):
+        with mock.patch("life_ops.store.life_ops_home", return_value=self.repo_root):
             with store.open_db(self.db_path) as connection:
                 package = create_x_article_package(
                     connection,
@@ -124,7 +124,7 @@ class XContentTests(unittest.TestCase):
     def test_generate_x_media_asset_falls_back_to_openai_when_xai_fails(self) -> None:
         fake_png = base64.b64encode(b"openai-fallback-bytes").decode("ascii")
 
-        with mock.patch("life_ops.store.repo_root", return_value=self.repo_root):
+        with mock.patch("life_ops.store.life_ops_home", return_value=self.repo_root):
             with store.open_db(self.db_path) as connection:
                 package = create_x_article_package(
                     connection,
@@ -170,7 +170,7 @@ class XContentTests(unittest.TestCase):
         self.assertEqual(b"openai-fallback-bytes", generated_path.read_bytes())
 
     def test_generate_x_media_asset_explains_missing_openai_fallback(self) -> None:
-        with mock.patch("life_ops.store.repo_root", return_value=self.repo_root):
+        with mock.patch("life_ops.store.life_ops_home", return_value=self.repo_root):
             with store.open_db(self.db_path) as connection:
                 package = create_x_article_package(
                     connection,
