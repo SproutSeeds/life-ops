@@ -6,7 +6,7 @@ import json
 import mimetypes
 import socket
 import uuid
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
@@ -18,6 +18,19 @@ from life_ops.backups import (
     create_encrypted_db_backup,
     list_backups as list_encrypted_backups,
     restore_encrypted_db_backup,
+)
+from life_ops.calendar import (
+    build_calendar_day,
+    build_calendar_history,
+    render_calendar_day_text,
+    render_calendar_history_text,
+    rollover_calendar_day,
+    save_calendar_day,
+)
+from life_ops.apple_calendar import (
+    DEFAULT_APPLE_CALENDAR_DAYS_AHEAD,
+    DEFAULT_APPLE_CALENDAR_DAYS_BACK,
+    sync_apple_calendar_feed,
 )
 from life_ops.cloudflare_email import (
     enqueue_cloudflare_mail_payload,
@@ -230,6 +243,19 @@ def build_parser() -> argparse.ArgumentParser:
     sync_calendar.add_argument("--days-back", type=int, default=7)
     sync_calendar.add_argument("--days-ahead", type=int, default=30)
 
+    sync_apple_calendar = subparsers.add_parser(
+        "sync-apple-calendar",
+        help="Sync an Apple/iCloud .ics or webcal feed into the local store.",
+    )
+    sync_apple_calendar.add_argument("--url", default="", help="Apple/iCloud .ics or webcal:// feed URL.")
+    sync_apple_calendar.add_argument("--url-file", type=Path, default=None, help="Path to a file containing the private feed URL.")
+    sync_apple_calendar.add_argument("--file", dest="feed_path", type=Path, default=None, help="Path to a local .ics file to import.")
+    sync_apple_calendar.add_argument("--calendar-name", default="", help="Friendly calendar name to show in agenda output.")
+    sync_apple_calendar.add_argument("--days-back", type=int, default=DEFAULT_APPLE_CALENDAR_DAYS_BACK)
+    sync_apple_calendar.add_argument("--days-ahead", type=int, default=DEFAULT_APPLE_CALENDAR_DAYS_AHEAD)
+    sync_apple_calendar.add_argument("--timeout-seconds", type=float, default=30.0)
+    sync_apple_calendar.add_argument("--format", choices=["text", "json"], default="text")
+
     sync_gmail_parser = subparsers.add_parser("sync-gmail", help="Sync Gmail follow-ups into the local store.")
     sync_gmail_parser.add_argument("--credentials", type=Path, default=default_credentials_path())
     sync_gmail_parser.add_argument("--token", type=Path, default=default_token_path())
@@ -275,6 +301,63 @@ def build_parser() -> argparse.ArgumentParser:
     agenda_parser.add_argument("--start", type=_parse_day, default=date.today())
     agenda_parser.add_argument("--days", type=int, default=7)
     agenda_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_day_parser = subparsers.add_parser("calendar-day", help="Render a full Life Ops calendar day.")
+    calendar_day_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
+    calendar_day_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_history_parser = subparsers.add_parser("calendar-history", help="Render day-by-day saved calendar history.")
+    calendar_history_parser.add_argument("--start", type=_parse_day, default=date.today())
+    calendar_history_parser.add_argument("--days", type=int, default=7)
+    calendar_history_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_add_parser = subparsers.add_parser("calendar-add", help="Add a dated homemade calendar entry.")
+    calendar_add_parser.add_argument("--date", dest="entry_date", type=_parse_day, default=date.today())
+    calendar_add_parser.add_argument("--title", required=True)
+    calendar_add_parser.add_argument("--type", dest="entry_type", choices=store.CALENDAR_ENTRY_TYPES, default="task")
+    calendar_add_parser.add_argument("--status", choices=store.CALENDAR_ENTRY_STATUSES, default="planned")
+    calendar_add_parser.add_argument("--priority", choices=store.CALENDAR_ENTRY_PRIORITIES, default="normal")
+    calendar_add_parser.add_argument("--list", dest="list_name", choices=[*store.LIST_ITEM_NAMES, "general"], default="personal")
+    calendar_add_parser.add_argument("--start-time", type=_parse_time, default=None)
+    calendar_add_parser.add_argument("--end-time", type=_parse_time, default=None)
+    calendar_add_parser.add_argument("--notes", default="")
+    calendar_add_parser.add_argument("--tag", action="append", dest="tags", default=[])
+    calendar_add_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_status_parser = subparsers.add_parser("calendar-status", help="Set a calendar entry status.")
+    calendar_status_parser.add_argument("--id", required=True, type=int)
+    calendar_status_parser.add_argument("--status", choices=store.CALENDAR_ENTRY_STATUSES, required=True)
+    calendar_status_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_done_parser = subparsers.add_parser("calendar-done", help="Mark a calendar entry done.")
+    calendar_done_parser.add_argument("--id", required=True, type=int)
+    calendar_done_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_move_parser = subparsers.add_parser("calendar-move", help="Move a calendar entry to another day.")
+    calendar_move_parser.add_argument("--id", required=True, type=int)
+    calendar_move_parser.add_argument("--date", dest="entry_date", type=_parse_day, required=True)
+    calendar_move_parser.add_argument("--status", choices=store.CALENDAR_ENTRY_STATUSES, default=None)
+    calendar_move_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_note_parser = subparsers.add_parser("calendar-note", help="Update intention/reflection notes for one day.")
+    calendar_note_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
+    calendar_note_parser.add_argument("--intention", default=None)
+    calendar_note_parser.add_argument("--reflection", default=None)
+    calendar_note_parser.add_argument("--notes", default=None)
+    calendar_note_parser.add_argument("--mood", default=None)
+    calendar_note_parser.add_argument("--energy", default=None)
+    calendar_note_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_save_parser = subparsers.add_parser("calendar-save-day", help="Save an immutable historic snapshot for a day.")
+    calendar_save_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
+    calendar_save_parser.add_argument("--title", default="")
+    calendar_save_parser.add_argument("--summary", default="")
+    calendar_save_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_rollover_parser = subparsers.add_parser("calendar-rollover", help="Carry unfinished entries from one day into another.")
+    calendar_rollover_parser.add_argument("--from", dest="source_day", type=_parse_day, default=date.today())
+    calendar_rollover_parser.add_argument("--to", dest="target_day", type=_parse_day, default=None)
+    calendar_rollover_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     trace_summary_parser = subparsers.add_parser("trace-summary", help="Summarize recorded behavior traces.")
     trace_summary_parser.add_argument("--trace-type", default=None)
@@ -1079,6 +1162,62 @@ def _list_item_record(row) -> dict:
         "updated_at": str(row["updated_at"] or ""),
         "completed_at": str(row["completed_at"] or ""),
     }
+
+
+def _calendar_entry_record(row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "date": str(row["entry_date"]),
+        "title": str(row["title"]),
+        "type": str(row["entry_type"]),
+        "status": str(row["status"]),
+        "priority": str(row["priority"] or "normal"),
+        "list_name": str(row["list_name"] or "personal"),
+        "start_time": str(row["start_time"] or ""),
+        "end_time": str(row["end_time"] or ""),
+        "source": str(row["source"] or "manual"),
+        "source_table": str(row["source_table"] or ""),
+        "source_id": int(row["source_id"]) if row["source_id"] is not None else None,
+        "notes": str(row["notes"] or ""),
+        "tags": _load_json_field(str(row["tags_json"] or "[]"), []),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "completed_at": str(row["completed_at"] or ""),
+    }
+
+
+def _render_calendar_entry_text(action: str, record: dict) -> str:
+    time_bits = []
+    if record["start_time"]:
+        time_bits.append(record["start_time"])
+    if record["end_time"]:
+        time_bits.append(f"ends {record['end_time']}")
+    time_label = f" [{' | '.join(time_bits)}]" if time_bits else ""
+    return (
+        f"{action} calendar entry #{record['id']}: {record['title']} "
+        f"on {record['date']}{time_label} [{record['status']}, {record['type']}, {record['priority']}]"
+    )
+
+
+def _calendar_day_note_record(row) -> dict:
+    return {
+        "day": str(row["day"]),
+        "intention": str(row["intention"] or ""),
+        "reflection": str(row["reflection"] or ""),
+        "notes": str(row["notes"] or ""),
+        "mood": str(row["mood"] or ""),
+        "energy": str(row["energy"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def _render_calendar_day_note_text(record: dict) -> str:
+    lines = [f"Calendar day note saved for {record['day']}"]
+    for key in ("intention", "reflection", "notes", "mood", "energy"):
+        if record.get(key):
+            lines.append(f"- {key}: {record[key]}")
+    return "\n".join(lines)
 
 
 def _render_list_items_text(records: list[dict]) -> str:
@@ -3134,6 +3273,23 @@ def run(args: argparse.Namespace) -> str:
             )
             return _render_sync_summary("Google Calendar sync complete", result)
 
+        if command == "sync-apple-calendar":
+            feed_url = str(args.url or "").strip()
+            if args.url_file is not None:
+                feed_url = args.url_file.expanduser().read_text(encoding="utf-8").strip()
+            result = sync_apple_calendar_feed(
+                connection,
+                feed_url=feed_url or None,
+                feed_path=args.feed_path,
+                calendar_name=args.calendar_name,
+                days_back=args.days_back,
+                days_ahead=args.days_ahead,
+                timeout_seconds=args.timeout_seconds,
+            )
+            if args.format == "json":
+                return json.dumps(result, indent=2)
+            return _render_sync_summary("Apple Calendar sync complete", result)
+
         if command == "sync-gmail":
             result = sync_gmail(
                 connection,
@@ -4024,6 +4180,131 @@ def run(args: argparse.Namespace) -> str:
                     summary={"error": str(exc)},
                 )
                 raise
+
+        if command == "calendar-day":
+            payload = build_calendar_day(connection, target_day=args.target_day)
+            if args.format == "json":
+                return json.dumps(payload, indent=2)
+            return render_calendar_day_text(payload)
+
+        if command == "calendar-history":
+            payload = build_calendar_history(
+                connection,
+                start_day=args.start,
+                days=args.days,
+            )
+            if args.format == "json":
+                return json.dumps(payload, indent=2)
+            return render_calendar_history_text(payload)
+
+        if command == "calendar-add":
+            entry_id = store.add_calendar_entry(
+                connection,
+                entry_date=args.entry_date,
+                title=args.title,
+                entry_type=args.entry_type,
+                status=args.status,
+                priority=args.priority,
+                list_name=args.list_name,
+                start_time=args.start_time,
+                end_time=args.end_time,
+                notes=args.notes,
+                tags=args.tags,
+            )
+            row = store.get_calendar_entry(connection, entry_id)
+            if row is None:
+                return f"Added calendar entry #{entry_id}: {args.title}"
+            record = _calendar_entry_record(row)
+            if args.format == "json":
+                return json.dumps(record, indent=2)
+            return _render_calendar_entry_text("Added", record)
+
+        if command == "calendar-status":
+            store.set_calendar_entry_status(
+                connection,
+                entry_id=args.id,
+                status=args.status,
+            )
+            row = store.get_calendar_entry(connection, args.id)
+            if row is None:
+                return f"Updated calendar entry #{args.id}"
+            record = _calendar_entry_record(row)
+            if args.format == "json":
+                return json.dumps(record, indent=2)
+            return _render_calendar_entry_text("Updated", record)
+
+        if command == "calendar-done":
+            store.set_calendar_entry_status(
+                connection,
+                entry_id=args.id,
+                status="done",
+            )
+            row = store.get_calendar_entry(connection, args.id)
+            if row is None:
+                return f"Marked calendar entry #{args.id} done"
+            record = _calendar_entry_record(row)
+            if args.format == "json":
+                return json.dumps(record, indent=2)
+            return _render_calendar_entry_text("Completed", record)
+
+        if command == "calendar-move":
+            store.move_calendar_entry(
+                connection,
+                entry_id=args.id,
+                entry_date=args.entry_date,
+                status=args.status,
+            )
+            row = store.get_calendar_entry(connection, args.id)
+            if row is None:
+                return f"Moved calendar entry #{args.id}"
+            record = _calendar_entry_record(row)
+            if args.format == "json":
+                return json.dumps(record, indent=2)
+            return _render_calendar_entry_text("Moved", record)
+
+        if command == "calendar-note":
+            row = store.update_calendar_day_note(
+                connection,
+                day=args.target_day,
+                intention=args.intention,
+                reflection=args.reflection,
+                notes=args.notes,
+                mood=args.mood,
+                energy=args.energy,
+            )
+            record = _calendar_day_note_record(row)
+            if args.format == "json":
+                return json.dumps(record, indent=2)
+            return _render_calendar_day_note_text(record)
+
+        if command == "calendar-save-day":
+            payload = save_calendar_day(
+                connection,
+                target_day=args.target_day,
+                title=args.title,
+                summary=args.summary,
+            )
+            if args.format == "json":
+                return json.dumps(payload, indent=2)
+            return _render_sync_summary(
+                "Calendar day saved",
+                {
+                    "snapshot_id": payload["snapshot_id"],
+                    "date": payload["date"],
+                    "summary": payload["summary"],
+                },
+            )
+
+        if command == "calendar-rollover":
+            target_day = args.target_day or (args.source_day + timedelta(days=1))
+            payload = rollover_calendar_day(
+                connection,
+                source_day=args.source_day,
+                target_day=target_day,
+            )
+            if args.format == "json":
+                return json.dumps(payload, indent=2)
+            return _render_sync_summary("Calendar rollover complete", payload)
 
         if command == "add-org":
             organization_id = store.add_organization(

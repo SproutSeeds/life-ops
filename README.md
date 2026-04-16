@@ -16,11 +16,13 @@ The first MVP is intentionally narrow: it gives your agent a reliable place to l
 - SQLite-backed storage for organizations, events, communications, and routines
 - A CLI for adding records and rendering a 7-day agenda
 - Google Calendar sync into the local event store
+- Apple/iCloud Calendar read-only `.ics`/`webcal` feed sync into the local event store
 - Gmail sync with full-message body extraction, attachment metadata capture, and thread-level grouping
 - Communication classification into `open`, `reference`, or `ignore` with broad life buckets including `tax`, `medical`, `insurance`, `benefits`, `identity`, `creative`, `career`, `community`, `finance`, `shopping`, `developer`, `entertainment`, `home`, `logistics`, `pets`, and `travel`
 - Profile-context extraction for high-value life records like identity docs, insurance records, tax mail, medical records, benefits notices, and immigration history
 - Local attachment vault plus PDF/image/text extraction for profile-grade Gmail evidence
 - Daily and weekly routine support so your operating rhythm stays visible
+- Homemade calendar tracking for dated tasks, notes, memories, day reflections, immutable daily saves, and rollover of unfinished work
 - A demo seed command so you can see the full flow immediately
 - Text and JSON output for both human use and agent consumption
 
@@ -37,6 +39,8 @@ If you are embedding Life Ops ideas into another codebase, reach for the SDK.
 - `bin/life-ops`: zero-install entrypoint for the CLI
 - `src/life_ops`: app code
 - `docs/daily-weekly-flow.md`: recommended operating rhythm
+- `docs/calendar.md`: homemade calendar tracking, daily saves, and rollover workflow
+- `docs/apple-calendar.md`: Apple/iCloud `.ics` feed setup for local calendar imports
 - `docs/agent-usage.md`: how an agent should query the system
 - `docs/google-setup.md`: how to connect Gmail and Google Calendar
 - `docs/academic-outreach/workflow.md`: ORP-gated workflow for recipient-aware academic outreach drafts
@@ -107,6 +111,14 @@ This validates:
 zsh ./bin/life-ops init
 zsh ./bin/life-ops agenda --days 7
 zsh ./bin/life-ops agenda --days 7 --format json
+zsh ./bin/life-ops calendar-day --date 2026-04-14
+zsh ./bin/life-ops calendar-history --start 2026-04-14 --days 14
+zsh ./bin/life-ops calendar-note --date 2026-04-14 --intention "Make the day legible" --energy "steady"
+zsh ./bin/life-ops calendar-add --date 2026-04-14 --title "Build homemade Life Ops calendar" --type task --priority high --start-time 09:30 --tag life-ops
+zsh ./bin/life-ops calendar-done --id 1
+zsh ./bin/life-ops calendar-status --id 2 --status missed
+zsh ./bin/life-ops calendar-save-day --date 2026-04-14 --summary "Calendar foundation shipped."
+zsh ./bin/life-ops calendar-rollover --from 2026-04-14 --to 2026-04-15
 zsh ./bin/life-ops add-org --name "Primary Work"
 zsh ./bin/life-ops add-event --title "Founder sync" --start 2026-03-25T10:00 --end 2026-03-25T11:00 --organization "Primary Work"
 zsh ./bin/life-ops add-comm --subject "Reply to investor email" --channel email --follow-up-at 2026-03-26T13:00 --organization "Primary Work"
@@ -120,6 +132,7 @@ zsh ./bin/life-ops done-comm --id 1
 zsh ./bin/life-ops google-auth
 zsh ./bin/life-ops google-list-calendars
 zsh ./bin/life-ops sync-google
+zsh ./bin/life-ops sync-apple-calendar --url-file config/apple_calendar.url --calendar-name "Personal iCloud"
 zsh ./bin/life-ops backfill-gmail --max-results 1000
 zsh ./bin/life-ops sync-gmail-category-pass --max-results 100 --reset-cursors
 zsh ./bin/life-ops sync-gmail-corpus --backfill-query '-in:chats -category:promotions -category:social -category:forums' --backfill-max-results 250 --backfill-max-runs 3

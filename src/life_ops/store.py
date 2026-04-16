@@ -40,6 +40,9 @@ MAIL_CONTACTS_BACKFILLED_SYNC_KEY = "mail_contacts:backfilled_at"
 MAIL_CONTACTS_CLEANUP_SYNC_KEY = "mail_contacts:cleanup_v1"
 LIST_ITEM_NAMES = ("personal", "professional")
 LIST_ITEM_STATUSES = ("open", "done")
+CALENDAR_ENTRY_TYPES = ("task", "event", "note", "memory", "habit", "milestone", "carry_forward")
+CALENDAR_ENTRY_STATUSES = ("planned", "in_progress", "done", "missed", "deferred", "canceled", "archived")
+CALENDAR_ENTRY_PRIORITIES = ("urgent", "high", "normal", "low")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -251,6 +254,47 @@ CREATE TABLE IF NOT EXISTS list_items (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calendar_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_date TEXT NOT NULL,
+    title TEXT NOT NULL,
+    entry_type TEXT NOT NULL DEFAULT 'task',
+    status TEXT NOT NULL DEFAULT 'planned',
+    priority TEXT NOT NULL DEFAULT 'normal',
+    list_name TEXT NOT NULL DEFAULT 'personal',
+    start_time TEXT NOT NULL DEFAULT '',
+    end_time TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    source_table TEXT NOT NULL DEFAULT '',
+    source_id INTEGER,
+    notes TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calendar_day_notes (
+    day TEXT PRIMARY KEY,
+    intention TEXT NOT NULL DEFAULT '',
+    reflection TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    mood TEXT NOT NULL DEFAULT '',
+    energy TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS calendar_day_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -846,6 +890,39 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "list_items", "updated_at", "TEXT")
     _ensure_column(connection, "list_items", "completed_at", "TEXT")
 
+    _ensure_column(connection, "calendar_entries", "entry_date", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "entry_type", "TEXT NOT NULL DEFAULT 'task'")
+    _ensure_column(connection, "calendar_entries", "status", "TEXT NOT NULL DEFAULT 'planned'")
+    _ensure_column(connection, "calendar_entries", "priority", "TEXT NOT NULL DEFAULT 'normal'")
+    _ensure_column(connection, "calendar_entries", "list_name", "TEXT NOT NULL DEFAULT 'personal'")
+    _ensure_column(connection, "calendar_entries", "start_time", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "end_time", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "source", "TEXT NOT NULL DEFAULT 'manual'")
+    _ensure_column(connection, "calendar_entries", "source_table", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "source_id", "INTEGER")
+    _ensure_column(connection, "calendar_entries", "notes", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "calendar_entries", "created_at", "TEXT")
+    _ensure_column(connection, "calendar_entries", "updated_at", "TEXT")
+    _ensure_column(connection, "calendar_entries", "completed_at", "TEXT")
+
+    _ensure_column(connection, "calendar_day_notes", "day", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "intention", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "reflection", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "notes", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "mood", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "energy", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_notes", "created_at", "TEXT")
+    _ensure_column(connection, "calendar_day_notes", "updated_at", "TEXT")
+
+    _ensure_column(connection, "calendar_day_snapshots", "day", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_snapshots", "snapshot_at", "TEXT")
+    _ensure_column(connection, "calendar_day_snapshots", "title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_snapshots", "summary", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_day_snapshots", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "calendar_day_snapshots", "created_at", "TEXT")
+
     _ensure_column(connection, "system_alerts", "alert_key", "TEXT")
     _ensure_column(connection, "system_alerts", "source", "TEXT")
     _ensure_column(connection, "system_alerts", "severity", "TEXT NOT NULL DEFAULT 'error'")
@@ -991,6 +1068,24 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_list_items_list_status_updated
         ON list_items(list_name, status, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_entries_date_status
+        ON calendar_entries(entry_date, status, start_time, id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_entries_status_updated
+        ON calendar_entries(status, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_snapshots_day
+        ON calendar_day_snapshots(day, snapshot_at DESC, id DESC)
         """
     )
     connection.execute(
@@ -1219,6 +1314,366 @@ def set_list_item_status(connection: sqlite3.Connection, *, item_id: int, status
     if cursor.rowcount <= 0:
         raise ValueError(f"list item #{item_id} was not found")
     connection.commit()
+
+
+def _normalize_calendar_entry_type(value: str) -> str:
+    clean = str(value or "task").strip().lower()
+    if clean not in CALENDAR_ENTRY_TYPES:
+        valid = ", ".join(CALENDAR_ENTRY_TYPES)
+        raise ValueError(f"invalid calendar entry type '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_calendar_entry_status(value: str) -> str:
+    clean = str(value or "planned").strip().lower()
+    if clean not in CALENDAR_ENTRY_STATUSES:
+        valid = ", ".join(CALENDAR_ENTRY_STATUSES)
+        raise ValueError(f"invalid calendar entry status '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_calendar_entry_priority(value: str) -> str:
+    clean = str(value or "normal").strip().lower()
+    if clean not in CALENDAR_ENTRY_PRIORITIES:
+        valid = ", ".join(CALENDAR_ENTRY_PRIORITIES)
+        raise ValueError(f"invalid calendar priority '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_calendar_list_name(value: str) -> str:
+    clean = str(value or "personal").strip().lower()
+    if clean == "general":
+        return clean
+    if clean not in LIST_ITEM_NAMES:
+        valid = ", ".join((*LIST_ITEM_NAMES, "general"))
+        raise ValueError(f"invalid calendar list '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_calendar_day(value: date | str) -> str:
+    if isinstance(value, date):
+        return value.isoformat()
+    clean = str(value or "").strip()
+    if not clean:
+        raise ValueError("calendar day is required")
+    return date.fromisoformat(clean).isoformat()
+
+
+def _normalize_calendar_time(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    time.fromisoformat(clean)
+    return clean
+
+
+def _normalize_tags(values: Optional[list[str]]) -> list[str]:
+    if not values:
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = str(value or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(clean)
+    return tags
+
+
+def add_calendar_entry(
+    connection: sqlite3.Connection,
+    *,
+    entry_date: date | str,
+    title: str,
+    entry_type: str = "task",
+    status: str = "planned",
+    priority: str = "normal",
+    list_name: str = "personal",
+    start_time: str = "",
+    end_time: str = "",
+    source: str = "manual",
+    source_table: str = "",
+    source_id: Optional[int] = None,
+    notes: str = "",
+    tags: Optional[list[str]] = None,
+) -> int:
+    clean_day = _normalize_calendar_day(entry_date)
+    clean_title = " ".join(str(title or "").split()).strip()
+    if not clean_title:
+        raise ValueError("calendar entry title is required")
+    clean_status = _normalize_calendar_entry_status(status)
+    now = _utc_now_string()
+    cursor = connection.execute(
+        """
+        INSERT INTO calendar_entries (
+            entry_date, title, entry_type, status, priority, list_name, start_time, end_time,
+            source, source_table, source_id, notes, tags_json, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            clean_day,
+            clean_title,
+            _normalize_calendar_entry_type(entry_type),
+            clean_status,
+            _normalize_calendar_entry_priority(priority),
+            _normalize_calendar_list_name(list_name),
+            _normalize_calendar_time(start_time),
+            _normalize_calendar_time(end_time),
+            str(source or "manual").strip() or "manual",
+            str(source_table or "").strip(),
+            int(source_id) if source_id is not None else None,
+            str(notes or ""),
+            _json_text(_normalize_tags(tags), []),
+            now,
+            now,
+            now if clean_status == "done" else None,
+        ),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def get_calendar_entry(connection: sqlite3.Connection, entry_id: int) -> Optional[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT *
+        FROM calendar_entries
+        WHERE id = ?
+        """,
+        (entry_id,),
+    ).fetchone()
+
+
+def set_calendar_entry_status(
+    connection: sqlite3.Connection,
+    *,
+    entry_id: int,
+    status: str,
+) -> None:
+    clean_status = _normalize_calendar_entry_status(status)
+    now = _utc_now_string()
+    completed_at = now if clean_status == "done" else None
+    cursor = connection.execute(
+        """
+        UPDATE calendar_entries
+        SET status = ?, updated_at = ?, completed_at = ?
+        WHERE id = ?
+        """,
+        (clean_status, now, completed_at, entry_id),
+    )
+    if cursor.rowcount <= 0:
+        raise ValueError(f"calendar entry #{entry_id} was not found")
+    connection.commit()
+
+
+def move_calendar_entry(
+    connection: sqlite3.Connection,
+    *,
+    entry_id: int,
+    entry_date: date | str,
+    status: Optional[str] = None,
+) -> None:
+    clean_day = _normalize_calendar_day(entry_date)
+    now = _utc_now_string()
+    if status is None:
+        cursor = connection.execute(
+            """
+            UPDATE calendar_entries
+            SET entry_date = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (clean_day, now, entry_id),
+        )
+    else:
+        clean_status = _normalize_calendar_entry_status(status)
+        cursor = connection.execute(
+            """
+            UPDATE calendar_entries
+            SET entry_date = ?, status = ?, updated_at = ?, completed_at = NULL
+            WHERE id = ?
+            """,
+            (clean_day, clean_status, now, entry_id),
+        )
+    if cursor.rowcount <= 0:
+        raise ValueError(f"calendar entry #{entry_id} was not found")
+    connection.commit()
+
+
+def update_calendar_day_note(
+    connection: sqlite3.Connection,
+    *,
+    day: date | str,
+    intention: Optional[str] = None,
+    reflection: Optional[str] = None,
+    notes: Optional[str] = None,
+    mood: Optional[str] = None,
+    energy: Optional[str] = None,
+) -> sqlite3.Row:
+    clean_day = _normalize_calendar_day(day)
+    existing = connection.execute(
+        "SELECT * FROM calendar_day_notes WHERE day = ?",
+        (clean_day,),
+    ).fetchone()
+    now = _utc_now_string()
+    next_values = {
+        "intention": str(existing["intention"] or "") if existing else "",
+        "reflection": str(existing["reflection"] or "") if existing else "",
+        "notes": str(existing["notes"] or "") if existing else "",
+        "mood": str(existing["mood"] or "") if existing else "",
+        "energy": str(existing["energy"] or "") if existing else "",
+    }
+    for key, value in {
+        "intention": intention,
+        "reflection": reflection,
+        "notes": notes,
+        "mood": mood,
+        "energy": energy,
+    }.items():
+        if value is not None:
+            next_values[key] = str(value or "")
+
+    if existing:
+        connection.execute(
+            """
+            UPDATE calendar_day_notes
+            SET intention = ?, reflection = ?, notes = ?, mood = ?, energy = ?, updated_at = ?
+            WHERE day = ?
+            """,
+            (
+                next_values["intention"],
+                next_values["reflection"],
+                next_values["notes"],
+                next_values["mood"],
+                next_values["energy"],
+                now,
+                clean_day,
+            ),
+        )
+    else:
+        connection.execute(
+            """
+            INSERT INTO calendar_day_notes (
+                day, intention, reflection, notes, mood, energy, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_day,
+                next_values["intention"],
+                next_values["reflection"],
+                next_values["notes"],
+                next_values["mood"],
+                next_values["energy"],
+                now,
+                now,
+            ),
+        )
+    connection.commit()
+    row = get_calendar_day_note(connection, clean_day)
+    if row is None:
+        raise ValueError(f"calendar day note {clean_day} was not found after update")
+    return row
+
+
+def get_calendar_day_note(connection: sqlite3.Connection, day: date | str) -> Optional[sqlite3.Row]:
+    clean_day = _normalize_calendar_day(day)
+    return connection.execute(
+        """
+        SELECT *
+        FROM calendar_day_notes
+        WHERE day = ?
+        """,
+        (clean_day,),
+    ).fetchone()
+
+
+def list_calendar_entries(
+    connection: sqlite3.Connection,
+    *,
+    start_day: date | str,
+    end_day: date | str,
+    status: str = "all",
+    limit: Optional[int] = None,
+) -> list[sqlite3.Row]:
+    clean_start = _normalize_calendar_day(start_day)
+    clean_end = _normalize_calendar_day(end_day)
+    clauses = ["entry_date >= ?", "entry_date <= ?"]
+    params: list[Any] = [clean_start, clean_end]
+    clean_status = str(status or "all").strip().lower()
+    if clean_status != "all":
+        clauses.append("status = ?")
+        params.append(_normalize_calendar_entry_status(clean_status))
+    else:
+        clauses.append("status != 'archived'")
+    sql = f"""
+        SELECT *
+        FROM calendar_entries
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            entry_date ASC,
+            CASE WHEN start_time = '' THEN 1 ELSE 0 END,
+            start_time ASC,
+            CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+            id ASC
+    """
+    if limit is not None:
+        sql += "\nLIMIT ?"
+        params.append(max(1, int(limit)))
+    return connection.execute(sql, params).fetchall()
+
+
+def add_calendar_day_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    day: date | str,
+    payload: dict,
+    title: str = "",
+    summary: str = "",
+) -> int:
+    clean_day = _normalize_calendar_day(day)
+    now = _utc_now_string()
+    cursor = connection.execute(
+        """
+        INSERT INTO calendar_day_snapshots (
+            day, snapshot_at, title, summary, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            clean_day,
+            now,
+            str(title or ""),
+            str(summary or ""),
+            _json_text(payload, {}),
+            now,
+        ),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def list_calendar_day_snapshots(
+    connection: sqlite3.Connection,
+    *,
+    start_day: date | str,
+    end_day: date | str,
+    limit: Optional[int] = None,
+) -> list[sqlite3.Row]:
+    clean_start = _normalize_calendar_day(start_day)
+    clean_end = _normalize_calendar_day(end_day)
+    sql = """
+        SELECT *
+        FROM calendar_day_snapshots
+        WHERE day >= ? AND day <= ?
+        ORDER BY day DESC, snapshot_at DESC, id DESC
+    """
+    params: list[Any] = [clean_start, clean_end]
+    if limit is not None:
+        sql += "\nLIMIT ?"
+        params.append(max(1, int(limit)))
+    return connection.execute(sql, params).fetchall()
 
 
 def _mail_contact_key(*, email: str = "", display_name: str = "", fallback: str = "") -> str:

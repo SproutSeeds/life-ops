@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import formataddr, getaddresses, parseaddr
 from html import escape as html_escape
 from html.parser import HTMLParser
@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from life_ops.calendar import build_calendar_day, rollover_calendar_day, save_calendar_day
 from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
 from life_ops import mail_vault
@@ -400,6 +401,7 @@ _HTML = """<!doctype html>
       letter-spacing: 0.08em;
       text-transform: uppercase;
       cursor: pointer;
+      text-decoration: none;
     }
     .tab-button.active {
       background: var(--accent-soft);
@@ -1196,6 +1198,7 @@ _HTML = """<!doctype html>
         <div class="tabbar" role="tablist" aria-label="Mail views">
           <button class="tab-button active" type="button" id="tabInbox" role="tab" aria-selected="true">Correspondence</button>
           <button class="tab-button" type="button" id="tabDrafts" role="tab" aria-selected="false">Drafts</button>
+          <a class="tab-button" href="/calendar">Calendar</a>
         </div>
         <span class="badge status-pill" id="syncBadge">syncing…</span>
       </div>
@@ -5312,6 +5315,509 @@ def _remove_contact_from_overview_payload(payload: dict[str, Any] | None, contac
     }
 
 
+_CALENDAR_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Life Ops Calendar</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d0a;
+      --panel: #111712;
+      --panel-2: #172019;
+      --line: #29352b;
+      --text: #f1f5ed;
+      --muted: #96a394;
+      --accent: #b8ff4d;
+      --warning: #ffd166;
+      --danger: #ff8b78;
+      --sans: "SF Pro Display", "Inter", system-ui, sans-serif;
+      --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: var(--sans);
+      background:
+        radial-gradient(circle at 18% 0%, rgba(184,255,77,0.16) 0, transparent 34%),
+        radial-gradient(circle at 86% 16%, rgba(255,209,102,0.12) 0, transparent 28%),
+        linear-gradient(180deg, #0c120e 0%, var(--bg) 58%);
+    }
+    .shell {
+      width: min(1320px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 22px 0 28px;
+      display: grid;
+      gap: 16px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(40px, 7vw, 82px);
+      line-height: 0.92;
+      letter-spacing: -0.07em;
+    }
+    .tabbar {
+      display: inline-flex;
+      gap: 8px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.035);
+    }
+    .tabbar a {
+      color: var(--muted);
+      text-decoration: none;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font: 700 13px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .tabbar a.active {
+      color: #0a1009;
+      background: var(--accent);
+    }
+    .toolbar, .form-grid {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    input, select, textarea, button {
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #0d130f;
+      color: var(--text);
+      padding: 10px 12px;
+      font: 600 14px/1.3 var(--sans);
+    }
+    textarea {
+      width: 100%;
+      min-height: 82px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+    button {
+      cursor: pointer;
+    }
+    button.primary {
+      border: none;
+      color: #091008;
+      background: linear-gradient(180deg, #cfff77 0%, #8ecc2d 100%);
+      font-weight: 800;
+    }
+    button.secondary {
+      background: var(--panel-2);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+      gap: 14px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)),
+        var(--panel);
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+    }
+    .panel-title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .panel-body {
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.025);
+      padding: 12px;
+    }
+    .stat-label {
+      color: var(--muted);
+      font: 700 11px/1 var(--mono);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .stat-value {
+      margin-top: 8px;
+      font-size: 30px;
+      font-weight: 800;
+    }
+    .section {
+      display: grid;
+      gap: 10px;
+    }
+    .section h2 {
+      margin: 0;
+      color: var(--accent);
+      font: 800 12px/1 var(--mono);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .entry {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.02);
+      padding: 12px 13px;
+      display: grid;
+      gap: 8px;
+    }
+    .entry.done {
+      opacity: 0.72;
+    }
+    .entry-title {
+      font-size: 17px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+    .entry-meta, .muted {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .entry-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .entry-actions button {
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+    }
+    .note-card {
+      border: 1px solid rgba(184,255,77,0.18);
+      border-radius: 18px;
+      background: rgba(184,255,77,0.07);
+      padding: 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 14px;
+      border: 1px dashed var(--line);
+      border-radius: 16px;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+      min-height: 18px;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <h1>Calendar</h1>
+      <div class="tabbar">
+        <a href="/">Correspondence</a>
+        <a href="/#drafts">Drafts</a>
+        <a href="/calendar" class="active">Calendar</a>
+      </div>
+    </div>
+    <div class="toolbar">
+      <input id="calendarDate" type="date">
+      <button class="secondary" type="button" id="loadDayButton">load day</button>
+      <button class="primary" type="button" id="saveDayButton">save historic day</button>
+      <button class="secondary" type="button" id="rolloverButton">roll unfinished to tomorrow</button>
+      <span class="status" id="statusText"></span>
+    </div>
+    <section class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title" id="dayTitle">Loading calendar…</div>
+            <div class="muted" id="daySubtitle">Local-first Life Ops day view</div>
+          </div>
+        </div>
+        <div class="panel-body" id="dayBody"></div>
+      </section>
+      <aside class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Capture</div>
+        </div>
+        <div class="panel-body">
+          <form class="section" id="entryForm">
+            <h2>New Entry</h2>
+            <input id="entryTitle" type="text" placeholder="What needs to be tracked?">
+            <div class="form-grid">
+              <select id="entryType">
+                <option value="task">task</option>
+                <option value="event">event</option>
+                <option value="note">note</option>
+                <option value="memory">memory</option>
+                <option value="habit">habit</option>
+                <option value="milestone">milestone</option>
+              </select>
+              <select id="entryPriority">
+                <option value="normal">normal</option>
+                <option value="urgent">urgent</option>
+                <option value="high">high</option>
+                <option value="low">low</option>
+              </select>
+              <input id="entryStartTime" type="time" aria-label="start time">
+            </div>
+            <textarea id="entryNotes" placeholder="Notes, evidence, context, or why this matters"></textarea>
+            <button class="primary" type="submit">add to day</button>
+          </form>
+          <form class="section" id="noteForm">
+            <h2>Day Notes</h2>
+            <input id="dayIntention" type="text" placeholder="Intention">
+            <input id="dayMood" type="text" placeholder="Mood">
+            <input id="dayEnergy" type="text" placeholder="Energy">
+            <textarea id="dayReflection" placeholder="Reflection"></textarea>
+            <textarea id="dayLooseNotes" placeholder="Loose notes"></textarea>
+            <button class="secondary" type="submit">save notes</button>
+          </form>
+        </div>
+      </aside>
+    </section>
+  </main>
+  <script>
+    const INITIAL_DAY = __INITIAL_CALENDAR_JSON__;
+    const state = { day: INITIAL_DAY || null };
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function tomorrowDate(value) {
+      const date = new Date(`${value}T00:00:00`);
+      date.setDate(date.getDate() + 1);
+      return date.toISOString().slice(0, 10);
+    }
+
+    async function fetchJson(path) {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(await response.text());
+      return await response.json();
+    }
+
+    async function postJson(path, payload) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      return await response.json();
+    }
+
+    function setStatus(text) {
+      $("statusText").textContent = text || "";
+    }
+
+    function entryMarkup(entry) {
+      const time = entry.start_time ? `${entry.start_time}${entry.end_time ? `-${entry.end_time}` : ""}` : "anytime";
+      const done = entry.status === "done";
+      return `
+        <article class="entry ${done ? "done" : ""}">
+          <div class="entry-title">${escapeHtml(entry.title)}</div>
+          <div class="entry-meta">#${entry.id} · ${escapeHtml(time)} · ${escapeHtml(entry.status)} · ${escapeHtml(entry.type)} · ${escapeHtml(entry.priority)}</div>
+          ${entry.notes ? `<div class="muted">${escapeHtml(entry.notes)}</div>` : ""}
+          <div class="entry-actions">
+            <button type="button" data-entry-status="${entry.id}:done" class="secondary">done</button>
+            <button type="button" data-entry-status="${entry.id}:missed" class="secondary">missed</button>
+            <button type="button" data-entry-status="${entry.id}:deferred" class="secondary">defer</button>
+          </div>
+        </article>
+      `;
+    }
+
+    function agendaMarkup(item) {
+      return `
+        <article class="entry">
+          <div class="entry-title">${escapeHtml(item.title || "(untitled)")}</div>
+          <div class="entry-meta">${escapeHtml(item.time || item.sort_time || "anytime")} · ${escapeHtml(item.type || "agenda")}</div>
+        </article>
+      `;
+    }
+
+    function renderDay(payload) {
+      state.day = payload || {};
+      $("calendarDate").value = state.day.date || new Date().toISOString().slice(0, 10);
+      $("dayTitle").textContent = state.day.label || state.day.date || "Calendar";
+      const stats = state.day.stats || {};
+      const note = state.day.day_note || {};
+      $("daySubtitle").textContent = `${stats.done_entries || 0} done · ${stats.open_entries || 0} not done · ${stats.agenda_items || 0} agenda`;
+      $("dayIntention").value = note.intention || "";
+      $("dayMood").value = note.mood || "";
+      $("dayEnergy").value = note.energy || "";
+      $("dayReflection").value = note.reflection || "";
+      $("dayLooseNotes").value = note.notes || "";
+      const entries = state.day.entries || [];
+      const agenda = state.day.agenda?.items || [];
+      const needs = state.day.need_to_get_to || [];
+      const latestSave = (state.day.snapshots || [])[0];
+      $("dayBody").innerHTML = `
+        <section class="stats">
+          <div class="stat"><div class="stat-label">tracked</div><div class="stat-value">${stats.tracked_entries || 0}</div></div>
+          <div class="stat"><div class="stat-label">done</div><div class="stat-value">${stats.done_entries || 0}</div></div>
+          <div class="stat"><div class="stat-label">not done</div><div class="stat-value">${stats.open_entries || 0}</div></div>
+          <div class="stat"><div class="stat-label">saves</div><div class="stat-value">${(state.day.snapshots || []).length}</div></div>
+        </section>
+        ${(note.intention || note.reflection || note.notes || note.mood || note.energy) ? `
+          <section class="note-card">
+            ${note.intention ? `<div><strong>Intention:</strong> ${escapeHtml(note.intention)}</div>` : ""}
+            ${note.reflection ? `<div><strong>Reflection:</strong> ${escapeHtml(note.reflection)}</div>` : ""}
+            ${note.notes ? `<div><strong>Notes:</strong> ${escapeHtml(note.notes)}</div>` : ""}
+            ${(note.mood || note.energy) ? `<div class="muted">${escapeHtml([note.mood, note.energy].filter(Boolean).join(" · "))}</div>` : ""}
+          </section>
+        ` : ""}
+        <section class="section">
+          <h2>Tracked</h2>
+          ${entries.length ? entries.map(entryMarkup).join("") : `<div class="empty">No tracked entries for this day yet.</div>`}
+        </section>
+        <section class="section">
+          <h2>Agenda</h2>
+          ${agenda.length ? agenda.map(agendaMarkup).join("") : `<div class="empty">Open space.</div>`}
+        </section>
+        <section class="section">
+          <h2>Need To Get To</h2>
+          ${needs.length ? needs.map(entryMarkup).join("") : `<div class="empty">Nothing currently outstanding for this day.</div>`}
+        </section>
+        ${latestSave ? `
+          <section class="section">
+            <h2>Latest Historic Save</h2>
+            <div class="entry">
+              <div class="entry-title">${escapeHtml(latestSave.summary || "Saved day")}</div>
+              <div class="entry-meta">#${latestSave.id} · ${escapeHtml(latestSave.snapshot_at || "")}</div>
+            </div>
+          </section>
+        ` : ""}
+      `;
+      for (const button of document.querySelectorAll("[data-entry-status]")) {
+        button.addEventListener("click", async () => {
+          const [id, status] = String(button.getAttribute("data-entry-status") || "").split(":");
+          if (!id || !status) return;
+          setStatus("updating...");
+          const next = await postJson(`/api/calendar/entries/${id}/status`, { status, date: state.day.date });
+          renderDay(next.day);
+          setStatus("updated");
+        });
+      }
+    }
+
+    async function loadDay(day) {
+      setStatus("loading...");
+      const payload = await fetchJson(`/api/calendar/day?date=${encodeURIComponent(day)}`);
+      renderDay(payload.day);
+      setStatus("loaded");
+    }
+
+    $("loadDayButton").addEventListener("click", () => loadDay($("calendarDate").value).catch((error) => setStatus(error.message)));
+    $("saveDayButton").addEventListener("click", async () => {
+      try {
+        setStatus("saving historic day...");
+        const payload = await postJson("/api/calendar/day-save", { date: $("calendarDate").value });
+        renderDay(payload.day);
+        setStatus(`saved snapshot #${payload.snapshot_id}`);
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+    $("rolloverButton").addEventListener("click", async () => {
+      try {
+        const sourceDate = $("calendarDate").value;
+        setStatus("rolling unfinished work...");
+        await postJson("/api/calendar/rollover", { source_date: sourceDate, target_date: tomorrowDate(sourceDate) });
+        await loadDay(sourceDate);
+        setStatus("rolled unfinished work to tomorrow");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+    $("entryForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const title = $("entryTitle").value.trim();
+        if (!title) {
+          setStatus("add a title first");
+          return;
+        }
+        setStatus("adding...");
+        const payload = await postJson("/api/calendar/entries", {
+          date: $("calendarDate").value,
+          title,
+          type: $("entryType").value,
+          priority: $("entryPriority").value,
+          start_time: $("entryStartTime").value,
+          notes: $("entryNotes").value,
+        });
+        $("entryTitle").value = "";
+        $("entryNotes").value = "";
+        renderDay(payload.day);
+        setStatus("added");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+    $("noteForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        setStatus("saving notes...");
+        const payload = await postJson("/api/calendar/day-note", {
+          date: $("calendarDate").value,
+          intention: $("dayIntention").value,
+          mood: $("dayMood").value,
+          energy: $("dayEnergy").value,
+          reflection: $("dayReflection").value,
+          notes: $("dayLooseNotes").value,
+        });
+        renderDay(payload.day);
+        setStatus("notes saved");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+    renderDay(INITIAL_DAY);
+  </script>
+</body>
+</html>
+"""
+
+
 def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
     return (
         _HTML.replace(
@@ -5323,6 +5829,10 @@ def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
         .replace("__CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__", json.dumps(list(_CMAIL_KNOWN_SIGNATURE_TEXTS)))
         .replace("__CMAIL_SIGNATURE_PREVIEW_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_PREVIEW_HTML))
     )
+
+
+def _render_calendar_ui_html(initial_day: dict[str, Any] | None = None) -> str:
+    return _CALENDAR_HTML.replace("__INITIAL_CALENDAR_JSON__", json.dumps(initial_day or {}))
 
 
 def _background_mail_ui_sync_loop(
@@ -5625,8 +6135,40 @@ def _make_handler(
                 self._send_html(_render_mail_ui_html(initial_overview=initial_overview))
                 return
 
+            if path == "/calendar":
+                raw_day = str((query.get("date") or [""])[0] or "").strip()
+                try:
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    connection = snapshot_cache.get_connection()
+                    try:
+                        initial_day = build_calendar_day(connection, target_day=target_day)
+                    finally:
+                        connection.close()
+                except (TimeoutError, ValueError):
+                    initial_day = {}
+                self._send_html(_render_calendar_ui_html(initial_day=initial_day))
+                return
+
             if path == "/api/health":
                 self._send_json({"ok": True, "db_path": str(db_path)})
+                return
+
+            if path == "/api/calendar/day":
+                raw_day = str((query.get("date") or [""])[0] or "").strip()
+                try:
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    connection = snapshot_cache.get_connection()
+                    try:
+                        day_payload = build_calendar_day(connection, target_day=target_day)
+                    finally:
+                        connection.close()
+                except ValueError:
+                    self._send_json({"error": "invalid_calendar_date"}, status_code=400)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                self._send_json({"day": day_payload})
                 return
 
             if path == "/api/contacts":
@@ -5899,6 +6441,134 @@ def _make_handler(
                 payload = self._read_json_body()
             except json.JSONDecodeError:
                 self._send_json({"error": "invalid_json"}, status_code=400)
+                return
+
+            if path == "/api/calendar/entries":
+                raw_day = str(payload.get("date") or "").strip()
+                title = str(payload.get("title") or "").strip()
+                if not title:
+                    self._send_json({"error": "missing_title"}, status_code=400)
+                    return
+                try:
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    raw_tags = payload.get("tags") or []
+                    if isinstance(raw_tags, str):
+                        tags = [raw_tags]
+                    elif isinstance(raw_tags, list):
+                        tags = raw_tags
+                    else:
+                        tags = []
+                    with store.open_db(db_path) as connection:
+                        store.add_calendar_entry(
+                            connection,
+                            entry_date=target_day,
+                            title=title,
+                            entry_type=str(payload.get("type") or payload.get("entry_type") or "task"),
+                            status=str(payload.get("status") or "planned"),
+                            priority=str(payload.get("priority") or "normal"),
+                            list_name=str(payload.get("list_name") or "personal"),
+                            start_time=str(payload.get("start_time") or ""),
+                            end_time=str(payload.get("end_time") or ""),
+                            notes=str(payload.get("notes") or ""),
+                            tags=tags,
+                        )
+                        day_payload = build_calendar_day(connection, target_day=target_day)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                snapshot_cache.invalidate()
+                self._send_json({"ok": True, "day": day_payload})
+                return
+
+            if path.startswith("/api/calendar/entries/") and path.endswith("/status"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) != 5:
+                    self._send_json({"error": "invalid_calendar_status_path"}, status_code=400)
+                    return
+                try:
+                    entry_id = int(parts[3])
+                    raw_day = str(payload.get("date") or "").strip()
+                    status = str(payload.get("status") or "").strip()
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    with store.open_db(db_path) as connection:
+                        store.set_calendar_entry_status(connection, entry_id=entry_id, status=status)
+                        row = store.get_calendar_entry(connection, entry_id)
+                        if row is not None:
+                            target_day = date.fromisoformat(str(row["entry_date"]))
+                        day_payload = build_calendar_day(connection, target_day=target_day)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                snapshot_cache.invalidate()
+                self._send_json({"ok": True, "day": day_payload})
+                return
+
+            if path == "/api/calendar/day-note":
+                raw_day = str(payload.get("date") or "").strip()
+                try:
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    with store.open_db(db_path) as connection:
+                        store.update_calendar_day_note(
+                            connection,
+                            day=target_day,
+                            intention=str(payload.get("intention") or ""),
+                            reflection=str(payload.get("reflection") or ""),
+                            notes=str(payload.get("notes") or ""),
+                            mood=str(payload.get("mood") or ""),
+                            energy=str(payload.get("energy") or ""),
+                        )
+                        day_payload = build_calendar_day(connection, target_day=target_day)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                snapshot_cache.invalidate()
+                self._send_json({"ok": True, "day": day_payload})
+                return
+
+            if path == "/api/calendar/day-save":
+                raw_day = str(payload.get("date") or "").strip()
+                try:
+                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
+                    with store.open_db(db_path) as connection:
+                        result = save_calendar_day(
+                            connection,
+                            target_day=target_day,
+                            title=str(payload.get("title") or ""),
+                            summary=str(payload.get("summary") or ""),
+                        )
+                        day_payload = build_calendar_day(connection, target_day=target_day)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                snapshot_cache.invalidate()
+                self._send_json(
+                    {
+                        "ok": True,
+                        "snapshot_id": result["snapshot_id"],
+                        "summary": result["summary"],
+                        "day": day_payload,
+                    }
+                )
+                return
+
+            if path == "/api/calendar/rollover":
+                raw_source_day = str(payload.get("source_date") or payload.get("from") or "").strip()
+                raw_target_day = str(payload.get("target_date") or payload.get("to") or "").strip()
+                try:
+                    source_day = date.fromisoformat(raw_source_day) if raw_source_day else date.today()
+                    target_day = date.fromisoformat(raw_target_day) if raw_target_day else source_day + timedelta(days=1)
+                    with store.open_db(db_path) as connection:
+                        result = rollover_calendar_day(
+                            connection,
+                            source_day=source_day,
+                            target_day=target_day,
+                        )
+                        day_payload = build_calendar_day(connection, target_day=source_day)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                snapshot_cache.invalidate()
+                self._send_json({"ok": True, **result, "day": day_payload})
                 return
 
             if path.startswith("/api/communications/") and path.endswith("/delete"):

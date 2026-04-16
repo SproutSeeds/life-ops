@@ -10,6 +10,7 @@ node_modules/
 data/**
 !data/.gitkeep
 config/*.json
+config/apple_calendar.url
 !config/.gitkeep
 !config/*.example.json
 config/cloudflare_email_worker/
