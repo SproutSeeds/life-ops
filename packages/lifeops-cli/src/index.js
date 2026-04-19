@@ -75,7 +75,7 @@ function getHelpText() {
     "  lifeops init [dir] [--force]",
     "  lifeops agenda --input ./lifeops.items.json [--days 7] [--timezone America/Chicago] [--format text|json]",
     "  lifeops share --project ./lifeops.project.json --recipients ./lifeops.recipients.json [--sender-name Cody] [--base-time 2026-03-26T00:00:00.000Z] [--format text|json] [--output-dir ./out]",
-    "  lifeops cmail <status|start|stop|restart|install|tail|plist|url|open|audit>",
+    "  lifeops cmail <status|start|stop|restart|install|tail|plist|url|open|audit|tailscale|tailscale-status|secure-doctor>",
     "  lifeops version",
     "",
     "Notes:",
@@ -101,14 +101,21 @@ function getCmailHelpText() {
     "  cmail url",
     "  cmail open",
     "  cmail audit [--repair] [--strict] [--format text|json]",
+    "  cmail tailscale",
+    "  cmail tailscale-status",
+    "  cmail secure-doctor",
     "  cmail new-draft [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--attach ./file.pdf] [--format text|json]",
     "  cmail drafts [--format text|json]",
     "  cmail draft-save [--id 0] [--to alex@example.com] [--subject ...] [--body ... | --body-file ./note.txt] [--attach ./file.pdf] [--format text|json]",
-    "  cmail draft-send --id 74222 [--format text|json]",
+    "  cmail draft-send --id 74222 [--send-at 2026-04-16T15:00:00Z | --delay-minutes 15] [--format text|json]",
+    "  cmail batch-send --ids 74222,74223 [--max-per-hour 5] [--min-gap-minutes 12] [--daily-cap 20] [--dry-run] [--format text|json]",
     "",
     "Notes:",
     "  CMAIL is the self-hosted mail surface for Life Ops.",
     "  It runs as a managed local service on http://127.0.0.1:4311.",
+    "  The official private phone URL for this deployment is https://cmail.tail649edd.ts.net.",
+    "  Mobile users must be connected to the tailnet in Tailscale before opening CMAIL.",
+    "  CMAIL releases are separate from Clawdad releases; publishing Clawdad does not update CMAIL.",
     "  A scheduled watchdog audit runs morning, afternoon, and evening as a fail-safe.",
     "  `cmail install` bootstraps the bundled Python backend into a local user-owned environment.",
     "  You bring your own domain, Cloudflare/Resend accounts, and API keys.",
@@ -406,7 +413,21 @@ async function runCmailCommand({
     throw new Error(getMissingCmailBackendText());
   }
 
-  if (["status", "start", "stop", "restart", "install", "tail", "plist", "audit"].includes(subcommand)) {
+  if (
+    [
+      "status",
+      "start",
+      "stop",
+      "restart",
+      "install",
+      "tail",
+      "plist",
+      "audit",
+      "tailscale",
+      "tailscale-status",
+      "secure-doctor",
+    ].includes(subcommand)
+  ) {
     return runner({
       command: "zsh",
       args: ["./bin/cmail-service", subcommand, ...cmailArgv.slice(1)],
@@ -420,6 +441,7 @@ async function runCmailCommand({
     drafts: "cmail-drafts",
     "draft-save": "cmail-draft-save",
     "draft-send": "cmail-draft-send",
+    "batch-send": "cmail-batch-send",
   };
   const backendCommand = backendCommands[subcommand];
   if (!backendCommand) {

@@ -451,6 +451,89 @@ class ResendIntegrationTests(unittest.TestCase):
         self.assertEqual("email-processed", queue_row["provider_message_id"])
         self.assertEqual("sent", communication["status"])
 
+    def test_process_resend_delivery_queue_marks_missing_stored_attachment_failed(self) -> None:
+        self._write_config(token="resend-token")
+        queued_artifacts = {
+            "raw_relative_path": "resend_email/outbound.json",
+            "raw_sha256": "abc123",
+            "saved_attachment_ids": [],
+            "stored_attachments": [
+                {
+                    "filename": "missing.pdf",
+                    "mime_type": "application/pdf",
+                    "relative_path": "resend_email/missing.pdf.enc.json",
+                }
+            ],
+        }
+        with mock.patch(
+            "life_ops.resend_integration._queue_outbound_mail_artifacts",
+            return_value=queued_artifacts,
+        ):
+            created = resend_integration.resend_send_email(
+                to=["friend@example.com"],
+                subject="Queue with missing attachment",
+                text="Hello queue",
+                journal_db_path=self.db_path,
+                config_path=self.config_path,
+                attempt_immediately=False,
+            )
+
+        with store.open_db(self.db_path) as connection:
+            store.update_mail_delivery_queue_item(
+                connection,
+                queue_id=int(created["queue_id"]),
+                max_attempts=1,
+            )
+
+        with mock.patch("life_ops.resend_integration._resend_request_json") as request_mock:
+            processed = resend_integration.process_resend_delivery_queue(
+                db_path=self.db_path,
+                config_path=self.config_path,
+                queue_ids=[int(created["queue_id"])],
+            )
+
+        request_mock.assert_not_called()
+        self.assertEqual(0, processed["processed_count"])
+        self.assertEqual(1, processed["failed_count"])
+        with store.open_db(self.db_path) as connection:
+            queue_row = store.get_mail_delivery_queue_item(connection, queue_id=int(created["queue_id"]))
+            communication = store.get_communication_by_id(connection, int(created["communication_id"]))
+        assert queue_row is not None
+        assert communication is not None
+        self.assertEqual("failed", queue_row["status"])
+        self.assertIn("missing.pdf.enc.json", queue_row["last_error"])
+        self.assertEqual("failed", communication["status"])
+
+    def test_resend_send_email_can_schedule_future_delivery(self) -> None:
+        self._write_config(token="resend-token")
+        with mock.patch(
+            "life_ops.resend_integration._resend_request_json",
+            return_value={"id": "email-too-soon"},
+        ) as request_mock, mock.patch(
+            "life_ops.resend_integration._queue_outbound_mail_artifacts",
+            return_value={"raw_relative_path": "", "raw_sha256": "", "saved_attachment_ids": [], "stored_attachments": []},
+        ):
+            result = resend_integration.resend_send_email(
+                to=["friend@example.com"],
+                subject="Scheduled",
+                text="Hello later",
+                journal_db_path=self.db_path,
+                config_path=self.config_path,
+                scheduled_at="2099-01-01T12:00:00Z",
+            )
+
+        request_mock.assert_not_called()
+        self.assertTrue(result["queued"])
+        self.assertFalse(result["sent"])
+        self.assertEqual("2099-01-01T12:00:00Z", result["next_attempt_at"])
+        self.assertEqual("2099-01-01T12:00:00Z", result["scheduled_at"])
+        self.assertEqual("2099-01-01T12:00:00Z", result["deferred_until"])
+        with store.open_db(self.db_path) as connection:
+            queue = store.list_mail_delivery_queue(connection, provider="resend", status="all", limit=5)
+        self.assertEqual(1, len(queue))
+        self.assertEqual("queued", queue[0]["status"])
+        self.assertEqual("2099-01-01T12:00:00Z", queue[0]["next_attempt_at"])
+
     def test_process_resend_delivery_queue_ignores_retained_sent_rows_when_loading_due_work(self) -> None:
         self._write_config(token="resend-token")
         queued_artifacts = {

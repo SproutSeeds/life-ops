@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import sys
 import tempfile
 import json
@@ -9,6 +12,7 @@ import urllib.request
 from datetime import date, datetime, time
 from http.server import HTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -170,6 +174,94 @@ class CalendarTests(unittest.TestCase):
                 saved = json.loads(response.read().decode("utf-8"))
             self.assertGreater(int(saved["snapshot_id"]), 0)
             self.assertEqual("UI save works.", saved["summary"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_signed_frg_booking_webhook_creates_calendar_hold_and_cmail_draft(self) -> None:
+        secret = "test-frg-booking-secret"
+        payload = {
+            "event": "booking.paid",
+            "booking": {
+                "id": "frg-booking-test-001",
+                "name": "Ada Lovelace",
+                "email": "ada@example.com",
+                "focus": "Research collaboration",
+                "durationMinutes": 45,
+                "selectedDate": "2026-04-18",
+                "selectedTime": "1:00 PM",
+                "selectedSlotLabel": "Apr 18, 2026, 1:00 PM",
+                "timezone": "America/Chicago",
+                "notes": "Discuss proof-campaign structure.",
+            },
+            "payment": {
+                "amountTotalCents": 7500,
+                "stripeCheckoutSessionId": "cs_test_booking",
+            },
+            "zoomUrl": "https://zoom.example/frg",
+        }
+        raw_body = json.dumps(payload).encode("utf-8")
+        timestamp = str(int(datetime.now().timestamp()))
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{timestamp}.".encode("utf-8") + raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base_url}/api/frg/bookings",
+                data=raw_body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-FRG-Booking-Timestamp": timestamp,
+                    "X-FRG-Booking-Signature": f"v1={signature}",
+                },
+            )
+            with mock.patch.dict(os.environ, {"FRG_BOOKING_WEBHOOK_SECRET": secret}):
+                with urllib.request.urlopen(request) as response:
+                    created = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(created["ok"])
+                self.assertFalse(created["duplicate"])
+                self.assertGreater(int(created["calendar_entry_id"]), 0)
+                self.assertGreater(int(created["cmail_draft_id"]), 0)
+
+                day_payload = build_calendar_day(self.connection, target_day=date(2026, 4, 18))
+                self.assertEqual(1, len(day_payload["entries"]))
+                entry = day_payload["entries"][0]
+                self.assertEqual("event", entry["type"])
+                self.assertEqual("13:00", entry["start_time"])
+                self.assertEqual("13:45", entry["end_time"])
+                self.assertIn("FRG booking: Ada Lovelace", entry["title"])
+                self.assertIn("Stripe session: cs_test_booking", entry["notes"])
+
+                drafts = mail_ui.list_cmail_drafts(db_path=self.db_path)
+                self.assertEqual(1, len(drafts))
+                self.assertEqual("Ada Lovelace <ada@example.com>", drafts[0]["to"])
+                self.assertIn("FRG booking confirmed", drafts[0]["subject"])
+
+                duplicate_request = urllib.request.Request(
+                    f"{base_url}/api/frg/bookings",
+                    data=raw_body,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-FRG-Booking-Timestamp": timestamp,
+                        "X-FRG-Booking-Signature": f"v1={signature}",
+                    },
+                )
+                with urllib.request.urlopen(duplicate_request) as response:
+                    duplicate = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(duplicate["duplicate"])
+                self.assertIsNone(duplicate["cmail_draft_id"])
+                self.assertEqual(1, len(build_calendar_day(self.connection, target_day=date(2026, 4, 18))["entries"]))
         finally:
             server.shutdown()
             server.server_close()

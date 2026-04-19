@@ -16,6 +16,12 @@ STDERR_PATH="${SERVICE_LOG_DIR}/cmail-service.err.log"
 WATCHDOG_STDOUT_PATH="${SERVICE_LOG_DIR}/cmail-watchdog.out.log"
 WATCHDOG_STDERR_PATH="${SERVICE_LOG_DIR}/cmail-watchdog.err.log"
 WATCHDOG_RUNNER_PATH="${STATE_BIN_DIR}/cmail-watchdog"
+SERVICE_HOST="${LIFE_OPS_CMAIL_HOST:-127.0.0.1}"
+SERVICE_PORT="${LIFE_OPS_CMAIL_PORT:-4311}"
+TAILSCALE_HTTPS_PORT="${LIFE_OPS_CMAIL_TAILSCALE_HTTPS_PORT:-4311}"
+CMAIL_PUBLIC_URL="${LIFE_OPS_CMAIL_PUBLIC_URL:-https://cmail.tail649edd.ts.net}"
+CMAIL_PUBLIC_URL="${CMAIL_PUBLIC_URL%/}"
+TAILSCALE_URL_PATH="${STATE_ROOT}/config/cmail-tailscale-url"
 UID_VALUE="$(id -u)"
 PYTHON_BIN="${LIFE_OPS_PYTHON_BIN:-}"
 VENV_DIR="${STATE_ROOT}/venvs/cmail"
@@ -43,6 +49,11 @@ Commands:
   uninstall Stop the service and remove the LaunchAgent plist
   status    Show launchctl status for the service
   audit     Run a one-off CMAIL health audit and repair drift when possible
+  tailscale Save/show the durable private CMAIL phone route
+  tailscale-status
+            Show the saved CMAIL tailnet URL and Tailscale Serve status
+  secure-doctor
+            Verify the canonical private CMAIL URL and health endpoint
   tail      Tail the service logs
   plist     Print the expected LaunchAgent plist path
 EOF
@@ -152,6 +163,10 @@ render_plist() {
     <string>-m</string>
     <string>life_ops</string>
     <string>cmail-serve</string>
+    <string>--host</string>
+    <string>${SERVICE_HOST}</string>
+    <string>--port</string>
+    <string>${SERVICE_PORT}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -165,6 +180,10 @@ render_plist() {
     <string>${BACKEND_DIR}</string>
     <key>LIFE_OPS_SERVICE_SECRETS_PATH</key>
     <string>${SERVICE_SECRETS_PATH}</string>
+    <key>LIFE_OPS_CMAIL_HOST</key>
+    <string>${SERVICE_HOST}</string>
+    <key>LIFE_OPS_CMAIL_PORT</key>
+    <string>${SERVICE_PORT}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -298,6 +317,333 @@ write_watchdog_runner() {
   chmod +x "${WATCHDOG_RUNNER_PATH}"
 }
 
+resolve_tailscale_bin() {
+  local candidates=()
+  candidates+=(
+    "$(command -v tailscale || true)"
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    "/opt/homebrew/bin/tailscale"
+    "/usr/local/bin/tailscale"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+parse_tailscale_https_port() {
+  local port="${TAILSCALE_HTTPS_PORT}"
+  local args=("${@}")
+  local index=1
+  while [[ "${index}" -le "${#args[@]}" ]]; do
+    case "${args[${index}]}" in
+      --https-port)
+        index=$((index + 1))
+        if [[ "${index}" -gt "${#args[@]}" || -z "${args[${index}]}" ]]; then
+          echo "--https-port requires a value" >&2
+          return 2
+        fi
+        port="${args[${index}]}"
+        ;;
+      *)
+        echo "Unknown tailscale option: ${args[${index}]}" >&2
+        return 2
+        ;;
+    esac
+    index=$((index + 1))
+  done
+  if ! [[ "${port}" =~ ^[0-9]+$ ]]; then
+    echo "Tailscale HTTPS port must be numeric." >&2
+    return 2
+  fi
+  echo "${port}"
+}
+
+tailscale_dns_name() {
+  local tailscale_bin="${1}"
+  local status_json
+  status_json="$("${tailscale_bin}" status --json)"
+  printf "%s" "${status_json}" | "${VENV_PYTHON}" -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+print(str((payload.get("Self") or {}).get("DNSName") or "").rstrip("."))
+'
+}
+
+tailscale_url_for_dns() {
+  local dns_name="${1}"
+  local https_port="${2}"
+  if [[ -z "${dns_name}" ]]; then
+    return 1
+  fi
+  if [[ "${https_port}" == "443" ]]; then
+    echo "https://${dns_name}"
+  else
+    echo "https://${dns_name}:${https_port}"
+  fi
+}
+
+configure_tailscale_serve() {
+  local apply_compat_route="0"
+  local filtered_args=()
+  local raw_arg
+  for raw_arg in "${@}"; do
+    if [[ "${raw_arg}" == "--apply-compat-route" ]]; then
+      apply_compat_route="1"
+    else
+      filtered_args+=("${raw_arg}")
+    fi
+  done
+
+  local https_port
+  https_port="$(parse_tailscale_https_port "${filtered_args[@]}")" || exit $?
+
+  mkdir -p "${STATE_ROOT}/config"
+  printf "%s\n" "${CMAIL_PUBLIC_URL}" > "${TAILSCALE_URL_PATH}"
+
+  if [[ "${apply_compat_route}" != "1" ]]; then
+    echo "Official phone URL: ${CMAIL_PUBLIC_URL}"
+    echo "Local CMAIL URL: http://${SERVICE_HOST}:${SERVICE_PORT}"
+    echo "Saved URL: ${TAILSCALE_URL_PATH}"
+    echo "Shared Tailscale service-host routing is managed externally:"
+    echo "  cmail.tail649edd.ts.net -> ${SERVICE_HOST}:${SERVICE_PORT}"
+    echo "No Tailscale Serve configuration was changed."
+    echo "Verify with: cmail secure-doctor"
+    return 0
+  fi
+
+  ensure_venv
+  refresh_service_secrets
+  write_plist
+  write_watchdog_runner
+  write_watchdog_plist
+  launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
+  launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}" >/dev/null 2>&1 || true
+  launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+
+  local tailscale_bin
+  tailscale_bin="$(resolve_tailscale_bin || true)"
+  if [[ -z "${tailscale_bin}" ]]; then
+    echo "Tailscale CLI not found. Install Tailscale and sign in on this machine first."
+    exit 1
+  fi
+
+  local dns_name compatibility_url
+  dns_name="$(tailscale_dns_name "${tailscale_bin}")"
+  if [[ -z "${dns_name}" ]]; then
+    echo "Could not determine this machine's Tailscale DNS name. Make sure Tailscale is running and signed in."
+    exit 1
+  fi
+  compatibility_url="$(tailscale_url_for_dns "${dns_name}" "${https_port}")"
+
+  local output
+  if ! output="$("${tailscale_bin}" serve --bg --yes --https "${https_port}" "http://${SERVICE_HOST}:${SERVICE_PORT}" 2>&1)"; then
+    echo "${output}"
+    if [[ "${output}" == *"Serve is not enabled on your tailnet."* ]]; then
+      echo "Tailscale Serve is disabled on this tailnet. Enable Serve in the Tailscale admin console, then rerun: cmail tailscale"
+    fi
+    exit 1
+  fi
+
+  mkdir -p "${STATE_ROOT}/config"
+  printf "%s\n" "${CMAIL_PUBLIC_URL}" > "${TAILSCALE_URL_PATH}"
+  echo "CMAIL service: http://${SERVICE_HOST}:${SERVICE_PORT}"
+  echo "Official phone URL: ${CMAIL_PUBLIC_URL}"
+  echo "Compatibility URL: ${compatibility_url}"
+  echo "Saved URL: ${TAILSCALE_URL_PATH}"
+}
+
+show_tailscale_status() {
+  local tailscale_bin
+  tailscale_bin="$(resolve_tailscale_bin || true)"
+  echo "Official CMAIL phone URL: ${CMAIL_PUBLIC_URL}"
+  if [[ -f "${TAILSCALE_URL_PATH}" ]]; then
+    echo "Saved Tailscale URL: $(cat "${TAILSCALE_URL_PATH}")"
+  else
+    echo "Saved Tailscale URL: not configured"
+  fi
+  echo "Local CMAIL URL: http://${SERVICE_HOST}:${SERVICE_PORT}"
+  if [[ -z "${tailscale_bin}" ]]; then
+    echo "Tailscale CLI: not found"
+    return 0
+  fi
+  echo "Tailscale CLI: ${tailscale_bin}"
+  "${tailscale_bin}" serve status --json 2>/dev/null || echo "Tailscale Serve status: unavailable"
+}
+
+tailscale_secure_doctor() {
+  local https_port
+  https_port="$(parse_tailscale_https_port "${@}")" || exit $?
+
+  local tailscale_bin
+  tailscale_bin="$(resolve_tailscale_bin || true)"
+  if [[ -z "${tailscale_bin}" ]]; then
+    echo "CMAIL secure doctor: FAIL"
+    echo "- tailscale_cli: missing"
+    exit 1
+  fi
+
+  local python_bin
+  if [[ -x "${VENV_PYTHON}" ]]; then
+    python_bin="${VENV_PYTHON}"
+  else
+    python_bin="$(resolve_python_bin || true)"
+  fi
+  if [[ -z "${python_bin}" ]]; then
+    echo "CMAIL secure doctor: FAIL"
+    echo "- python: missing"
+    exit 1
+  fi
+
+  local dns_name official_url compatibility_url expected_proxy serve_json funnel_json serve_text health_body compatibility_health_body
+  dns_name="$(tailscale_dns_name "${tailscale_bin}")"
+  official_url="${CMAIL_PUBLIC_URL}"
+  compatibility_url="$(tailscale_url_for_dns "${dns_name}" "${https_port}")"
+  expected_proxy="http://${SERVICE_HOST}:${SERVICE_PORT}"
+  serve_json="$("${tailscale_bin}" serve status --json 2>&1)"
+  funnel_json="$("${tailscale_bin}" funnel status --json 2>&1)"
+  serve_text="$("${tailscale_bin}" serve status 2>&1)"
+
+  local doctor_json
+  doctor_json="$(SERVE_JSON="${serve_json}" FUNNEL_JSON="${funnel_json}" SERVE_TEXT="${serve_text}" DNS_NAME="${dns_name}" HTTPS_PORT="${https_port}" EXPECTED_PROXY="${expected_proxy}" OFFICIAL_URL="${official_url}" COMPATIBILITY_URL="${compatibility_url}" "${python_bin}" -c '
+import json
+import os
+import sys
+
+
+def load_json(name: str) -> dict:
+    raw = os.environ.get(name, "")
+    start = raw.find("{")
+    if start < 0:
+        raise ValueError(f"{name} did not include JSON")
+    return json.loads(raw[start:])
+
+
+def truthy_funnel_flags(value, path=""):
+    found = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            clean = str(key).lower()
+            child_path = f"{path}.{key}" if path else str(key)
+            if clean in {"funnel", "allowfunnel", "funnelon", "funnelenabled"} and child is True:
+                found.append(child_path)
+            found.extend(truthy_funnel_flags(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(truthy_funnel_flags(child, f"{path}[{index}]"))
+    return found
+
+
+serve = load_json("SERVE_JSON")
+funnel = load_json("FUNNEL_JSON")
+serve_text = os.environ.get("SERVE_TEXT", "")
+dns_name = os.environ["DNS_NAME"]
+https_port = os.environ["HTTPS_PORT"]
+expected_proxy = os.environ["EXPECTED_PROXY"]
+official_url = os.environ["OFFICIAL_URL"]
+compatibility_url = os.environ["COMPATIBILITY_URL"]
+host_key = f"{dns_name}:{https_port}"
+
+checks = []
+routes = []
+for host, host_payload in (serve.get("Web") or {}).items():
+    for path, handler in (host_payload.get("Handlers") or {}).items():
+        proxy = str((handler or {}).get("Proxy") or "")
+        routes.append({"host": str(host), "path": str(path), "proxy": proxy})
+
+tcp = serve.get("TCP") or {}
+web = serve.get("Web") or {}
+official_handler = (((web.get(host_key) or {}).get("Handlers") or {}).get("/") or {})
+official_proxy = str(official_handler.get("Proxy") or "")
+official_tcp = bool((tcp.get(str(https_port)) or {}).get("HTTPS"))
+cmail_routes = [route for route in routes if route["proxy"] == expected_proxy]
+unexpected_cmail_routes = [
+    route for route in cmail_routes
+    if not (route["host"] == host_key and route["path"] == "/")
+]
+tailnet_only = f"{compatibility_url} (tailnet only)" in serve_text
+funnel_flags = truthy_funnel_flags(funnel)
+funnel_text_suspicious = "Funnel on" in serve_text or "funnel on" in serve_text.lower()
+
+checks.append({"name": "compatibility_serve_route", "ok": official_proxy == expected_proxy, "detail": official_proxy or "missing"})
+checks.append({"name": "compatibility_https_port", "ok": official_tcp, "detail": str((tcp.get(str(https_port)) or {}))})
+checks.append({"name": "compatibility_tailnet_only", "ok": tailnet_only, "detail": "tailnet only" if tailnet_only else "not proven tailnet-only"})
+checks.append({"name": "funnel_disabled", "ok": not funnel_flags and not funnel_text_suspicious, "detail": ", ".join(funnel_flags) if funnel_flags else "no public Funnel flags"})
+checks.append({"name": "no_extra_cmail_routes", "ok": not unexpected_cmail_routes, "detail": unexpected_cmail_routes})
+
+payload = {
+    "ok": all(check["ok"] for check in checks),
+    "official_url": official_url,
+    "compatibility_url": compatibility_url,
+    "expected_proxy": expected_proxy,
+    "checks": checks,
+    "cmail_routes": cmail_routes,
+    "other_routes": [route for route in routes if route["proxy"] != expected_proxy],
+}
+print(json.dumps(payload))
+sys.exit(0 if payload["ok"] else 1)
+')" || {
+    echo "CMAIL secure doctor: FAIL"
+    echo "- route_check: failed"
+    printf "%s\n" "${doctor_json:-}"
+    exit 1
+  }
+
+  local doctor_ok
+  doctor_ok="$(printf "%s" "${doctor_json}" | "${python_bin}" -c 'import json,sys; print("1" if json.load(sys.stdin).get("ok") else "0")')"
+
+  health_body="$(curl -fsS "${official_url}/healthz" 2>&1)" || {
+    echo "CMAIL secure doctor: FAIL"
+    printf "%s" "${doctor_json}" | "${python_bin}" -m json.tool
+    echo "- canonical_health_check: failed"
+    echo "${health_body}"
+    exit 1
+  }
+  compatibility_health_body="$(curl -fsS "${compatibility_url}/healthz" 2>&1)" || {
+    echo "CMAIL secure doctor: FAIL"
+    printf "%s" "${doctor_json}" | "${python_bin}" -m json.tool
+    echo "- compatibility_health_check: failed"
+    echo "${compatibility_health_body}"
+    exit 1
+  }
+
+  local health_ok
+  health_ok="$(HEALTH_BODY="${health_body}" "${python_bin}" -c 'import json, os; payload=json.loads(os.environ["HEALTH_BODY"]); print("1" if payload.get("ok") is True and payload.get("app") == "cmail" else "0")' 2>/dev/null || echo "0")"
+  if [[ "${doctor_ok}" != "1" || "${health_ok}" != "1" ]]; then
+    echo "CMAIL secure doctor: FAIL"
+    printf "%s" "${doctor_json}" | "${python_bin}" -m json.tool
+    echo "- health_response: ${health_body}"
+    exit 1
+  fi
+
+  echo "CMAIL secure doctor: OK"
+  echo "Official URL: ${official_url}"
+  echo "Compatibility URL: ${compatibility_url}"
+  echo "Expected proxy: ${expected_proxy}"
+  printf "%s" "${doctor_json}" | "${python_bin}" -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+for check in payload["checks"]:
+    print(f"- {check['\''name'\'']}: {'\''ok'\'' if check['\''ok'\''] else '\''fail'\''} ({check['\''detail'\'']})")
+if payload["other_routes"]:
+    print("- other_tailnet_routes: present but not CMAIL")
+    for route in payload["other_routes"]:
+        print(f"  {route['\''host'\'']}{route['\''path'\'']} -> {route['\''proxy'\'']}")
+else:
+    print("- other_tailnet_routes: none")
+'
+  echo "Canonical health: ${health_body}"
+  echo "Compatibility health: ${compatibility_health_body}"
+}
+
 command_name="${1:-status}"
 
 case "${command_name}" in
@@ -311,7 +657,7 @@ case "${command_name}" in
     launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
     launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}"
-    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}" >/dev/null 2>&1 || true
     launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Installed and started ${LABEL}."
     echo "Plist: ${PLIST_PATH}"
@@ -320,19 +666,26 @@ case "${command_name}" in
     echo "Backend: ${BACKEND_DIR}"
     echo "Python: ${VENV_PYTHON}"
     echo "Service secrets: ${SERVICE_SECRETS_PATH}"
+    echo "Local URL: http://${SERVICE_HOST}:${SERVICE_PORT}"
+    if [[ -f "${TAILSCALE_URL_PATH}" ]]; then
+      echo "Tailscale URL: $(cat "${TAILSCALE_URL_PATH}")"
+    else
+      echo "Tailscale URL: not configured"
+    fi
     ;;
   start)
     if [[ ! -f "${PLIST_PATH}" ]]; then
       echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
       exit 1
     fi
+    ensure_venv
     refresh_service_secrets
     write_plist
     write_watchdog_runner
     write_watchdog_plist
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
-    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}" >/dev/null 2>&1 || true
     launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Started ${LABEL}."
     ;;
@@ -350,6 +703,7 @@ case "${command_name}" in
       echo "LaunchAgent plist not found at ${PLIST_PATH}. Run install first."
       exit 1
     fi
+    ensure_venv
     refresh_service_secrets
     write_plist
     write_watchdog_runner
@@ -358,7 +712,7 @@ case "${command_name}" in
     launchctl bootout "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
     launchctl bootstrap "gui/${UID_VALUE}" "${WATCHDOG_PLIST_PATH}"
-    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}" >/dev/null 2>&1 || true
     launchctl kickstart -k "gui/${UID_VALUE}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     echo "Restarted ${LABEL}."
     ;;
@@ -380,6 +734,12 @@ case "${command_name}" in
     echo "Backend: ${BACKEND_DIR}"
     echo "Python: ${VENV_PYTHON}"
     echo "Service secrets: ${SERVICE_SECRETS_PATH}"
+    echo "Local URL: http://${SERVICE_HOST}:${SERVICE_PORT}"
+    if [[ -f "${TAILSCALE_URL_PATH}" ]]; then
+      echo "Tailscale URL: $(cat "${TAILSCALE_URL_PATH}")"
+    else
+      echo "Tailscale URL: not configured"
+    fi
     if [[ -f "${PLIST_PATH}" ]]; then
       launchctl print "gui/${UID_VALUE}/${LABEL}" 2>/dev/null || echo "launchctl: service not loaded"
     else
@@ -395,6 +755,15 @@ case "${command_name}" in
     refresh_service_secrets
     run_health_audit "${@:2}"
     ;;
+  tailscale)
+    configure_tailscale_serve "${@:2}"
+    ;;
+  tailscale-status)
+    show_tailscale_status
+    ;;
+  secure-doctor)
+    tailscale_secure_doctor "${@:2}"
+    ;;
   watchdog-run)
     refresh_service_secrets
     if run_health_audit --strict "${@:2}"; then
@@ -408,7 +777,7 @@ case "${command_name}" in
     write_plist
     launchctl bootout "gui/${UID_VALUE}" "${PLIST_PATH}" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/${UID_VALUE}" "${PLIST_PATH}"
-    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"
+    launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}" >/dev/null 2>&1 || true
     sleep 3
     run_health_audit --strict "${@:2}"
     ;;

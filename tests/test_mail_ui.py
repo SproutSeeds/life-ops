@@ -50,6 +50,24 @@ class MailUiTests(unittest.TestCase):
         self.assertIn("https://github.com/SproutSeeds", html)
         self.assertNotIn("color:#edf2eb", html)
 
+    def test_mail_ui_includes_mobile_first_responsive_styles(self) -> None:
+        self.assertIn('@media (max-width: 720px)', mail_ui._HTML)
+        self.assertIn('env(safe-area-inset-top, 0px)', mail_ui._HTML)
+        self.assertIn('-webkit-overflow-scrolling: touch', mail_ui._HTML)
+        self.assertIn('min-height: calc(100dvh - 250px)', mail_ui._HTML)
+        self.assertIn('overflow-x: hidden', mail_ui._HTML)
+        self.assertIn('grid-template-columns: minmax(0, 380px) minmax(0, 1fr)', mail_ui._HTML)
+        self.assertIn('table-layout: fixed', mail_ui._HTML)
+        self.assertIn('.body-rich td:first-child:not(:only-child)', mail_ui._HTML)
+        self.assertIn('scrollbar-width: none', mail_ui._HTML)
+        self.assertIn('mobile-web-app-capable', mail_ui._HTML)
+        self.assertIn('apple-mobile-web-app-capable', mail_ui._HTML)
+        self.assertIn('rel="manifest" href="/manifest.webmanifest"', mail_ui._HTML)
+        self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"', mail_ui._HTML)
+        self.assertIn('property="og:image" content="__CMAIL_PUBLIC_URL__/static/og-image.png"', mail_ui._HTML)
+        self.assertIn("Cmail is private. Open Tailscale", mail_ui._render_mail_ui_html())
+        self.assertEqual("standalone", mail_ui._render_mail_ui_manifest()["display"])
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "life_ops.db"
@@ -319,6 +337,89 @@ class MailUiTests(unittest.TestCase):
         self.assertEqual(2, payload["mailbox_version"]["contact_count"])
         self.assertEqual(self.outbound_communication_id, payload["mailbox_version"]["latest_message_id"])
 
+    def test_hidden_correspondence_stays_out_of_main_view_until_restored(self) -> None:
+        handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base_url}/api/contacts/hide",
+                data=json.dumps({"contact_key": "alice@example.com"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["hidden"])
+
+            with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence") as response:
+                visible = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(1, visible["message_count"])
+            self.assertEqual(["bob@example.com"], [contact["contact_key"] for contact in visible["contacts"]])
+
+            with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence&mailbox=hidden") as response:
+                hidden = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(3, hidden["message_count"])
+            self.assertEqual(["alice@example.com"], [contact["contact_key"] for contact in hidden["contacts"]])
+
+            with store.open_db(self.db_path) as connection:
+                root_row = store.get_communication_by_id(connection, self.root_communication_id)
+                store.upsert_communication_from_sync(
+                    connection,
+                    source="cloudflare_email",
+                    external_id="msg-006",
+                    subject="Fresh hidden note",
+                    channel="email",
+                    happened_at=datetime(2026, 3, 30, 11, 45, 0),
+                    follow_up_at=None,
+                    direction="inbound",
+                    person="Alice Example",
+                    organization_name="FRG",
+                    status="reference",
+                    external_thread_id="<thread-3@example.com>",
+                    external_from="Alice Example <alice@example.com>",
+                    external_to="cody@frg.earth",
+                    message_id="<msg-006@example.com>",
+                    thread_key="<thread-3@example.com>",
+                    snippet="Fresh hidden note",
+                    body_text="New mail from a hidden sender should stay hidden.",
+                    category="research",
+                    priority_level="normal",
+                    priority_score=60,
+                )
+            self.assertEqual("reference", str(root_row["status"]))
+
+            with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence") as response:
+                visible_after_new_mail = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(["bob@example.com"], [contact["contact_key"] for contact in visible_after_new_mail["contacts"]])
+
+            with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence&mailbox=hidden") as response:
+                hidden_after_new_mail = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(4, hidden_after_new_mail["message_count"])
+            self.assertEqual("Fresh hidden note", hidden_after_new_mail["messages"][0]["subject"])
+
+            request = urllib.request.Request(
+                f"{base_url}/api/contacts/unhide",
+                data=json.dumps({"contact_key": "alice@example.com"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertFalse(payload["hidden"])
+            self.assertTrue(payload["cleared"])
+
+            with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence") as response:
+                restored = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(5, restored["message_count"])
+            self.assertEqual({"alice@example.com", "bob@example.com"}, {contact["contact_key"] for contact in restored["contacts"]})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_build_correspondence_overview_suppresses_orphaned_resend_queue_artifacts(self) -> None:
         with store.open_db(self.db_path) as connection:
             orphaned_id = store.upsert_communication_from_sync(
@@ -459,7 +560,16 @@ class MailUiTests(unittest.TestCase):
                     html = response.read().decode("utf-8")
                 self.assertIn("CMAIL", html)
                 self.assertIn('rel="icon" href="/static/favicon.svg"', html)
-                self.assertIn('property="og:image" content="/static/og-image.svg"', html)
+                self.assertIn('rel="manifest" href="/manifest.webmanifest"', html)
+                self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"', html)
+                self.assertIn('rel="canonical" href="https://cmail.tail649edd.ts.net/"', html)
+                self.assertIn('property="og:url" content="https://cmail.tail649edd.ts.net/"', html)
+                self.assertIn(
+                    'property="og:image" content="https://cmail.tail649edd.ts.net/static/og-image.png"',
+                    html,
+                )
+                self.assertIn('property="og:image:type" content="image/png"', html)
+                self.assertIn("Cmail is private. Open Tailscale", html)
                 self.assertIn('id="correspondenceSearch"', html)
                 self.assertIn('placeholder="search name or email"', html)
                 self.assertIn('data-reply-message="${message.id}"', html)
@@ -477,6 +587,48 @@ class MailUiTests(unittest.TestCase):
                     favicon_type = response.headers.get_content_type()
                 self.assertEqual("image/svg+xml", favicon_type)
                 self.assertIn(b"<svg", favicon_bytes)
+
+                with urllib.request.urlopen(f"{base_url}/static/apple-touch-icon.png") as response:
+                    touch_icon_bytes = response.read()
+                    touch_icon_type = response.headers.get_content_type()
+                self.assertEqual("image/png", touch_icon_type)
+                self.assertTrue(touch_icon_bytes.startswith(b"\x89PNG"))
+
+                with urllib.request.urlopen(f"{base_url}/static/og-image.png") as response:
+                    og_image_bytes = response.read()
+                    og_image_type = response.headers.get_content_type()
+                self.assertEqual("image/png", og_image_type)
+                self.assertTrue(og_image_bytes.startswith(b"\x89PNG"))
+
+                with urllib.request.urlopen(f"{base_url}/manifest.webmanifest") as response:
+                    manifest = json.loads(response.read().decode("utf-8"))
+                    manifest_type = response.headers.get_content_type()
+                self.assertEqual("application/manifest+json", manifest_type)
+                self.assertEqual("Cmail", manifest["name"])
+                self.assertEqual("Cmail", manifest["short_name"])
+                self.assertEqual("https://cmail.tail649edd.ts.net/", manifest["id"])
+                self.assertEqual("https://cmail.tail649edd.ts.net/", manifest["start_url"])
+                self.assertEqual("https://cmail.tail649edd.ts.net/", manifest["scope"])
+                self.assertEqual("standalone", manifest["display"])
+                self.assertIn("/static/icon-192.png", [icon["src"] for icon in manifest["icons"]])
+                self.assertIn("/static/icon-512.png", [icon["src"] for icon in manifest["icons"]])
+
+                with urllib.request.urlopen(f"{base_url}/healthz") as response:
+                    healthz = json.loads(response.read().decode("utf-8"))
+                    healthz_type = response.headers.get_content_type()
+                self.assertEqual("application/json", healthz_type)
+                self.assertTrue(healthz["ok"])
+                self.assertEqual("cmail", healthz["app"])
+                self.assertEqual("https://cmail.tail649edd.ts.net", healthz["public_url"])
+                self.assertRegex(healthz["version"], r"^\d+\.\d+\.\d+|unknown$")
+
+                with urllib.request.urlopen(f"{base_url}/api/health") as response:
+                    api_health = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(api_health["ok"])
+                self.assertEqual("cmail", api_health["app"])
+                self.assertIn("version", api_health)
+                self.assertEqual("https://cmail.tail649edd.ts.net", api_health["public_url"])
+                self.assertEqual(str(self.db_path), api_health["db_path"])
 
                 with urllib.request.urlopen(f"{base_url}/api/overview?direction=inbound&include_details=1") as response:
                     overview = json.loads(response.read().decode("utf-8"))
@@ -712,6 +864,91 @@ class MailUiTests(unittest.TestCase):
             sent_draft_row = store.get_communication_by_id(connection, int(saved["id"]))
         self.assertEqual("deleted", str(sent_draft_row["status"]))
         self.assertTrue(str(sent_draft_row["deleted_at"] or ""))
+
+    def test_send_cmail_draft_forwards_scheduled_at_to_delivery_queue(self) -> None:
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                "subject": "Scheduled draft",
+                "to": "friend@example.com",
+                "body_text": "Hello later.",
+            },
+        )
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 1002, "next_attempt_at": "2099-01-01T12:00:00Z"},
+        ) as resend_send:
+            result = mail_ui.send_cmail_draft(
+                db_path=self.db_path,
+                draft_id=int(saved["id"]),
+                scheduled_at="2099-01-01T12:00:00Z",
+            )
+
+        self.assertEqual("queued", result["draft_status"])
+        self.assertEqual("2099-01-01T12:00:00Z", resend_send.call_args.kwargs["scheduled_at"])
+
+    def test_send_cmail_draft_batch_schedules_drafts_with_default_gap(self) -> None:
+        first = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={"subject": "First", "to": "first@example.com", "body_text": "First body."},
+        )
+        second = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={"subject": "Second", "to": "second@example.com", "body_text": "Second body."},
+        )
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            side_effect=[
+                {"status": "queued", "communication_id": 2001, "next_attempt_at": "2099-01-01T12:00:00Z"},
+                {"status": "queued", "communication_id": 2002, "next_attempt_at": "2099-01-01T12:12:00Z"},
+            ],
+        ) as resend_send:
+            result = mail_ui.send_cmail_draft_batch(
+                db_path=self.db_path,
+                draft_ids=[int(first["id"]), int(second["id"])],
+                start_at="2099-01-01T12:00:00Z",
+            )
+
+        self.assertEqual(2, result["queued_count"])
+        self.assertEqual(12.0, result["effective_gap_minutes"])
+        self.assertEqual("2099-01-01T12:00:00Z", resend_send.call_args_list[0].kwargs["scheduled_at"])
+        self.assertEqual("2099-01-01T12:12:00Z", resend_send.call_args_list[1].kwargs["scheduled_at"])
+        with store.open_db(self.db_path) as connection:
+            first_row = store.get_communication_by_id(connection, int(first["id"]))
+            second_row = store.get_communication_by_id(connection, int(second["id"]))
+        self.assertEqual("deleted", str(first_row["status"]))
+        self.assertEqual("deleted", str(second_row["status"]))
+
+    def test_send_cmail_draft_batch_dry_run_keeps_drafts_unsent(self) -> None:
+        first = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={"subject": "First", "to": "first@example.com", "body_text": "First body."},
+        )
+        second = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={"subject": "Second", "to": "second@example.com", "body_text": "Second body."},
+        )
+
+        with mock.patch("life_ops.mail_ui.resend_send_email") as resend_send:
+            result = mail_ui.send_cmail_draft_batch(
+                db_path=self.db_path,
+                draft_ids=[int(first["id"]), int(second["id"])],
+                start_at="2099-01-01T12:00:00Z",
+                dry_run=True,
+            )
+
+        resend_send.assert_not_called()
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(0, result["queued_count"])
+        self.assertEqual(2, result["draft_count"])
+        self.assertEqual(["2099-01-01T12:00:00Z", "2099-01-01T12:12:00Z"], [item["scheduled_at"] for item in result["scheduled"]])
+        with store.open_db(self.db_path) as connection:
+            first_row = store.get_communication_by_id(connection, int(first["id"]))
+            second_row = store.get_communication_by_id(connection, int(second["id"]))
+        self.assertEqual("draft", str(first_row["status"]))
+        self.assertEqual("draft", str(second_row["status"]))
 
     def test_send_cmail_draft_rebuilds_email_safe_html_body_from_body_text(self) -> None:
         saved = mail_ui.save_cmail_draft(

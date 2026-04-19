@@ -22,6 +22,9 @@ RESEND_API_BASE_URL = "https://api.resend.com"
 RESEND_USER_AGENT = "life-ops/0.2 (+https://frg.earth)"
 DEFAULT_RESEND_MAX_ATTEMPTS = 8
 DEFAULT_RESEND_PROCESS_LIMIT = 25
+DEFAULT_RESEND_BATCH_MAX_PER_HOUR = 5
+DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES = 12
+DEFAULT_RESEND_BATCH_DAILY_CAP = 20
 RESEND_QUEUE_ALERT_PREFIX = "resend_delivery"
 RESEND_QUEUE_GLOBAL_ALERT_KEY = "resend_delivery_queue"
 
@@ -160,6 +163,25 @@ def _attachment_metadata_from_path(path: Path, *, content_id: str | None = None)
 
 def _utc_now_string() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _coerce_utc_datetime(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        clean = _strip_string(value)
+        if not clean:
+            return None
+        parsed = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _utc_datetime_string(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _retry_delay_seconds(attempt_count: int) -> int:
@@ -604,15 +626,15 @@ def process_resend_delivery_queue(
             attempt_count = int(row["attempt_count"]) + 1
             max_attempts = int(row["max_attempts"])
             payload_snapshot = json.loads(str(row["payload_json"] or "{}") or "{}")
-            request_payload = _payload_with_stored_attachments(payload_snapshot)
-            store.update_mail_delivery_queue_item(
-                connection,
-                queue_id=queue_id,
-                status="sending",
-                attempt_count=attempt_count,
-                last_attempt_at=started_at,
-            )
             try:
+                request_payload = _payload_with_stored_attachments(payload_snapshot)
+                store.update_mail_delivery_queue_item(
+                    connection,
+                    queue_id=queue_id,
+                    status="sending",
+                    attempt_count=attempt_count,
+                    last_attempt_at=started_at,
+                )
                 response = _resend_request_json(
                     method="POST",
                     path="/emails",
@@ -779,6 +801,7 @@ def resend_send_email(
     config_path: Path | None = None,
     attempt_immediately: bool = True,
     max_attempts: int = DEFAULT_RESEND_MAX_ATTEMPTS,
+    scheduled_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     recipients = [address.strip() for address in to if address and address.strip()]
     if not recipients:
@@ -861,6 +884,8 @@ def resend_send_email(
 
     target_db_path = journal_db_path or store.default_db_path()
     queue_key = f"resend:{outbound_message_id}"
+    scheduled_dt = _coerce_utc_datetime(scheduled_at)
+    next_attempt_at = _utc_datetime_string(scheduled_dt) if scheduled_dt is not None else _utc_now_string()
     with store.open_db(target_db_path) as connection:
         communication_id = store.upsert_communication_from_sync(
             connection,
@@ -949,7 +974,7 @@ def resend_send_email(
                 status="queued",
                 attempt_count=0,
                 max_attempts=max(1, int(max_attempts)),
-                next_attempt_at=_utc_now_string(),
+                next_attempt_at=next_attempt_at,
             )
             connection.commit()
         except Exception as exc:
@@ -976,8 +1001,11 @@ def resend_send_email(
         "thread_key": derived_thread_key,
         "message_id": outbound_message_id,
         "status": "queued",
+        "next_attempt_at": next_attempt_at,
     }
-    if attempt_immediately:
+    if scheduled_dt is not None:
+        delivery_result["scheduled_at"] = next_attempt_at
+    if attempt_immediately and next_attempt_at <= _utc_now_string():
         process_result = process_resend_delivery_queue(
             db_path=target_db_path,
             config_path=config_path,
@@ -1010,4 +1038,7 @@ def resend_send_email(
                     "error": matched_failure.get("error") or "",
                 }
             )
+    elif attempt_immediately:
+        delivery_result["attempted_immediately"] = False
+        delivery_result["deferred_until"] = next_attempt_at
     return delivery_result

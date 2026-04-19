@@ -3,8 +3,11 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
+from importlib import metadata as importlib_metadata
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sqlite3
@@ -19,11 +22,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from life_ops import credentials
 from life_ops.calendar import build_calendar_day, rollover_calendar_day, save_calendar_day
 from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
 from life_ops import mail_vault
-from life_ops.resend_integration import resend_send_email
+from life_ops.resend_integration import (
+    DEFAULT_RESEND_BATCH_DAILY_CAP,
+    DEFAULT_RESEND_BATCH_MAX_PER_HOUR,
+    DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES,
+    resend_send_email,
+)
 from life_ops import store
 from life_ops.cloudflare_email import cloudflare_mail_queue_status, sync_cloudflare_mail_queue
 
@@ -35,7 +44,14 @@ DEFAULT_MAIL_UI_OUTBOUND_SOURCE = "resend_email"
 DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE = "correspondence"
 DEFAULT_MAIL_UI_CONTACT_LIMIT = 200
 DEFAULT_MAIL_UI_FAVICON_PATH = "/static/favicon.svg"
-DEFAULT_MAIL_UI_OG_IMAGE_PATH = "/static/og-image.svg"
+DEFAULT_MAIL_UI_OG_IMAGE_PATH = "/static/og-image.png"
+DEFAULT_CMAIL_PUBLIC_URL = "https://cmail.tail649edd.ts.net"
+CMAIL_PUBLIC_URL = (os.environ.get("LIFE_OPS_CMAIL_PUBLIC_URL") or DEFAULT_CMAIL_PUBLIC_URL).rstrip("/")
+CMAIL_TAILNET_ACCESS_MESSAGE = "Cmail is private. Open Tailscale and make sure you are connected, then try again."
+FRG_BOOKING_WEBHOOK_SECRET_NAME = "FRG_BOOKING_WEBHOOK_SECRET"
+FRG_BOOKING_WEBHOOK_MAX_SKEW_SECONDS = 300
+FRG_BOOKING_WEBHOOK_SOURCE = "frg_site_booking"
+FRG_BOOKING_WEBHOOK_SOURCE_TABLE = "stripe_checkout_sessions"
 MAIL_UI_BACKGROUND_SYNC_INTERVAL_SECONDS = 2.0
 MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 2000
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -298,10 +314,23 @@ _HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CMAIL</title>
+  <meta name="theme-color" content="#0a0d0b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cmail">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Cmail</title>
+  <link rel="canonical" href="__CMAIL_PUBLIC_URL__/">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <meta property="og:title" content="CMAIL">
-  <meta property="og:image" content="/static/og-image.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+  <meta property="og:title" content="Cmail">
+  <meta property="og:url" content="__CMAIL_PUBLIC_URL__/">
+  <meta property="og:image" content="__CMAIL_PUBLIC_URL__/static/og-image.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
   <style>
     :root {
       color-scheme: dark;
@@ -317,8 +346,15 @@ _HTML = """<!doctype html>
       --sans: "SF Pro Display", "Inter", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
+    html {
+      min-height: 100%;
+      scroll-behavior: smooth;
+      overflow-x: hidden;
+    }
     body {
       margin: 0;
+      min-width: 0;
+      overflow-x: hidden;
       background: radial-gradient(circle at top, #111913 0%, var(--bg) 52%);
       color: var(--text);
       font-family: var(--sans);
@@ -421,6 +457,11 @@ _HTML = """<!doctype html>
       padding: 10px 12px;
       border-radius: 12px;
       font: 500 14px/1.3 var(--sans);
+      max-width: 100%;
+    }
+    select {
+      width: 100%;
+      min-width: 0;
     }
     textarea {
       min-height: 150px;
@@ -489,11 +530,15 @@ _HTML = """<!doctype html>
     .alert .message { color: var(--muted); margin-top: 4px; font-size: 14px; }
     .main {
       display: grid;
-      grid-template-columns: 380px 1fr;
+      grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
       gap: 14px;
       min-height: 72vh;
+      min-width: 0;
     }
-    .panel { overflow: hidden; }
+    .panel {
+      min-width: 0;
+      overflow: hidden;
+    }
     .panel-head {
       display: flex;
       align-items: center;
@@ -562,6 +607,7 @@ _HTML = """<!doctype html>
       flex-direction: column;
       max-height: calc(72vh - 54px);
       overflow: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .thread {
       padding: 14px 16px;
@@ -619,6 +665,39 @@ _HTML = """<!doctype html>
       color: #ffb4a8;
       border-color: rgba(255, 180, 168, 0.28);
       background: rgba(255, 137, 118, 0.08);
+    }
+    .thread-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .hide-button {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: transparent;
+      color: var(--muted);
+      height: 24px;
+      min-width: 24px;
+      border-radius: 999px;
+      padding: 0 8px;
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .hide-button:hover {
+      color: var(--accent);
+      border-color: rgba(184, 255, 77, 0.26);
+      background: rgba(184, 255, 77, 0.08);
+    }
+    .restore-button:hover {
+      color: #f5f8f3;
+      border-color: rgba(255, 255, 255, 0.24);
+      background: rgba(255, 255, 255, 0.07);
     }
     .confirm-layer {
       position: fixed;
@@ -689,6 +768,7 @@ _HTML = """<!doctype html>
       display: grid;
       grid-template-rows: auto auto 1fr;
       min-height: 100%;
+      min-width: 0;
     }
     .detail.draft-mode {
       grid-template-rows: auto 1fr;
@@ -754,7 +834,10 @@ _HTML = """<!doctype html>
       display: grid;
       gap: 18px;
       align-content: start;
-      overflow: auto;
+      min-width: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
     }
     .draft-detail-body {
       display: flex;
@@ -796,7 +879,12 @@ _HTML = """<!doctype html>
       font-size: 12px;
       line-height: 1.45;
     }
-    .block { display: grid; gap: 8px; }
+    .block {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+      max-width: 100%;
+    }
     .body-text {
       white-space: pre-wrap;
       line-height: 1.75;
@@ -858,7 +946,17 @@ _HTML = """<!doctype html>
       font-size: 15px;
       display: grid;
       gap: 12px;
+      min-width: 0;
+      max-width: 100%;
       overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .body-rich *,
+    .quote-rich * {
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .body-rich p,
     .body-rich div,
@@ -881,6 +979,8 @@ _HTML = """<!doctype html>
     .body-rich table,
     .quote-rich table {
       width: 100%;
+      max-width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
     }
     .body-rich td,
@@ -889,6 +989,15 @@ _HTML = """<!doctype html>
     .quote-rich th {
       vertical-align: top;
       padding: 4px 8px 4px 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .body-rich pre,
+    .body-rich code,
+    .quote-rich pre,
+    .quote-rich code {
+      white-space: pre-wrap;
+      overflow-x: hidden;
     }
     .body-rich blockquote,
     .quote-rich blockquote {
@@ -1180,11 +1289,242 @@ _HTML = """<!doctype html>
     }
     @media (max-width: 1080px) {
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .main { grid-template-columns: 1fr; }
+      .main {
+        grid-template-columns: 1fr;
+        min-height: auto;
+      }
       .thread-list { max-height: 320px; }
       .detail-grid { grid-template-columns: 1fr; }
       .detail-grid .item-action { justify-content: flex-start; }
       .draft-body-field textarea { min-height: 240px; }
+    }
+    @media (max-width: 720px) {
+      .shell {
+        gap: 10px;
+        padding:
+          calc(10px + env(safe-area-inset-top, 0px))
+          calc(10px + env(safe-area-inset-right, 0px))
+          calc(16px + env(safe-area-inset-bottom, 0px))
+          calc(10px + env(safe-area-inset-left, 0px));
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        padding: 8px 0 6px;
+        background: linear-gradient(180deg, rgba(10, 13, 11, 0.96) 0%, rgba(10, 13, 11, 0.78) 100%);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+      }
+      .brand-lockup {
+        width: 100%;
+      }
+      .hero-title {
+        gap: 10px;
+        font-size: clamp(40px, 13vw, 56px);
+      }
+      .hero-title::before {
+        width: 10px;
+        height: 10px;
+      }
+      .topbar-actions {
+        width: 100%;
+        gap: 8px;
+        align-items: stretch;
+      }
+      .tabbar {
+        flex: 1 1 auto;
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+      }
+      .tabbar::-webkit-scrollbar,
+      .thread-list::-webkit-scrollbar,
+      .detail-body::-webkit-scrollbar,
+      .draft-preview::-webkit-scrollbar,
+      .attachment-text::-webkit-scrollbar {
+        display: none;
+      }
+      .thread-list,
+      .detail-body,
+      .draft-preview,
+      .attachment-text {
+        scrollbar-width: none;
+      }
+      .tab-button {
+        min-height: 38px;
+        padding: 10px 12px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .status-pill {
+        flex: 0 0 auto;
+        align-self: center;
+      }
+      .main {
+        gap: 10px;
+      }
+      .panel {
+        border-radius: 16px;
+      }
+      .panel-head {
+        padding: 12px;
+      }
+      .panel-search {
+        padding: 10px 12px;
+      }
+      .panel-search input,
+      select,
+      button,
+      input,
+      textarea {
+        font-size: 16px;
+      }
+      .thread-list {
+        max-height: min(42vh, 390px);
+        overscroll-behavior: contain;
+      }
+      .thread {
+        min-height: 58px;
+        padding: 13px 12px;
+      }
+      .thread .subject {
+        font-size: 15px;
+      }
+      .delete-button,
+      .hide-button {
+        min-width: 34px;
+        min-height: 34px;
+      }
+      .hide-button {
+        padding: 0 10px;
+      }
+      .detail {
+        min-height: calc(100dvh - 250px);
+      }
+      .detail-head {
+        padding: 16px 14px 10px;
+      }
+      .detail-head h3 {
+        font-size: clamp(22px, 6vw, 28px);
+      }
+      .message-title {
+        font-size: 20px;
+      }
+      .detail-grid {
+        gap: 12px;
+        padding: 14px;
+      }
+      .detail-body {
+        gap: 14px;
+        padding: 14px;
+      }
+      .body-text {
+        font-size: 16px;
+        line-height: 1.7;
+      }
+      .body-rich,
+      .quote-rich {
+        font-size: 15px;
+      }
+      .body-rich table,
+      .quote-rich table {
+        display: block;
+        width: 100%;
+        overflow: hidden;
+      }
+      .body-rich tbody,
+      .body-rich thead,
+      .body-rich tr,
+      .body-rich td,
+      .body-rich th,
+      .quote-rich tbody,
+      .quote-rich thead,
+      .quote-rich tr,
+      .quote-rich td,
+      .quote-rich th {
+        display: block;
+        width: 100%;
+      }
+      .body-rich tr,
+      .quote-rich tr {
+        padding: 10px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .body-rich tr:last-child,
+      .quote-rich tr:last-child {
+        border-bottom: 0;
+      }
+      .body-rich td,
+      .body-rich th,
+      .quote-rich td,
+      .quote-rich th {
+        padding: 0;
+      }
+      .body-rich td:first-child:not(:only-child),
+      .quote-rich td:first-child:not(:only-child) {
+        color: var(--muted);
+        font: 700 11px/1.35 var(--mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+      }
+      .attachments,
+      .message-list {
+        padding: 12px;
+      }
+      .draft-form {
+        gap: 12px;
+      }
+      .draft-body-field textarea {
+        min-height: min(46vh, 520px);
+      }
+      .draft-actions {
+        position: sticky;
+        bottom: env(safe-area-inset-bottom, 0px);
+        z-index: 5;
+        padding-top: 8px;
+        background: linear-gradient(180deg, rgba(17, 22, 18, 0) 0%, rgba(17, 22, 18, 0.94) 28%);
+      }
+      .confirm-layer {
+        padding: 16px;
+      }
+    }
+    @media (max-width: 460px) {
+      .topbar-actions {
+        align-items: center;
+      }
+      .tabbar {
+        width: 100%;
+      }
+      .badge {
+        font-size: 10px;
+      }
+      .panel-actions {
+        gap: 6px;
+      }
+      .message-title {
+        font-size: 18px;
+      }
+      .inline-reply,
+      .inline-delete {
+        min-height: 36px;
+      }
+    }
+    @media (hover: none) {
+      .thread:hover {
+        background: transparent;
+      }
+      .thread.active:hover {
+        background: var(--accent-soft);
+      }
+      button,
+      .tab-button,
+      .thread,
+      .thread-group {
+        touch-action: manipulation;
+      }
     }
   </style>
 </head>
@@ -1198,6 +1538,7 @@ _HTML = """<!doctype html>
         <div class="tabbar" role="tablist" aria-label="Mail views">
           <button class="tab-button active" type="button" id="tabInbox" role="tab" aria-selected="true">Correspondence</button>
           <button class="tab-button" type="button" id="tabDrafts" role="tab" aria-selected="false">Drafts</button>
+          <button class="tab-button" type="button" id="tabHidden" role="tab" aria-selected="false">Hidden</button>
           <a class="tab-button" href="/calendar">Calendar</a>
         </div>
         <span class="badge status-pill" id="syncBadge">syncing…</span>
@@ -1243,6 +1584,7 @@ _HTML = """<!doctype html>
     const CMAIL_SIGNATURE_TEXT = __CMAIL_SIGNATURE_TEXT_JSON__;
     const CMAIL_KNOWN_SIGNATURE_TEXTS = __CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__;
     const CMAIL_SIGNATURE_PREVIEW_HTML = __CMAIL_SIGNATURE_PREVIEW_HTML_JSON__;
+    const TAILNET_ACCESS_MESSAGE = __CMAIL_TAILNET_ACCESS_MESSAGE_JSON__;
     const CORRESPONDENCE_SOURCE = "correspondence";
 
     function loadStoredSet(storageKey) {
@@ -1485,6 +1827,12 @@ _HTML = """<!doctype html>
       });
     }
 
+    function normalizeActiveView(value) {
+      const clean = String(value || "").trim().toLowerCase();
+      if (clean === "drafts" || clean === "hidden") return clean;
+      return "inbox";
+    }
+
     function contactLatestTimestamp(contact) {
       const directValue = timestampValue(contact?.happened_at || "");
       if (directValue > 0) return directValue;
@@ -1521,7 +1869,7 @@ _HTML = """<!doctype html>
     }
 
     const state = {
-      activeView: loadStoredText(ACTIVE_VIEW_STORAGE_KEY) === "drafts" ? "drafts" : "inbox",
+      activeView: normalizeActiveView(loadStoredText(ACTIVE_VIEW_STORAGE_KEY)),
       correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
       selectedContactKey: loadStoredText(SELECTED_CONTACT_STORAGE_KEY),
       selectedThreadKey: null,
@@ -1595,18 +1943,28 @@ _HTML = """<!doctype html>
     }
 
     async function fetchJson(path) {
-      const response = await fetch(path);
+      let response;
+      try {
+        response = await fetch(path);
+      } catch (_error) {
+        throw new Error(TAILNET_ACCESS_MESSAGE);
+      }
       if (!response.ok) throw new Error(await response.text());
       return await response.json();
     }
 
     async function postJson(path, payload = {}, options = {}) {
-      const response = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: Boolean(options.keepalive),
-      });
+      let response;
+      try {
+        response = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: Boolean(options.keepalive),
+        });
+      } catch (_error) {
+        throw new Error(TAILNET_ACCESS_MESSAGE);
+      }
       if (!response.ok) throw new Error(await response.text());
       return await response.json();
     }
@@ -1960,13 +2318,18 @@ _HTML = """<!doctype html>
 
     function renderChrome() {
       const inboxActive = state.activeView === "inbox";
+      const draftsActive = state.activeView === "drafts";
+      const hiddenActive = state.activeView === "hidden";
       $("tabInbox").classList.toggle("active", inboxActive);
       $("tabInbox").setAttribute("aria-selected", inboxActive ? "true" : "false");
-      $("tabDrafts").classList.toggle("active", !inboxActive);
-      $("tabDrafts").setAttribute("aria-selected", inboxActive ? "false" : "true");
-      $("panelTitle").textContent = inboxActive ? "correspondence" : "drafts";
-      $("newDraftButton").classList.toggle("hidden", inboxActive);
-      $("correspondenceSearchWrap").classList.toggle("hidden", !inboxActive);
+      $("tabDrafts").classList.toggle("active", draftsActive);
+      $("tabDrafts").setAttribute("aria-selected", draftsActive ? "true" : "false");
+      $("tabHidden").classList.toggle("active", hiddenActive);
+      $("tabHidden").setAttribute("aria-selected", hiddenActive ? "true" : "false");
+      $("panelTitle").textContent = hiddenActive ? "hidden" : draftsActive ? "drafts" : "correspondence";
+      $("newDraftButton").classList.toggle("hidden", !draftsActive);
+      $("correspondenceSearchWrap").classList.toggle("hidden", draftsActive);
+      $("correspondenceSearch").placeholder = hiddenActive ? "search hidden mail" : "search name or email";
       $("correspondenceSearch").value = state.correspondenceQuery || "";
     }
 
@@ -1995,7 +2358,8 @@ _HTML = """<!doctype html>
     }
 
     async function loadSyncStatus() {
-      const payload = await fetchJson(`/api/sync-status?source=${encodeURIComponent(CORRESPONDENCE_SOURCE)}&sync=1`);
+      const mailbox = state.activeView === "hidden" ? "hidden" : "correspondence";
+      const payload = await fetchJson(`/api/sync-status?source=${encodeURIComponent(CORRESPONDENCE_SOURCE)}&mailbox=${encodeURIComponent(mailbox)}&sync=1`);
       const nextSignature = mailboxVersionSignature(payload);
       const mailboxChanged = nextSignature !== state.mailboxVersionSignature;
       mergeSyncState(payload);
@@ -2073,8 +2437,10 @@ _HTML = """<!doctype html>
     }
 
     function renderContactList(payload) {
+      const hiddenActive = state.activeView === "hidden";
       const contacts = displayedContacts(payload.contacts || []);
       const signature = JSON.stringify([
+        state.activeView,
         state.correspondenceQuery || "",
         contacts.map((contact) => [
           contact.contact_key,
@@ -2087,7 +2453,10 @@ _HTML = """<!doctype html>
       ]);
       $("threadCount").textContent = `${contacts.length} contact${contacts.length === 1 ? "" : "s"}`;
       if (!contacts.length) {
-        $("threadList").innerHTML = `<div class="empty">${state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet."}</div>`;
+        const emptyCopy = hiddenActive
+          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence.")
+          : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
+        $("threadList").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         state.listSignature = signature;
         return;
       }
@@ -2098,13 +2467,25 @@ _HTML = """<!doctype html>
         return;
       }
       state.listSignature = signature;
+      const contactActionMarkup = (contact) => {
+        const contactKey = escapeHtml(contact.contact_key);
+        if (hiddenActive) {
+          return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Return this correspondence to the main view">show</button>`;
+        }
+        return `
+          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this correspondence to Hidden">hide</button>
+          <button class="delete-button" type="button" data-delete-contact="${contactKey}" title="Archive this correspondence">×</button>
+        `;
+      };
       $("threadList").innerHTML = contacts.map((contact) => `
         <div class="thread ${contact.contact_key === state.selectedContactKey ? "active" : ""}" data-contact-key="${escapeHtml(contact.contact_key)}">
           <div class="thread-main">
             <span class="unread-orb ${contactHasUnread(contact.contact_key) ? "" : "hidden"}" aria-hidden="true"></span>
             <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
           </div>
-          <button class="delete-button" type="button" data-delete-contact="${escapeHtml(contact.contact_key)}" title="Archive this correspondence">×</button>
+          <div class="thread-actions">
+            ${contactActionMarkup(contact)}
+          </div>
         </div>
       `).join("");
       for (const node of document.querySelectorAll(".thread[data-contact-key]")) {
@@ -2119,6 +2500,22 @@ _HTML = """<!doctype html>
           const contactKey = node.getAttribute("data-delete-contact") || "";
           if (!contactKey) return;
           requestDeleteContact(contactKey);
+        });
+      }
+      for (const node of document.querySelectorAll("[data-hide-contact]")) {
+        node.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const contactKey = node.getAttribute("data-hide-contact") || "";
+          if (!contactKey) return;
+          await hideContact(contactKey);
+        });
+      }
+      for (const node of document.querySelectorAll("[data-unhide-contact]")) {
+        node.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const contactKey = node.getAttribute("data-unhide-contact") || "";
+          if (!contactKey) return;
+          await unhideContact(contactKey);
         });
       }
     }
@@ -2269,7 +2666,10 @@ _HTML = """<!doctype html>
       persistSelectionState();
       if (!state.selectedId) {
         $("detailPanel").classList.remove("draft-mode");
-        $("detailPanel").innerHTML = `<div class="empty">${state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet."}</div>`;
+        const emptyCopy = state.activeView === "hidden"
+          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
+          : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
+        $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         return;
       }
       const cached = state.detailCache.get(String(state.selectedId));
@@ -2297,7 +2697,7 @@ _HTML = """<!doctype html>
 
     function applyOptimisticOverviewUpdate() {
       state.overview = normalizeOverviewPayload(state.overview, { allowPendingResolution: false });
-      if (state.overview) {
+      if (state.overview && state.activeView === "inbox") {
         persistOverviewCache(state.overview);
       }
       pruneDetailCache();
@@ -2990,6 +3390,59 @@ _HTML = """<!doctype html>
       renderConfirm();
     }
 
+    function removeContactFromLocalOverview(contactKey) {
+      if (!state.overview || !contactKey) return;
+      const existingMessages = messagesForContact(contactKey);
+      const messages = (state.overview.messages || []).filter(
+        (message) => String(message.contact_key || "") !== String(contactKey),
+      );
+      const contacts = groupContacts(messages);
+      state.overview = {
+        ...state.overview,
+        messages,
+        contacts,
+        message_count: messages.length,
+        contact_count: contacts.length,
+      };
+      for (const message of existingMessages) {
+        state.detailCache.delete(String(message.id));
+        state.pendingDetailLoads.delete(String(message.id));
+      }
+      if (state.selectedContactKey === contactKey) {
+        state.selectedContactKey = null;
+        state.selectedThreadKey = null;
+        state.selectedId = null;
+      }
+      pruneDetailCache();
+      renderCurrentSelection();
+    }
+
+    async function hideContact(contactKey) {
+      const cleanContactKey = String(contactKey || "").trim();
+      if (!cleanContactKey) return;
+      removeContactFromLocalOverview(cleanContactKey);
+      try {
+        await postJson("/api/contacts/hide", { contact_key: cleanContactKey }, { keepalive: true });
+        await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+      } catch (error) {
+        await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+        throw error;
+      }
+    }
+
+    async function unhideContact(contactKey) {
+      const cleanContactKey = String(contactKey || "").trim();
+      if (!cleanContactKey) return;
+      removeContactFromLocalOverview(cleanContactKey);
+      try {
+        await postJson("/api/contacts/unhide", { contact_key: cleanContactKey }, { keepalive: true });
+        await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+      } catch (error) {
+        await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+        throw error;
+      }
+    }
+
     async function deleteContact(contactKey) {
       const existingMessages = messagesForContact(contactKey);
       const queueId = `contact:${contactKey}`;
@@ -3169,14 +3622,18 @@ _HTML = """<!doctype html>
 
     async function loadOverview({ sync = false, render = true } = {}) {
       state.lastRefreshStartedAt = Date.now();
+      const mailbox = state.activeView === "hidden" ? "hidden" : "correspondence";
       const params = new URLSearchParams({
         limit: "80",
         source: CORRESPONDENCE_SOURCE,
+        mailbox,
       });
       if (sync) params.set("sync", "1");
       state.overview = normalizeOverviewPayload(await fetchJson(`/api/overview?${params.toString()}`), { allowPendingResolution: true });
       primeViewedMessagesFromOverview(state.overview);
-      persistOverviewCache(state.overview);
+      if (mailbox === "correspondence") {
+        persistOverviewCache(state.overview);
+      }
       state.mailboxVersionSignature = mailboxVersionSignature(state.overview);
       pruneDetailCache();
       renderSyncBadge(state.overview);
@@ -3199,14 +3656,26 @@ _HTML = """<!doctype html>
     }
 
     function setActiveView(view) {
-      const nextView = view === "drafts" ? "drafts" : "inbox";
+      const nextView = normalizeActiveView(view);
       if (state.activeView === nextView) {
         renderCurrentSelection();
         return;
       }
+      const nextMailbox = nextView === "hidden" ? "hidden" : "correspondence";
+      const switchingMailbox = nextView !== "drafts" && (
+        state.activeView === "hidden"
+        || nextView === "hidden"
+        || String(state.overview?.mailbox || "correspondence") !== nextMailbox
+      );
       state.activeView = nextView;
       state.listSignature = "";
       state.draftStatus = "";
+      if (switchingMailbox) {
+        state.overview = null;
+        state.selectedContactKey = null;
+        state.selectedThreadKey = null;
+        state.selectedId = null;
+      }
       persistSelectionState();
       renderCurrentSelection();
       if (nextView === "drafts") {
@@ -3218,6 +3687,10 @@ _HTML = """<!doctype html>
         loadDrafts().catch((error) => {
           $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
         });
+      } else {
+        loadOverview({ sync: false }).catch((error) => {
+          $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+        });
       }
     }
 
@@ -3225,7 +3698,7 @@ _HTML = """<!doctype html>
       try {
         const { mailboxChanged } = await loadSyncStatus();
         if (mailboxChanged || !state.overview) {
-          await loadOverview({ sync: false, render: state.activeView === "inbox" });
+          await loadOverview({ sync: false, render: state.activeView !== "drafts" });
         }
       } catch (_error) {
         // Keep the last rendered inbox visible if the sync step hiccups.
@@ -3267,6 +3740,7 @@ _HTML = """<!doctype html>
     }
 
     function renderInitialOverview() {
+      if (state.activeView === "hidden") return;
       const candidates = [
         SERVER_BOOTSTRAP_OVERVIEW,
         loadStoredJson(OVERVIEW_CACHE_STORAGE_KEY),
@@ -3291,6 +3765,7 @@ _HTML = """<!doctype html>
     renderChrome();
     $("tabInbox").addEventListener("click", () => setActiveView("inbox"));
     $("tabDrafts").addEventListener("click", () => setActiveView("drafts"));
+    $("tabHidden").addEventListener("click", () => setActiveView("hidden"));
     $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
     $("newDraftButton").addEventListener("click", () => startNewDraft());
     if (state.activeView === "drafts") {
@@ -3321,7 +3796,6 @@ _HTML = """<!doctype html>
 </body>
 </html>
 """
-
 
 def _json_value(raw: str, default: Any) -> Any:
     try:
@@ -4057,6 +4531,30 @@ def _address_field_values(value: str) -> list[str]:
     return formatted
 
 
+def _coerce_cmail_schedule_datetime(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        clean = str(value or "").strip()
+        if not clean:
+            return None
+        parsed = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _cmail_schedule_string(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _cmail_batch_gap_minutes(*, max_per_hour: int, min_gap_minutes: float) -> float:
+    hourly_gap = 60.0 / max(1, int(max_per_hour))
+    return max(float(min_gap_minutes), hourly_gap)
+
+
 def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     draft_id = int(row["id"])
     return {
@@ -4335,6 +4833,7 @@ def send_cmail_draft(
     db_path: Path,
     draft_id: int,
     config_path: Path | None = None,
+    scheduled_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     temp_attachment_dir: Path | None = None
     temp_attachment_paths: list[Path] = []
@@ -4389,6 +4888,7 @@ def send_cmail_draft(
             config_path=config_path,
             attempt_immediately=False,
             apply_signature=False,
+            scheduled_at=scheduled_at,
         )
     finally:
         if temp_attachment_dir is not None:
@@ -4404,6 +4904,97 @@ def send_cmail_draft(
         "draft_id": int(draft_id),
         "draft_status": str(delivery.get("status") or "queued"),
         "delivery": delivery,
+    }
+
+
+def send_cmail_draft_batch(
+    *,
+    db_path: Path,
+    draft_ids: list[int],
+    config_path: Path | None = None,
+    start_at: datetime | str | None = None,
+    delay_minutes: float = 0.0,
+    min_gap_minutes: float = DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES,
+    max_per_hour: int = DEFAULT_RESEND_BATCH_MAX_PER_HOUR,
+    daily_cap: int = DEFAULT_RESEND_BATCH_DAILY_CAP,
+    dry_run: bool = False,
+    force_immediate: bool = False,
+) -> dict[str, Any]:
+    unique_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for draft_id in draft_ids:
+        clean_id = int(draft_id)
+        if clean_id in seen_ids:
+            continue
+        seen_ids.add(clean_id)
+        unique_ids.append(clean_id)
+    if not unique_ids:
+        raise ValueError("at least one draft id is required")
+    if int(daily_cap) > 0 and len(unique_ids) > int(daily_cap):
+        raise ValueError(f"batch has {len(unique_ids)} drafts, above daily cap {int(daily_cap)}")
+
+    start_dt = _coerce_cmail_schedule_datetime(start_at) or datetime.now(timezone.utc).replace(microsecond=0)
+    if float(delay_minutes or 0) > 0:
+        start_dt += timedelta(minutes=float(delay_minutes))
+    effective_gap = 0.0 if force_immediate else _cmail_batch_gap_minutes(
+        max_per_hour=max_per_hour,
+        min_gap_minutes=min_gap_minutes,
+    )
+
+    scheduled: list[dict[str, Any]] = []
+    with store.open_db(db_path) as connection:
+        for index, draft_id in enumerate(unique_ids):
+            row = store.get_communication_by_id(connection, draft_id)
+            if row is None or str(row["source"] or "") != "cmail_draft":
+                raise KeyError(f"draft {draft_id} not found")
+            if str(row["status"] or "") != "draft":
+                raise ValueError(f"draft {draft_id} is not sendable")
+            scheduled_at = start_dt + timedelta(minutes=effective_gap * index)
+            scheduled.append(
+                {
+                    "draft_id": draft_id,
+                    "scheduled_at": _cmail_schedule_string(scheduled_at),
+                    "to": str(row["external_to"] or ""),
+                    "subject": str(row["subject"] or ""),
+                }
+            )
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "queued_count": 0,
+            "draft_count": len(scheduled),
+            "max_per_hour": int(max_per_hour),
+            "min_gap_minutes": float(min_gap_minutes),
+            "effective_gap_minutes": effective_gap,
+            "daily_cap": int(daily_cap),
+            "scheduled": scheduled,
+        }
+
+    sent: list[dict[str, Any]] = []
+    for item in scheduled:
+        result = send_cmail_draft(
+            db_path=db_path,
+            draft_id=int(item["draft_id"]),
+            config_path=config_path,
+            scheduled_at=str(item["scheduled_at"]),
+        )
+        sent.append(
+            {
+                **item,
+                "draft_status": str(result.get("draft_status") or ""),
+                "delivery": result.get("delivery") or {},
+            }
+        )
+    return {
+        "dry_run": False,
+        "queued_count": len(sent),
+        "draft_count": len(scheduled),
+        "max_per_hour": int(max_per_hour),
+        "min_gap_minutes": float(min_gap_minutes),
+        "effective_gap_minutes": effective_gap,
+        "daily_cap": int(daily_cap),
+        "scheduled": sent,
     }
 
 
@@ -4914,59 +5505,35 @@ def cleanup_cmail_correspondence_artifacts(*, db_path: Path) -> dict[str, list[i
     }
 
 
-def _correspondence_mailbox_version_from_connection(connection: sqlite3.Connection) -> dict[str, Any]:
-    params: list[Any] = [DEFAULT_MAIL_UI_SOURCE, DEFAULT_MAIL_UI_OUTBOUND_SOURCE]
-    suppressed_ids = _orphaned_resend_correspondence_ids(connection)
-    suppressed_clause = ""
-    if suppressed_ids:
-        placeholders = ", ".join("?" for _ in suppressed_ids)
-        suppressed_clause = f" AND communications.id NOT IN ({placeholders})"
-        params.extend(int(value) for value in suppressed_ids)
-    where_clause = f"""
-        communications.channel = 'email'
-        AND communications.status != 'deleted'
-        AND (
-            (communications.source = ? AND communications.direction = 'inbound')
-            OR
-            (communications.source = ? AND communications.direction = 'outbound')
-        )
-        {suppressed_clause}
-    """
-    count_row = connection.execute(
-        f"""
-        SELECT
-            COUNT(*) AS message_count,
-            MAX(id) AS latest_message_id,
-            MAX(happened_at) AS latest_happened_at
-        FROM communications
-        WHERE {where_clause}
-        """,
-        params,
-    ).fetchone()
-    contact_row = connection.execute(
-        f"""
-        SELECT COUNT(*) AS contact_count
-        FROM (
-            SELECT
-                LOWER(TRIM(
-                    CASE
-                        WHEN direction = 'outbound' THEN COALESCE(NULLIF(external_to, ''), NULLIF(person, ''), NULLIF(source, ''), 'unknown recipient')
-                        ELSE COALESCE(NULLIF(external_from, ''), NULLIF(person, ''), NULLIF(source, ''), 'unknown sender')
-                    END
-                )) AS contact_key
-            FROM communications
-            WHERE {where_clause}
-            GROUP BY contact_key
-        ) grouped_contacts
-        """,
-        params,
-    ).fetchone()
-    return {
-        "message_count": int((count_row["message_count"] if count_row is not None else 0) or 0),
-        "contact_count": int((contact_row["contact_count"] if contact_row is not None else 0) or 0),
-        "latest_message_id": int((count_row["latest_message_id"] if count_row is not None else 0) or 0),
-        "latest_happened_at": str((count_row["latest_happened_at"] if count_row is not None else "") or ""),
-    }
+def _mail_ui_mailbox_is_hidden(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"hidden", "spam", "suppressed"}
+
+
+def _correspondence_messages_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    limit: int | None,
+    hidden: bool = False,
+) -> list[dict[str, Any]]:
+    hidden_contacts = _hidden_contacts_from_connection(connection)
+    rows = _list_correspondence_rows(connection, limit=None)
+    messages = [_communication_summary(row) for row in rows]
+    if hidden:
+        messages = [message for message in messages if str(message.get("contact_key") or "").lower() in hidden_contacts]
+    elif hidden_contacts:
+        messages = [message for message in messages if str(message.get("contact_key") or "").lower() not in hidden_contacts]
+    if limit is not None:
+        messages = messages[: max(1, int(limit))]
+    return messages
+
+
+def _correspondence_mailbox_version_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    hidden: bool = False,
+) -> dict[str, Any]:
+    messages = _correspondence_messages_from_connection(connection, limit=None, hidden=hidden)
+    return _mailbox_version_from_messages(messages)
 
 
 def _build_correspondence_overview_from_connection(
@@ -4974,18 +5541,21 @@ def _build_correspondence_overview_from_connection(
     *,
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     include_details: bool = False,
+    hidden: bool = False,
 ) -> dict[str, Any]:
-    rows = _list_correspondence_rows(connection, limit=limit)
-    messages = [_communication_summary(row) for row in rows]
+    messages = _correspondence_messages_from_connection(connection, limit=limit, hidden=hidden)
     contacts = _group_contacts(messages)
+    hidden_contacts = _hidden_contacts_from_connection(connection)
     payload = {
+        "mailbox": "hidden" if hidden else "correspondence",
         "message_count": len(messages),
         "contact_count": len(contacts),
+        "hidden_contact_count": len(hidden_contacts),
         "messages": messages,
         "contacts": contacts,
         "cloudflare_queue": _cloudflare_queue_status_from_connection(connection),
         "cloudflare_sync": _cloudflare_sync_status_from_connection(connection),
-        "mailbox_version": _correspondence_mailbox_version_from_connection(connection),
+        "mailbox_version": _correspondence_mailbox_version_from_connection(connection, hidden=hidden),
     }
     if include_details:
         payload["details"] = {
@@ -5025,6 +5595,14 @@ def _mark_contact_hidden(
     hidden_at: str | None = None,
 ) -> None:
     store.mark_hidden_mail_contact(connection, contact_key=contact_key, hidden_at=hidden_at)
+
+
+def _clear_contact_hidden(
+    connection: sqlite3.Connection,
+    *,
+    contact_key: str,
+) -> bool:
+    return store.clear_hidden_mail_contact(connection, contact_key=contact_key)
 
 
 def _build_mail_ui_overview_from_connection(
@@ -5138,13 +5716,16 @@ def build_mail_ui_overview(
     status: str | None = "all",
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     include_details: bool = False,
+    mailbox: str | None = None,
 ) -> dict[str, Any]:
+    hidden = _mail_ui_mailbox_is_hidden(mailbox)
     with store.open_db(db_path) as connection:
         payload = (
             _build_correspondence_overview_from_connection(
                 connection,
                 limit=limit,
                 include_details=include_details,
+                hidden=hidden,
             )
             if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
             else _build_mail_ui_overview_from_connection(
@@ -5165,6 +5746,231 @@ def build_mail_ui_overview(
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, indent=2).encode("utf-8")
+
+
+def _frg_booking_webhook_signature(raw_body: bytes, *, timestamp: str, secret: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"{timestamp}.".encode("utf-8") + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _verify_frg_booking_webhook_signature(headers: Any, raw_body: bytes) -> tuple[bool, str]:
+    secret = (
+        os.environ.get(FRG_BOOKING_WEBHOOK_SECRET_NAME, "").strip()
+        or str(credentials.resolve_secret(name=FRG_BOOKING_WEBHOOK_SECRET_NAME) or "").strip()
+    )
+    if not secret:
+        return False, "frg_booking_webhook_secret_not_configured"
+
+    timestamp = str(headers.get("X-FRG-Booking-Timestamp") or "").strip()
+    signature = str(headers.get("X-FRG-Booking-Signature") or "").strip()
+    if signature.startswith("v1="):
+        signature = signature[3:]
+    if not timestamp or not signature:
+        return False, "missing_frg_booking_signature"
+
+    try:
+        timestamp_value = int(timestamp)
+    except ValueError:
+        return False, "invalid_frg_booking_timestamp"
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    if abs(now - timestamp_value) > FRG_BOOKING_WEBHOOK_MAX_SKEW_SECONDS:
+        return False, "stale_frg_booking_signature"
+
+    expected = _frg_booking_webhook_signature(raw_body, timestamp=timestamp, secret=secret)
+    if not hmac.compare_digest(expected, signature):
+        return False, "invalid_frg_booking_signature"
+
+    return True, ""
+
+
+def _frg_booking_text(value: Any, limit: int = 1800) -> str:
+    return " ".join(str(value or "").strip().split())[:limit]
+
+
+def _frg_booking_source_id(booking_id: str) -> int:
+    digest = hashlib.sha256(booking_id.encode("utf-8")).hexdigest()
+    return int(digest[:15], 16)
+
+
+def _frg_booking_clock(value: Any) -> tuple[str, int | None, int | None]:
+    clean = _frg_booking_text(value, limit=32).lower()
+    match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?$", clean)
+    if not match:
+        return "", None, None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    meridiem = (match.group(3) or "").replace(".", "")
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return "", None, None
+    return f"{hour:02d}:{minute:02d}", hour, minute
+
+
+def _frg_booking_end_clock(hour: int | None, minute: int | None, duration_minutes: int) -> str:
+    if hour is None or minute is None:
+        return ""
+    end_value = datetime(2000, 1, 1, hour, minute) + timedelta(minutes=max(0, int(duration_minutes)))
+    return end_value.strftime("%H:%M")
+
+
+def _frg_booking_day(value: Any) -> date:
+    raw_value = _frg_booking_text(value, limit=64)
+    try:
+        return date.fromisoformat(raw_value[:10])
+    except ValueError as exc:
+        raise ValueError("booking selected_date must be an ISO date") from exc
+
+
+def _frg_booking_duration(value: Any) -> int:
+    try:
+        duration = int(value)
+    except (TypeError, ValueError):
+        duration = 30
+    return max(15, min(8 * 60, duration))
+
+
+def _format_frg_booking_notes(payload: dict[str, Any]) -> str:
+    booking = payload.get("booking") if isinstance(payload.get("booking"), dict) else {}
+    payment = payload.get("payment") if isinstance(payload.get("payment"), dict) else {}
+    lines = [
+        f"Booking ID: {_frg_booking_text(booking.get('id'), limit=240)}",
+        f"Event: {_frg_booking_text(payload.get('event'), limit=120)}",
+        f"Name: {_frg_booking_text(booking.get('name'), limit=240)}",
+        f"Email: {_frg_booking_text(booking.get('email'), limit=240)}",
+        f"Focus: {_frg_booking_text(booking.get('focus'), limit=240)}",
+        f"Duration: {_frg_booking_duration(booking.get('durationMinutes'))} minutes",
+        f"Window: {_frg_booking_text(booking.get('selectedSlotLabel') or booking.get('selectedTime'), limit=240)}",
+        f"Timezone: {_frg_booking_text(booking.get('timezone'), limit=120)}",
+    ]
+    custom_window = _frg_booking_text(booking.get("customWindow"), limit=480)
+    if custom_window:
+        lines.append(f"Alternate window: {custom_window}")
+    booking_notes = _frg_booking_text(booking.get("notes"), limit=1200)
+    if booking_notes:
+        lines.append(f"Context: {booking_notes}")
+    stripe_session_id = _frg_booking_text(payment.get("stripeCheckoutSessionId"), limit=240)
+    if stripe_session_id:
+        lines.append(f"Stripe session: {stripe_session_id}")
+    total_cents = payment.get("amountTotalCents", payment.get("totalCents"))
+    if total_cents is not None:
+        lines.append(f"Payment total cents: {total_cents}")
+    zoom_url = _frg_booking_text(payload.get("zoomUrl"), limit=480)
+    if zoom_url:
+        lines.append(f"Zoom: {zoom_url}")
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _frg_booking_confirmation_body(payload: dict[str, Any]) -> str:
+    booking = payload.get("booking") if isinstance(payload.get("booking"), dict) else {}
+    name = _frg_booking_text(booking.get("name"), limit=120)
+    first_name = name.split(" ")[0] if name else "there"
+    focus = _frg_booking_text(booking.get("focus"), limit=180)
+    slot_label = _frg_booking_text(booking.get("selectedSlotLabel") or booking.get("selectedTime"), limit=240)
+    duration = _frg_booking_duration(booking.get("durationMinutes"))
+    zoom_url = _frg_booking_text(payload.get("zoomUrl"), limit=480)
+    lines = [
+        f"Hi {first_name},",
+        "",
+        "Your Fractal Research Group booking is confirmed.",
+        "",
+        f"When: {slot_label or 'the selected window'}",
+        f"Duration: {duration} minutes",
+    ]
+    if focus:
+        lines.append(f"Focus: {focus}")
+    lines.extend(
+        [
+            "",
+            f"Zoom: {zoom_url}" if zoom_url else "I have the calendar hold set and will send the Zoom link shortly.",
+            "",
+            "If anything needs to shift, reply here with the cleanest alternate window.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    event_name = _frg_booking_text(payload.get("event"), limit=120)
+    if event_name not in {"booking.paid", "booking.free_confirmed"}:
+        raise ValueError("unsupported_frg_booking_event")
+
+    booking = payload.get("booking") if isinstance(payload.get("booking"), dict) else {}
+    booking_id = _frg_booking_text(booking.get("id"), limit=240)
+    name = _frg_booking_text(booking.get("name"), limit=240)
+    email = _frg_booking_text(booking.get("email"), limit=240).lower()
+    focus = _frg_booking_text(booking.get("focus"), limit=240) or "FRG booking"
+    if not booking_id or not name or not email:
+        raise ValueError("frg_booking_requires_id_name_and_email")
+
+    target_day = _frg_booking_day(booking.get("selectedDate"))
+    duration = _frg_booking_duration(booking.get("durationMinutes"))
+    start_time, start_hour, start_minute = _frg_booking_clock(booking.get("selectedTime"))
+    end_time = _frg_booking_end_clock(start_hour, start_minute, duration)
+    source_id = _frg_booking_source_id(booking_id)
+    draft: dict[str, Any] | None = None
+    sent: dict[str, Any] | None = None
+
+    with store.open_db(db_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM calendar_entries
+            WHERE source = ?
+              AND source_table = ?
+              AND source_id = ?
+            LIMIT 1
+            """,
+            (FRG_BOOKING_WEBHOOK_SOURCE, FRG_BOOKING_WEBHOOK_SOURCE_TABLE, source_id),
+        ).fetchone()
+        if existing is None:
+            entry_id = store.add_calendar_entry(
+                connection,
+                entry_date=target_day,
+                title=f"FRG booking: {name} · {focus}",
+                entry_type="event",
+                status="planned",
+                priority="high",
+                list_name="professional",
+                start_time=start_time,
+                end_time=end_time,
+                source=FRG_BOOKING_WEBHOOK_SOURCE,
+                source_table=FRG_BOOKING_WEBHOOK_SOURCE_TABLE,
+                source_id=source_id,
+                notes=_format_frg_booking_notes(payload),
+                tags=["frg", "booking", event_name.replace(".", "-")],
+            )
+            draft = _save_cmail_draft(
+                connection,
+                {
+                    "subject": f"FRG booking confirmed · {booking.get('selectedSlotLabel') or target_day.isoformat()}",
+                    "to": formataddr((name, email)),
+                    "body_text": _frg_booking_confirmation_body(payload),
+                },
+            )
+            duplicate = False
+        else:
+            entry_id = int(existing["id"])
+            duplicate = True
+
+    if (
+        draft is not None
+        and os.environ.get("FRG_BOOKING_AUTO_SEND_CONFIRMATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        sent = send_cmail_draft(db_path=db_path, draft_id=int(draft["id"]))
+
+    return {
+        "calendar_entry_id": entry_id,
+        "cmail_draft_id": int(draft["id"]) if draft is not None else None,
+        "cmail_sent": sent,
+        "duplicate": duplicate,
+    }
 
 
 class _MailUiSnapshotCache:
@@ -5824,11 +6630,76 @@ def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
             "__MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__",
             str(MAIL_UI_CLIENT_REFRESH_INTERVAL_MS),
         )
+        .replace("__CMAIL_PUBLIC_URL__", CMAIL_PUBLIC_URL)
         .replace("__INITIAL_OVERVIEW_JSON__", json.dumps(initial_overview or {}))
         .replace("__CMAIL_SIGNATURE_TEXT_JSON__", json.dumps(_CMAIL_SIGNATURE_TEXT))
         .replace("__CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__", json.dumps(list(_CMAIL_KNOWN_SIGNATURE_TEXTS)))
         .replace("__CMAIL_SIGNATURE_PREVIEW_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_PREVIEW_HTML))
+        .replace("__CMAIL_TAILNET_ACCESS_MESSAGE_JSON__", json.dumps(CMAIL_TAILNET_ACCESS_MESSAGE))
     )
+
+
+def _cmail_version() -> str:
+    for package_name in ("life-ops", "lifeops"):
+        try:
+            return importlib_metadata.version(package_name)
+        except importlib_metadata.PackageNotFoundError:
+            continue
+    return "0.2.0"
+
+
+def _cmail_health_payload() -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": True,
+        "app": "cmail",
+        "version": _cmail_version(),
+        "public_url": CMAIL_PUBLIC_URL,
+    }
+    build_id = str(os.environ.get("LIFE_OPS_BUILD_ID") or os.environ.get("LIFEOPS_BUILD_ID") or "").strip()
+    if build_id:
+        payload["build"] = build_id
+    return payload
+
+
+def _render_mail_ui_manifest() -> dict[str, Any]:
+    return {
+        "id": f"{CMAIL_PUBLIC_URL}/",
+        "name": "Cmail",
+        "short_name": "Cmail",
+        "description": "Local-first CMAIL mailbox and drafts console.",
+        "start_url": f"{CMAIL_PUBLIC_URL}/",
+        "scope": f"{CMAIL_PUBLIC_URL}/",
+        "display": "standalone",
+        "background_color": "#0a0d0b",
+        "theme_color": "#0a0d0b",
+        "orientation": "portrait",
+        "icons": [
+            {
+                "src": "/static/favicon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any",
+            },
+            {
+                "src": "/static/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
+                "src": "/static/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
+                "src": "/static/og-image.png",
+                "sizes": "1200x630",
+                "type": "image/png",
+                "purpose": "any",
+            },
+        ],
+    }
 
 
 def _render_calendar_ui_html(initial_day: dict[str, Any] | None = None) -> str:
@@ -5894,6 +6765,7 @@ def _make_handler(
         status: str | None,
         page_limit: int,
         include_details: bool,
+        mailbox: str | None = None,
     ) -> bool:
         return (
             (source or DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE) == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -5902,6 +6774,7 @@ def _make_handler(
             and (status or "all") == "all"
             and int(page_limit) == int(limit)
             and not include_details
+            and not _mail_ui_mailbox_is_hidden(mailbox)
         )
 
     def _build_default_overview_payload(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -6092,6 +6965,7 @@ def _make_handler(
             except ValueError:
                 length = 0
             body = self.rfile.read(max(0, length)) if length else b""
+            self._last_raw_body = body  # type: ignore[attr-defined]
             if not body:
                 return {}
             payload = json.loads(body.decode("utf-8"))
@@ -6116,6 +6990,11 @@ def _make_handler(
                     asset_path.read_bytes(),
                     content_type=content_type or "application/octet-stream",
                 )
+                return
+
+            if path == "/manifest.webmanifest":
+                body = json.dumps(_render_mail_ui_manifest(), indent=2).encode("utf-8")
+                self._send_bytes(body, content_type="application/manifest+json")
                 return
 
             if path == "/":
@@ -6149,8 +7028,12 @@ def _make_handler(
                 self._send_html(_render_calendar_ui_html(initial_day=initial_day))
                 return
 
+            if path == "/healthz":
+                self._send_json(_cmail_health_payload())
+                return
+
             if path == "/api/health":
-                self._send_json({"ok": True, "db_path": str(db_path)})
+                self._send_json({**_cmail_health_payload(), "db_path": str(db_path)})
                 return
 
             if path == "/api/calendar/day":
@@ -6217,6 +7100,7 @@ def _make_handler(
                 )
                 channel = (query.get("channel") or ["email"])[0] or "email"
                 status = (query.get("status") or ["all"])[0] or "all"
+                mailbox = (query.get("mailbox") or ["correspondence"])[0] or "correspondence"
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 is_default_request = _is_default_overview_request(
                     source=source,
@@ -6225,6 +7109,7 @@ def _make_handler(
                     status=status,
                     page_limit=limit,
                     include_details=False,
+                    mailbox=mailbox,
                 )
                 try:
                     triggered = False
@@ -6241,7 +7126,10 @@ def _make_handler(
                             stored_queue = _cloudflare_queue_status_from_connection(connection)
                             stored_sync = _cloudflare_sync_status_from_connection(connection)
                             mailbox_version = (
-                                _correspondence_mailbox_version_from_connection(connection)
+                                _correspondence_mailbox_version_from_connection(
+                                    connection,
+                                    hidden=_mail_ui_mailbox_is_hidden(mailbox),
+                                )
                                 if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
                                 else _mailbox_version_from_connection(
                                     connection,
@@ -6283,6 +7171,8 @@ def _make_handler(
                 )
                 channel = (query.get("channel") or ["email"])[0] or "email"
                 status = (query.get("status") or ["all"])[0] or "all"
+                mailbox = (query.get("mailbox") or ["correspondence"])[0] or "correspondence"
+                hidden_mailbox = _mail_ui_mailbox_is_hidden(mailbox)
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 include_details = ((query.get("include_details") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 page_limit = int((query.get("limit") or [str(limit)])[0] or limit)
@@ -6293,6 +7183,7 @@ def _make_handler(
                     status=status,
                     page_limit=page_limit,
                     include_details=include_details,
+                    mailbox=mailbox,
                 )
                 try:
                     if should_sync:
@@ -6310,6 +7201,7 @@ def _make_handler(
                                             connection,
                                             limit=page_limit,
                                             include_details=include_details,
+                                            hidden=hidden_mailbox,
                                         ),
                                     }
                                     if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -6345,13 +7237,14 @@ def _make_handler(
                             payload = (
                                 {
                                     "db_path": str(db_path),
-                                    **_build_correspondence_overview_from_connection(
-                                        connection,
-                                        limit=page_limit,
-                                        include_details=include_details,
-                                    ),
-                                }
-                                if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
+                                        **_build_correspondence_overview_from_connection(
+                                            connection,
+                                            limit=page_limit,
+                                            include_details=include_details,
+                                            hidden=hidden_mailbox,
+                                        ),
+                                    }
+                                    if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
                                 else {
                                     "db_path": str(db_path),
                                     **_build_mail_ui_overview_from_connection(
@@ -6441,6 +7334,26 @@ def _make_handler(
                 payload = self._read_json_body()
             except json.JSONDecodeError:
                 self._send_json({"error": "invalid_json"}, status_code=400)
+                return
+
+            if path == "/api/frg/bookings":
+                raw_body = getattr(self, "_last_raw_body", b"")
+                verified, verification_error = _verify_frg_booking_webhook_signature(self.headers, raw_body)
+                if not verified:
+                    status_code = 503 if verification_error == "frg_booking_webhook_secret_not_configured" else 401
+                    self._send_json({"error": verification_error}, status_code=status_code)
+                    return
+                try:
+                    result = _handle_frg_booking_payload(db_path=db_path, payload=payload)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(None)
+                self._send_json({"ok": True, **result})
                 return
 
             if path == "/api/calendar/entries":
@@ -6633,6 +7546,54 @@ def _make_handler(
                         "archived_for_days": store.DELETED_COMMUNICATION_RETENTION_DAYS,
                         "purge_scheduled": True,
                         "purged_deleted_count": 0,
+                    }
+                )
+                return
+
+            if path == "/api/contacts/hide":
+                contact_key = str(payload.get("contact_key") or "").strip().lower()
+                if not contact_key:
+                    self._send_json({"error": "missing_contact_key"}, status_code=400)
+                    return
+                hidden_at = store._utc_now_string()
+                with store.open_db(db_path) as connection:
+                    _mark_contact_hidden(connection, contact_key=contact_key, hidden_at=hidden_at)
+                    hidden_contact_count = len(_hidden_contacts_from_connection(connection))
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(
+                    _remove_contact_from_overview_payload(
+                        _get_default_overview_cache(),
+                        contact_key,
+                    )
+                )
+                self._send_json(
+                    {
+                        "ok": True,
+                        "contact_key": contact_key,
+                        "hidden": True,
+                        "hidden_at": hidden_at,
+                        "hidden_contact_count": hidden_contact_count,
+                    }
+                )
+                return
+
+            if path == "/api/contacts/unhide":
+                contact_key = str(payload.get("contact_key") or "").strip().lower()
+                if not contact_key:
+                    self._send_json({"error": "missing_contact_key"}, status_code=400)
+                    return
+                with store.open_db(db_path) as connection:
+                    cleared = _clear_contact_hidden(connection, contact_key=contact_key)
+                    hidden_contact_count = len(_hidden_contacts_from_connection(connection))
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(None)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "contact_key": contact_key,
+                        "hidden": False,
+                        "cleared": bool(cleared),
+                        "hidden_contact_count": hidden_contact_count,
                     }
                 )
                 return

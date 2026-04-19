@@ -6,7 +6,7 @@ import json
 import mimetypes
 import socket
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
@@ -92,6 +92,7 @@ from life_ops.mail_ui import (
     get_cmail_draft_scaffold,
     list_cmail_drafts,
     save_cmail_draft,
+    send_cmail_draft_batch,
     send_cmail_draft,
     serve_mail_ui,
 )
@@ -116,6 +117,9 @@ from life_ops.profile_memory import (
     reject_profile_context_item,
 )
 from life_ops.resend_integration import (
+    DEFAULT_RESEND_BATCH_DAILY_CAP,
+    DEFAULT_RESEND_BATCH_MAX_PER_HOUR,
+    DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES,
     default_resend_config_path,
     process_resend_delivery_queue,
     resend_create_domain,
@@ -199,6 +203,34 @@ def _parse_day(value: str) -> date:
 
 def _parse_datetime_or_date(value: str) -> datetime:
     return store.parse_datetime(value)
+
+
+def _utc_schedule_string(value: datetime) -> str:
+    resolved = value
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    return resolved.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_send_schedule(*, send_at: str = "", delay_minutes: float = 0.0) -> str:
+    clean_send_at = str(send_at or "").strip()
+    if clean_send_at:
+        parsed = datetime.fromisoformat(clean_send_at.replace("Z", "+00:00"))
+        return _utc_schedule_string(parsed)
+    if float(delay_minutes or 0) > 0:
+        return _utc_schedule_string(datetime.now(timezone.utc) + timedelta(minutes=float(delay_minutes)))
+    return ""
+
+
+def _parse_cmail_batch_ids(*, ids: str = "", id_values: list[int] | None = None) -> list[int]:
+    parsed: list[int] = []
+    for value in id_values or []:
+        parsed.append(int(value))
+    for token in str(ids or "").split(","):
+        clean = token.strip()
+        if clean:
+            parsed.append(int(clean))
+    return parsed
 
 
 def _normalize_event_bounds(start_at: datetime, end_at: datetime, all_day: bool) -> tuple[datetime, datetime]:
@@ -606,7 +638,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cmail_draft_send_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
     cmail_draft_send_parser.add_argument("--id", required=True, type=int)
+    cmail_draft_send_parser.add_argument("--send-at", default="", help="Queue delivery no earlier than this ISO timestamp.")
+    cmail_draft_send_parser.add_argument("--delay-minutes", type=float, default=0.0)
     cmail_draft_send_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    cmail_batch_send_parser = subparsers.add_parser(
+        "cmail-batch-send",
+        help="Queue multiple CMAIL drafts with cold-outreach throttling.",
+    )
+    cmail_batch_send_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_batch_send_parser.add_argument("--ids", default="", help="Comma-separated draft ids to queue.")
+    cmail_batch_send_parser.add_argument("--id", action="append", dest="id_values", type=int, default=[])
+    cmail_batch_send_parser.add_argument("--start-at", default="", help="First delivery timestamp in ISO format.")
+    cmail_batch_send_parser.add_argument("--delay-minutes", type=float, default=0.0)
+    cmail_batch_send_parser.add_argument(
+        "--min-gap-minutes",
+        type=float,
+        default=DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES,
+    )
+    cmail_batch_send_parser.add_argument("--max-per-hour", type=int, default=DEFAULT_RESEND_BATCH_MAX_PER_HOUR)
+    cmail_batch_send_parser.add_argument("--daily-cap", type=int, default=DEFAULT_RESEND_BATCH_DAILY_CAP)
+    cmail_batch_send_parser.add_argument("--dry-run", action="store_true")
+    cmail_batch_send_parser.add_argument(
+        "--force-immediate",
+        action="store_true",
+        help="Disable spacing; intended only for trusted transactional batches.",
+    )
+    cmail_batch_send_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     resend_init_parser = subparsers.add_parser("resend-init-config", help="Write a local Resend config template.")
     resend_init_parser.add_argument("--config", type=Path, default=default_resend_config_path())
@@ -2835,13 +2893,36 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
             runtime_db_path=target_db_path,
             canonical_db_path=store.default_db_path(),
         )
+        scheduled_at = _resolve_send_schedule(send_at=args.send_at, delay_minutes=args.delay_minutes)
         result = send_cmail_draft(
             db_path=target_db_path,
             draft_id=args.id,
+            scheduled_at=scheduled_at or None,
         )
         if args.format == "json":
             return json.dumps(result, indent=2)
         return _render_sync_summary("CMAIL draft sent", result)
+
+    if command == "cmail-batch-send":
+        target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_runtime_db(
+            runtime_db_path=target_db_path,
+            canonical_db_path=store.default_db_path(),
+        )
+        start_at = _resolve_send_schedule(send_at=args.start_at, delay_minutes=args.delay_minutes)
+        result = send_cmail_draft_batch(
+            db_path=target_db_path,
+            draft_ids=_parse_cmail_batch_ids(ids=args.ids, id_values=args.id_values),
+            start_at=start_at or None,
+            min_gap_minutes=args.min_gap_minutes,
+            max_per_hour=args.max_per_hour,
+            daily_cap=args.daily_cap,
+            dry_run=args.dry_run,
+            force_immediate=args.force_immediate,
+        )
+        if args.format == "json":
+            return json.dumps(result, indent=2)
+        return _render_sync_summary("CMAIL batch send queued", result)
 
     if command == "resend-init-config":
         result = write_resend_config_template(args.config, force=args.force)

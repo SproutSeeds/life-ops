@@ -412,6 +412,7 @@ def required_cmail_secret_names() -> list[str]:
         str(cloudflare_config.get("ingest_secret_env") or MAIL_INGEST_SECRET_NAME).strip(),
         str(cloudflare_config.get("archive_key_env") or MASTER_KEY_NAME).strip(),
         str(resend_config.get("api_key_env") or "RESEND_API_KEY").strip(),
+        "FRG_BOOKING_WEBHOOK_SECRET",
     ]
     seen: set[str] = set()
     ordered: list[str] = []

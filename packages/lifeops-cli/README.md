@@ -116,6 +116,7 @@ lifeops cmail install
 lifeops cmail status
 lifeops cmail restart
 lifeops cmail open
+lifeops cmail tailscale
 ```
 
 The package also installs a dedicated `cmail` shortcut:
@@ -124,7 +125,25 @@ The package also installs a dedicated `cmail` shortcut:
 cmail status
 cmail restart
 cmail open
+cmail tailscale
 ```
+
+For iPhone or other private mobile access, install Tailscale on the computer running CMAIL and on the phone, sign into the same tailnet, then run:
+
+```bash
+cmail tailscale-status
+cmail secure-doctor
+```
+
+This deployment's canonical private phone URL is:
+
+```text
+https://cmail.tail649edd.ts.net
+```
+
+CMAIL itself still stays bound to `127.0.0.1:4311`. The shared Tailscale live-app-host routes `cmail.tail649edd.ts.net:443` to that local listener, so mobile users should save the no-port canonical URL to the iPhone Home Screen and keep the Tailscale app connected. Do not expose CMAIL with public Tailscale Funnel.
+
+CMAIL is independent from Clawdad. Updating or publishing Clawdad does not update CMAIL; NPM/package users need a separate LifeOps/CMAIL release.
 
 Drafts can also be created from anywhere on the machine, including attachments:
 

@@ -174,6 +174,52 @@ test("lifeops cmail audit delegates to the managed cmail service wrapper", async
   assert.deepEqual(calls[0].args, ["./bin/cmail-service", "audit"]);
 });
 
+test("lifeops cmail tailscale delegates to the managed cmail service wrapper", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const exitCode = await runCli(
+    ["cmail", "tailscale", "--https-port", "8443"],
+    io,
+    {
+      runner: async (payload) => {
+        calls.push(payload);
+        io.stdout.write("tailscale ok\n");
+        return 0;
+      },
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.match(getStdout(), /tailscale ok/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "zsh");
+  assert.deepEqual(calls[0].args, ["./bin/cmail-service", "tailscale", "--https-port", "8443"]);
+});
+
+test("lifeops cmail secure-doctor delegates to the managed cmail service wrapper", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const exitCode = await runCli(
+    ["cmail", "secure-doctor", "--https-port", "4311"],
+    io,
+    {
+      runner: async (payload) => {
+        calls.push(payload);
+        io.stdout.write("secure doctor ok\n");
+        return 0;
+      },
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.match(getStdout(), /secure doctor ok/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "zsh");
+  assert.deepEqual(calls[0].args, ["./bin/cmail-service", "secure-doctor", "--https-port", "4311"]);
+});
+
 test("lifeops cmail drafts delegates to the bundled backend python CLI", async () => {
   const fakeHome = await createFakeCmailHome();
   const { io, getStdout, getStderr } = createIo();
@@ -306,6 +352,64 @@ test("lifeops cmail new-draft is a friendly alias for draft-save", async () => {
   }
 });
 
+test("lifeops cmail batch-send delegates to throttled backend command", async () => {
+  const fakeHome = await createFakeCmailHome();
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const originalHome = process.env.LIFE_OPS_HOME;
+  process.env.LIFE_OPS_HOME = fakeHome;
+  try {
+    const exitCode = await runCli(
+      [
+        "cmail",
+        "batch-send",
+        "--ids",
+        "74222,74223",
+        "--max-per-hour",
+        "5",
+        "--min-gap-minutes",
+        "12",
+        "--dry-run",
+        "--format",
+        "json",
+      ],
+      io,
+      {
+        runner: async (payload) => {
+          calls.push(payload);
+          io.stdout.write('{"dry_run":true}\n');
+          return 0;
+        },
+      },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(getStderr(), "");
+    assert.match(getStdout(), /"dry_run":true/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, [
+      "-m",
+      "life_ops",
+      "cmail-batch-send",
+      "--ids",
+      "74222,74223",
+      "--max-per-hour",
+      "5",
+      "--min-gap-minutes",
+      "12",
+      "--dry-run",
+      "--format",
+      "json",
+    ]);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.LIFE_OPS_HOME;
+    } else {
+      process.env.LIFE_OPS_HOME = originalHome;
+    }
+  }
+});
+
 test("lifeops cmail url prints the mailbox URL without spawning a process", async () => {
   const { io, getStdout, getStderr } = createIo();
   const exitCode = await runCli(["cmail", "url"], io);
@@ -336,6 +440,9 @@ test("lifeops cmail help is available from the shortcut entrypoint", async () =>
   assert.match(getStdout(), /cmail new-draft/);
   assert.match(getStdout(), /cmail drafts/);
   assert.match(getStdout(), /cmail draft-save/);
+  assert.match(getStdout(), /cmail batch-send/);
   assert.match(getStdout(), /cmail audit/);
+  assert.match(getStdout(), /cmail tailscale/);
+  assert.match(getStdout(), /cmail secure-doctor/);
   assert.match(getStdout(), /--attach \.\/file\.pdf/);
 });
