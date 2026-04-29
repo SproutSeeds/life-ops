@@ -4,6 +4,7 @@ import hashlib
 import gc
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -21,6 +22,7 @@ from life_ops import store
 from life_ops.cloudflare_email import cloudflare_mail_queue_status, sync_cloudflare_mail_queue
 from life_ops.mail_ingest import MAIL_INGEST_SECRET_NAME
 from life_ops.mail_ui import (
+    CMAIL_APP_SECRET_NAME,
     DEFAULT_MAIL_UI_HOST,
     DEFAULT_MAIL_UI_LIMIT,
     DEFAULT_MAIL_UI_PORT,
@@ -409,6 +411,7 @@ def required_cmail_secret_names() -> list[str]:
     cloudflare_config = _load_json_dict(config_dir / "cloudflare_mail.json")
     resend_config = _load_json_dict(config_dir / "resend.json")
     names = [
+        CMAIL_APP_SECRET_NAME,
         str(cloudflare_config.get("ingest_secret_env") or MAIL_INGEST_SECRET_NAME).strip(),
         str(cloudflare_config.get("archive_key_env") or MASTER_KEY_NAME).strip(),
         str(resend_config.get("api_key_env") or "RESEND_API_KEY").strip(),
@@ -422,6 +425,38 @@ def required_cmail_secret_names() -> list[str]:
         seen.add(name)
         ordered.append(name)
     return ordered
+
+
+def ensure_cmail_app_secret(
+    *,
+    rotate: bool = False,
+    backend: str = "auto",
+    allow_insecure_file_backend: bool = False,
+    value: str | None = None,
+) -> dict[str, Any]:
+    existing = credentials.resolve_secret(name=CMAIL_APP_SECRET_NAME)
+    if existing and not rotate and not value:
+        return {
+            "name": CMAIL_APP_SECRET_NAME,
+            "created": False,
+            "rotated": False,
+            "secret": existing,
+        }
+    next_secret = str(value or "").strip() or secrets.token_urlsafe(24)
+    result = credentials.set_secret(
+        name=CMAIL_APP_SECRET_NAME,
+        value=next_secret,
+        backend=backend,
+        allow_insecure_file_backend=allow_insecure_file_backend,
+    )
+    return {
+        "name": CMAIL_APP_SECRET_NAME,
+        "created": not bool(existing),
+        "rotated": bool(existing),
+        "secret": next_secret,
+        "backend": result.get("backend"),
+        "registry_path": result.get("registry_path"),
+    }
 
 
 def write_cmail_service_secret_snapshot(*, target: Path | None = None) -> dict[str, Any]:

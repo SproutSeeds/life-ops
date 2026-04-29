@@ -9,21 +9,24 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from email.utils import formataddr, getaddresses, parseaddr
 from html import escape as html_escape
 from html.parser import HTMLParser
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from life_ops import credentials
-from life_ops.calendar import build_calendar_day, rollover_calendar_day, save_calendar_day
+from life_ops.calendar import build_calendar_day, build_calendar_range, rollover_calendar_day, save_calendar_day
 from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
 from life_ops import mail_vault
@@ -48,10 +51,16 @@ DEFAULT_MAIL_UI_OG_IMAGE_PATH = "/static/og-image.png"
 DEFAULT_CMAIL_PUBLIC_URL = "https://cmail.tail649edd.ts.net"
 CMAIL_PUBLIC_URL = (os.environ.get("LIFE_OPS_CMAIL_PUBLIC_URL") or DEFAULT_CMAIL_PUBLIC_URL).rstrip("/")
 CMAIL_TAILNET_ACCESS_MESSAGE = "Cmail is private. Open Tailscale and make sure you are connected, then try again."
+CMAIL_APP_SECRET_NAME = "LIFE_OPS_CMAIL_APP_SECRET"
+CMAIL_AUTH_REQUIRED_ENV = "LIFE_OPS_CMAIL_AUTH_REQUIRED"
+CMAIL_AUTH_DISABLED_ENV = "LIFE_OPS_CMAIL_AUTH_DISABLED"
+CMAIL_SESSION_COOKIE_NAME = "cmail_session"
+CMAIL_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 FRG_BOOKING_WEBHOOK_SECRET_NAME = "FRG_BOOKING_WEBHOOK_SECRET"
 FRG_BOOKING_WEBHOOK_MAX_SKEW_SECONDS = 300
 FRG_BOOKING_WEBHOOK_SOURCE = "frg_site_booking"
 FRG_BOOKING_WEBHOOK_SOURCE_TABLE = "stripe_checkout_sessions"
+FRG_BOOKING_INACTIVE_STATUSES = ("canceled", "cancelled", "completed", "done")
 MAIL_UI_BACKGROUND_SYNC_INTERVAL_SECONDS = 2.0
 MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 2000
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -67,7 +76,7 @@ _TRAILING_URL_PUNCTUATION = ".,;:!?)]}"
 _CMAIL_SIGNATURE_TEXT = (
     "Best,\n\n"
     "Cody Mitchell\n"
-    "Fractal Research Group\n"
+    "Fractal Research Group LLC\n"
     "https://frg.earth\n"
     "https://www.npmjs.com/~sproutseeds\n"
     "https://github.com/SproutSeeds\n"
@@ -585,6 +594,31 @@ _HTML = """<!doctype html>
       border-color: rgba(184, 255, 77, 0.34);
       background: rgba(184, 255, 77, 0.035);
     }
+    .correspondence-sort-toggle {
+      margin-top: 10px;
+      display: inline-flex;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 999px;
+      background: rgba(0,0,0,0.16);
+    }
+    .sort-toggle-button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 10px;
+      font: 800 10px/1 var(--mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .sort-toggle-button.active {
+      color: var(--accent);
+      background: rgba(83, 129, 15, 0.28);
+    }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -627,11 +661,23 @@ _HTML = """<!doctype html>
       display: flex;
       align-items: center;
       gap: 10px;
+      flex: 1 1 auto;
+    }
+    .thread-copy {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
     }
     .thread .subject {
       font-size: 16px;
       font-weight: 650;
       line-height: 1.35;
+    }
+    .thread-timestamp {
+      color: var(--muted);
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     .unread-orb {
       width: 8px;
@@ -666,6 +712,41 @@ _HTML = """<!doctype html>
       border-color: rgba(255, 180, 168, 0.28);
       background: rgba(255, 137, 118, 0.08);
     }
+    .trash-icon,
+    .close-icon {
+      width: 15px;
+      height: 15px;
+      display: block;
+    }
+    .trash-icon path,
+    .trash-icon line,
+    .close-icon path {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .close-selection-button {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: transparent;
+      color: var(--muted);
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      border-radius: 999px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .close-selection-button:hover {
+      color: var(--text);
+      border-color: rgba(255, 255, 255, 0.24);
+      background: rgba(255, 255, 255, 0.07);
+    }
     .thread-actions {
       display: inline-flex;
       align-items: center;
@@ -678,9 +759,10 @@ _HTML = """<!doctype html>
       background: transparent;
       color: var(--muted);
       height: 24px;
-      min-width: 24px;
+      width: 30px;
+      min-width: 30px;
       border-radius: 999px;
-      padding: 0 8px;
+      padding: 0;
       font: 700 10px/1 var(--mono);
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -693,6 +775,23 @@ _HTML = """<!doctype html>
       color: var(--accent);
       border-color: rgba(184, 255, 77, 0.26);
       background: rgba(184, 255, 77, 0.08);
+    }
+    .hide-icon {
+      width: 16px;
+      height: 16px;
+      display: block;
+    }
+    .hide-icon path {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.9;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .restore-button {
+      width: auto;
+      min-width: 44px;
+      padding: 0 8px;
     }
     .restore-button:hover {
       color: #f5f8f3;
@@ -777,6 +876,12 @@ _HTML = """<!doctype html>
       padding: 18px 18px 12px;
       border-bottom: 1px solid var(--line);
       display: block;
+    }
+    .detail-head-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
     }
     .detail-head h3 {
       margin: 0;
@@ -1141,6 +1246,37 @@ _HTML = """<!doctype html>
       flex-direction: column;
       gap: 16px;
     }
+    .draft-delete-confirm {
+      border: 1px solid rgba(255, 180, 168, 0.22);
+      border-radius: 16px;
+      background:
+        linear-gradient(135deg, rgba(255, 180, 168, 0.11), transparent 48%),
+        #0d120f;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .draft-delete-confirm-copy {
+      display: grid;
+      gap: 3px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .draft-delete-confirm-copy strong {
+      color: var(--text);
+      font-size: 15px;
+    }
+    .draft-delete-confirm-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
     .draft-field {
       display: grid;
       gap: 8px;
@@ -1228,6 +1364,34 @@ _HTML = """<!doctype html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .draft-reply-context {
+      border: 1px solid rgba(184, 255, 77, 0.24);
+      border-radius: 16px;
+      background:
+        linear-gradient(135deg, rgba(184, 255, 77, 0.09), transparent 46%),
+        #0d120f;
+      padding: 14px 16px;
+      display: grid;
+      gap: 8px;
+    }
+    .draft-reply-context-title {
+      color: var(--accent);
+      font: 800 11px/1 var(--mono);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .draft-reply-context-subject {
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+    .draft-reply-context-meta,
+    .draft-reply-context-preview {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
     }
     .draft-recipient-fields {
       display: grid;
@@ -1375,6 +1539,7 @@ _HTML = """<!doctype html>
         padding: 10px 12px;
       }
       .panel-search input,
+      .sort-toggle-button,
       select,
       button,
       input,
@@ -1554,7 +1719,12 @@ _HTML = """<!doctype html>
           </div>
         </div>
         <div class="panel-search" id="correspondenceSearchWrap">
-          <input id="correspondenceSearch" type="search" placeholder="search name or email" autocomplete="off" spellcheck="false">
+          <input id="correspondenceSearch" type="search" placeholder="search name, email, or body" autocomplete="off" spellcheck="false">
+          <div class="correspondence-sort-toggle" role="tablist" aria-label="Correspondence priority">
+            <button class="sort-toggle-button active" type="button" id="sortAllButton" role="tab" aria-selected="true">all</button>
+            <button class="sort-toggle-button" type="button" id="sortNewButton" role="tab" aria-selected="false">new</button>
+            <button class="sort-toggle-button" type="button" id="sortOpenedButton" role="tab" aria-selected="false">opened</button>
+          </div>
         </div>
         <div class="thread-list" id="threadList"></div>
       </section>
@@ -1572,6 +1742,9 @@ _HTML = """<!doctype html>
     const SELECTED_MESSAGE_STORAGE_KEY = "lifeops.mail.selectedMessage";
     const ACTIVE_VIEW_STORAGE_KEY = "lifeops.mail.activeView";
     const CORRESPONDENCE_QUERY_STORAGE_KEY = "lifeops.mail.correspondenceQuery";
+    const CONTACT_SORT_MODE_STORAGE_KEY = "lifeops.mail.contactSortMode";
+    const CONTACT_SORT_MODE_VERSION_STORAGE_KEY = "lifeops.mail.contactSortModeVersion";
+    const CONTACT_SORT_MODE_STORAGE_VERSION = "2";
     const SELECTED_DRAFT_STORAGE_KEY = "lifeops.mail.selectedDraft";
     const EXPANDED_QUOTED_MESSAGES_STORAGE_KEY = "lifeops.mail.expandedQuotedMessages";
     const VIEWED_MESSAGE_IDS_STORAGE_KEY = "lifeops.mail.viewedMessageIds";
@@ -1717,12 +1890,16 @@ _HTML = """<!doctype html>
     function persistOverviewCache(payload) {
       try {
         const minimalPayload = {
+          mailbox: payload?.mailbox || "correspondence",
           message_count: payload?.message_count || 0,
           contact_count: payload?.contact_count || 0,
+          hidden_contact_count: payload?.hidden_contact_count || 0,
           messages: payload?.messages || [],
           contacts: payload?.contacts || [],
+          viewed_message_keys: payload?.viewed_message_keys || [],
           cloudflare_queue: payload?.cloudflare_queue || {},
           cloudflare_sync: payload?.cloudflare_sync || {},
+          mailbox_version: payload?.mailbox_version || {},
         };
         window.localStorage.setItem(OVERVIEW_CACHE_STORAGE_KEY, JSON.stringify(minimalPayload));
       } catch (_error) {
@@ -1804,6 +1981,8 @@ _HTML = """<!doctype html>
         }
         window.localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, state.activeView);
         window.localStorage.setItem(CORRESPONDENCE_QUERY_STORAGE_KEY, state.correspondenceQuery || "");
+        window.localStorage.setItem(CONTACT_SORT_MODE_STORAGE_KEY, state.contactSortMode || "all");
+        window.localStorage.setItem(CONTACT_SORT_MODE_VERSION_STORAGE_KEY, CONTACT_SORT_MODE_STORAGE_VERSION);
       } catch (_error) {
         // Ignore local storage failures.
       }
@@ -1817,13 +1996,24 @@ _HTML = """<!doctype html>
       const query = normalizedSearchText(state.correspondenceQuery);
       if (!query) return contacts || [];
       return (contacts || []).filter((contact) => {
-        const haystack = [
+        const contactHaystack = [
           contact?.contact_label,
           contact?.contact_name,
           contact?.contact_email,
           contact?.contact_key,
         ].map((value) => normalizedSearchText(value)).join(" ");
-        return haystack.includes(query);
+        if (contactHaystack.includes(query)) return true;
+        return messagesForContact(String(contact?.contact_key || "")).some((message) => {
+          const messageHaystack = [
+            message?.subject,
+            message?.snippet,
+            message?.search_text,
+            message?.external_from,
+            message?.external_to,
+            message?.person,
+          ].map((value) => normalizedSearchText(value)).join(" ");
+          return messageHaystack.includes(query);
+        });
       });
     }
 
@@ -1831,6 +2021,20 @@ _HTML = """<!doctype html>
       const clean = String(value || "").trim().toLowerCase();
       if (clean === "drafts" || clean === "hidden") return clean;
       return "inbox";
+    }
+
+    function normalizeContactSortMode(value) {
+      const clean = String(value || "").trim().toLowerCase();
+      if (clean === "open" || clean === "opened" || clean === "touched") return "opened";
+      if (clean === "new") return clean;
+      return "all";
+    }
+
+    function loadContactSortMode() {
+      if (loadStoredText(CONTACT_SORT_MODE_VERSION_STORAGE_KEY) !== CONTACT_SORT_MODE_STORAGE_VERSION) {
+        return "all";
+      }
+      return normalizeContactSortMode(loadStoredText(CONTACT_SORT_MODE_STORAGE_KEY));
     }
 
     function contactLatestTimestamp(contact) {
@@ -1846,14 +2050,66 @@ _HTML = """<!doctype html>
       return messageValues.length ? Math.max(...messageValues) : 0;
     }
 
+    function contactOpenedAt(contact) {
+      return String(contact?.opened_at || contact?.touched_at || "").trim();
+    }
+
+    function contactOpenedTimestamp(contact) {
+      return timestampValue(contactOpenedAt(contact));
+    }
+
+    function messageIsInbound(message) {
+      return String(message?.direction || "").toLowerCase() !== "outbound";
+    }
+
+    function messageHasViewedKey(message) {
+      return messageReadKeys(message).some((readKey) => state.viewedMessageIds.has(readKey));
+    }
+
+    function contactHasNewMail(contact) {
+      const contactKey = String(contact?.contact_key || "");
+      return messagesForContact(contactKey).some((message) => messageIsNew(message));
+    }
+
+    function messageIsNew(message) {
+      if (!message || !messageIsInbound(message)) return false;
+      if (messageHasViewedKey(message)) return false;
+      const happenedAt = timestampValue(message?.happened_at || "");
+      const contact = contactRecord(message?.contact_key || state.selectedContactKey);
+      const openedAt = contactOpenedTimestamp(contact);
+      return openedAt <= 0 || (happenedAt > 0 && happenedAt > openedAt);
+    }
+
+    function contactTimestampLabel(contact) {
+      if (state.contactSortMode === "opened") {
+        const openedAt = contactOpenedAt(contact);
+        if (openedAt) return `opened ${humanTimestamp(openedAt)}`;
+      }
+      const messages = messagesForContact(String(contact?.contact_key || ""));
+      const latestHappenedAt = messages[0]?.happened_at || contact?.happened_at || "";
+      return latestHappenedAt ? humanTimestamp(latestHappenedAt) : "";
+    }
+
+    function contactMatchesSortMode(contact) {
+      if (state.contactSortMode === "new") {
+        return contactHasNewMail(contact);
+      }
+      if (state.contactSortMode === "opened") {
+        return contactOpenedTimestamp(contact) > 0;
+      }
+      return true;
+    }
+
     function displayedContacts(contacts) {
       return filterContacts(contacts || [])
+        .filter((contact) => contactMatchesSortMode(contact))
         .slice()
         .sort((left, right) => {
-          const leftUnread = contactHasUnread(String(left?.contact_key || "")) ? 1 : 0;
-          const rightUnread = contactHasUnread(String(right?.contact_key || "")) ? 1 : 0;
-          if (leftUnread !== rightUnread) {
-            return rightUnread - leftUnread;
+          if (state.contactSortMode === "opened") {
+            const openedDelta = contactOpenedTimestamp(right) - contactOpenedTimestamp(left);
+            if (openedDelta !== 0) {
+              return openedDelta;
+            }
           }
           const happenedDelta = contactLatestTimestamp(right) - contactLatestTimestamp(left);
           if (happenedDelta !== 0) {
@@ -1871,6 +2127,7 @@ _HTML = """<!doctype html>
     const state = {
       activeView: normalizeActiveView(loadStoredText(ACTIVE_VIEW_STORAGE_KEY)),
       correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
+      contactSortMode: loadContactSortMode(),
       selectedContactKey: loadStoredText(SELECTED_CONTACT_STORAGE_KEY),
       selectedThreadKey: null,
       selectedId: Number(loadStoredText(SELECTED_MESSAGE_STORAGE_KEY) || "") || null,
@@ -1889,6 +2146,7 @@ _HTML = """<!doctype html>
       expandedQuotedMessageIds: loadStoredSet(EXPANDED_QUOTED_MESSAGES_STORAGE_KEY),
       viewedMessageIds: loadStoredSet(VIEWED_MESSAGE_IDS_STORAGE_KEY),
       viewedMessageIdsSeeded: loadStoredText(VIEWED_MESSAGE_IDS_SEEDED_STORAGE_KEY) === "1",
+      syncedViewedMessageIds: new Set(),
       detailCache: new Map(),
       pendingDetailLoads: new Map(),
       prefetchScheduled: false,
@@ -2055,31 +2313,63 @@ _HTML = """<!doctype html>
       return messagesForContact(contactKey).some((message) => messageIsUnread(message));
     }
 
+    function mergeViewedMessageKeys(readKeys, options = {}) {
+      const fromServer = Boolean(options.fromServer);
+      let changed = false;
+      for (const value of readKeys || []) {
+        const readKey = String(value || "").trim();
+        if (!readKey) continue;
+        if (fromServer) {
+          state.syncedViewedMessageIds.add(readKey);
+        }
+        if (state.viewedMessageIds.has(readKey)) continue;
+        state.viewedMessageIds.add(readKey);
+        changed = true;
+      }
+      if (changed) {
+        persistViewedMessageIds();
+      }
+      return changed;
+    }
+
+    function syncViewedReadKeys(readKeys) {
+      const cleanKeys = Array.from(new Set(
+        (readKeys || [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      )).filter((readKey) => !state.syncedViewedMessageIds.has(readKey));
+      if (!cleanKeys.length) return;
+      for (const readKey of cleanKeys) {
+        state.syncedViewedMessageIds.add(readKey);
+      }
+      postJson("/api/messages/read", { read_keys: cleanKeys }, { keepalive: true })
+        .then((payload) => {
+          mergeViewedMessageKeys(payload?.viewed_message_keys || cleanKeys, { fromServer: true });
+        })
+        .catch(() => {
+          for (const readKey of cleanKeys) {
+            state.syncedViewedMessageIds.delete(readKey);
+          }
+        });
+    }
+
     function primeViewedMessagesFromOverview(payload) {
       const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      mergeViewedMessageKeys(payload?.viewed_message_keys || [], { fromServer: true });
       let changed = false;
-      let seededNow = false;
       if (!state.viewedMessageIdsSeeded) {
-        for (const message of messages) {
-          for (const readKey of messageReadKeys(message)) {
-            if (state.viewedMessageIds.has(readKey)) continue;
-            state.viewedMessageIds.add(readKey);
-            changed = true;
-          }
-        }
         state.viewedMessageIdsSeeded = true;
-        seededNow = true;
-      } else {
-        for (const message of messages) {
-          if (String(message?.direction || "").toLowerCase() !== "outbound") continue;
-          for (const readKey of messageReadKeys(message)) {
-            if (state.viewedMessageIds.has(readKey)) continue;
-            state.viewedMessageIds.add(readKey);
-            changed = true;
-          }
+        changed = true;
+      }
+      for (const message of messages) {
+        if (String(message?.direction || "").toLowerCase() !== "outbound") continue;
+        for (const readKey of messageReadKeys(message)) {
+          if (state.viewedMessageIds.has(readKey)) continue;
+          state.viewedMessageIds.add(readKey);
+          changed = true;
         }
       }
-      if (changed || seededNow) {
+      if (changed) {
         persistViewedMessageIds();
       }
     }
@@ -2088,6 +2378,20 @@ _HTML = """<!doctype html>
       const readKeys = typeof messageOrId === "object"
         ? messageReadKeys(messageOrId)
         : [`local-id:${String(messageOrId || "").trim()}`].filter((key) => key !== "local-id:");
+      return markReadKeysViewed(readKeys);
+    }
+
+    function markMessagesViewed(messages) {
+      const readKeys = [];
+      for (const message of messages || []) {
+        if (!messageIsInbound(message)) continue;
+        readKeys.push(...messageReadKeys(message));
+      }
+      return markReadKeysViewed(readKeys);
+    }
+
+    function markReadKeysViewed(readKeys) {
+      syncViewedReadKeys(readKeys);
       let changed = false;
       for (const readKey of readKeys) {
         if (!readKey || state.viewedMessageIds.has(readKey)) continue;
@@ -2160,6 +2464,41 @@ _HTML = """<!doctype html>
       return orderedKeys.map((key) => grouped.get(key));
     }
 
+    function rememberContactUiMetadata(metadata, contact) {
+      const contactKey = String(contact?.contact_key || "").trim();
+      if (!contactKey) return;
+      const openedAt = contactOpenedAt(contact);
+      const existing = metadata.get(contactKey) || {};
+      const existingOpenedAt = String(existing.opened_at || existing.touched_at || "");
+      const nextOpenedAt = timestampValue(openedAt) >= timestampValue(existingOpenedAt)
+        ? openedAt
+        : existingOpenedAt;
+      metadata.set(contactKey, {
+        opened_at: nextOpenedAt,
+        touched_at: nextOpenedAt,
+      });
+    }
+
+    function mergeContactUiMetadata(contacts, payloadContacts) {
+      const metadata = new Map();
+      for (const contact of state.overview?.contacts || []) {
+        rememberContactUiMetadata(metadata, contact);
+      }
+      for (const contact of payloadContacts || []) {
+        rememberContactUiMetadata(metadata, contact);
+      }
+      return (contacts || []).map((contact) => {
+        const contactKey = String(contact?.contact_key || "").trim();
+        const contactMetadata = metadata.get(contactKey) || {};
+        const openedAt = String(contactMetadata.opened_at || contactMetadata.touched_at || "");
+        return {
+          ...contact,
+          opened_at: openedAt,
+          touched_at: openedAt,
+        };
+      });
+    }
+
     function normalizeOverviewPayload(payload, options = {}) {
       if (!payload) return payload;
       const allowPendingResolution = options.allowPendingResolution !== false;
@@ -2202,7 +2541,7 @@ _HTML = """<!doctype html>
         }
         details[messageId] = detail;
       }
-      const contacts = groupContacts(messages);
+      const contacts = mergeContactUiMetadata(groupContacts(messages), payload.contacts || []);
       return {
         ...payload,
         messages,
@@ -2329,8 +2668,23 @@ _HTML = """<!doctype html>
       $("panelTitle").textContent = hiddenActive ? "hidden" : draftsActive ? "drafts" : "correspondence";
       $("newDraftButton").classList.toggle("hidden", !draftsActive);
       $("correspondenceSearchWrap").classList.toggle("hidden", draftsActive);
-      $("correspondenceSearch").placeholder = hiddenActive ? "search hidden mail" : "search name or email";
+      $("correspondenceSearch").placeholder = hiddenActive ? "search hidden mail" : "search name, email, or body";
       $("correspondenceSearch").value = state.correspondenceQuery || "";
+      const sortAllButton = $("sortAllButton");
+      const sortNewButton = $("sortNewButton");
+      const sortOpenedButton = $("sortOpenedButton");
+      if (sortAllButton && sortNewButton && sortOpenedButton) {
+        const sortButtons = [
+          [sortAllButton, "all"],
+          [sortNewButton, "new"],
+          [sortOpenedButton, "opened"],
+        ];
+        for (const [button, mode] of sortButtons) {
+          const active = state.contactSortMode === mode;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-selected", active ? "true" : "false");
+        }
+      }
     }
 
     function mailboxVersionSignature(payload) {
@@ -2340,6 +2694,10 @@ _HTML = """<!doctype html>
         version.contact_count || 0,
         version.latest_message_id || 0,
         version.latest_happened_at || "",
+        version.ui_state_digest || "",
+        version.viewed_message_count || 0,
+        version.opened_contact_count || version.touched_contact_count || 0,
+        version.hidden_contact_count || 0,
       ]);
     }
 
@@ -2436,26 +2794,60 @@ _HTML = """<!doctype html>
       }
     }
 
+    function trashIcon() {
+      return `
+        <svg class="trash-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M8 8h8"></path>
+          <path d="M10 8V6.8c0-.8.5-1.3 1.3-1.3h1.4c.8 0 1.3.5 1.3 1.3V8"></path>
+          <path d="M9 10.5l.5 7c.1.8.6 1.2 1.4 1.2h2.2c.8 0 1.3-.4 1.4-1.2l.5-7"></path>
+          <line x1="11" y1="12.2" x2="11" y2="16.4"></line>
+          <line x1="13" y1="12.2" x2="13" y2="16.4"></line>
+        </svg>
+      `;
+    }
+
+    function closeIcon() {
+      return `
+        <svg class="close-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M7 7l10 10"></path>
+          <path d="M17 7L7 17"></path>
+        </svg>
+      `;
+    }
+
     function renderContactList(payload) {
       const hiddenActive = state.activeView === "hidden";
-      const contacts = displayedContacts(payload.contacts || []);
+      let contacts = displayedContacts(payload.contacts || []);
       const signature = JSON.stringify([
         state.activeView,
         state.correspondenceQuery || "",
+        state.contactSortMode || "all",
         contacts.map((contact) => [
           contact.contact_key,
           contact.latest_message_id,
           contact.count,
           contact.happened_at,
-          contactHasUnread(contact.contact_key) ? 1 : 0,
+          contactOpenedAt(contact),
+          contactHasNewMail(contact) ? 1 : 0,
           (contact.threads || []).map((thread) => [thread.thread_key, thread.latest_message_id, thread.count]),
         ]),
       ]);
       $("threadCount").textContent = `${contacts.length} contact${contacts.length === 1 ? "" : "s"}`;
       if (!contacts.length) {
-        const emptyCopy = hiddenActive
-          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence.")
-          : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
+        let emptyCopy;
+        if (state.contactSortMode === "new") {
+          emptyCopy = state.correspondenceQuery
+            ? "No new correspondence matches that search."
+            : "No new correspondence.";
+        } else if (state.contactSortMode === "opened") {
+          emptyCopy = state.correspondenceQuery
+            ? "No opened correspondence matches that search."
+            : "No opened correspondence yet.";
+        } else {
+          emptyCopy = hiddenActive
+            ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence.")
+            : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
+        }
         $("threadList").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         state.listSignature = signature;
         return;
@@ -2473,15 +2865,25 @@ _HTML = """<!doctype html>
           return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Return this correspondence to the main view">show</button>`;
         }
         return `
-          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this correspondence to Hidden">hide</button>
-          <button class="delete-button" type="button" data-delete-contact="${contactKey}" title="Archive this correspondence">×</button>
+          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this correspondence to Hidden" aria-label="Hide correspondence">
+            <svg class="hide-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4 13.5c2.1 2.4 4.8 3.6 8 3.6s5.9-1.2 8-3.6"></path>
+              <path d="M7.2 16.2l-1.4 2"></path>
+              <path d="M12 17.2v2.3"></path>
+              <path d="M16.8 16.2l1.4 2"></path>
+            </svg>
+          </button>
+          <button class="delete-button" type="button" data-delete-contact="${contactKey}" title="Archive this correspondence" aria-label="Archive correspondence">${trashIcon()}</button>
         `;
       };
       $("threadList").innerHTML = contacts.map((contact) => `
         <div class="thread ${contact.contact_key === state.selectedContactKey ? "active" : ""}" data-contact-key="${escapeHtml(contact.contact_key)}">
           <div class="thread-main">
-            <span class="unread-orb ${contactHasUnread(contact.contact_key) ? "" : "hidden"}" aria-hidden="true"></span>
-            <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
+            <span class="unread-orb ${contactHasNewMail(contact) ? "" : "hidden"}" aria-hidden="true"></span>
+            <div class="thread-copy">
+              <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
+              <div class="thread-timestamp">${escapeHtml(contactTimestampLabel(contact))}</div>
+            </div>
           </div>
           <div class="thread-actions">
             ${contactActionMarkup(contact)}
@@ -2645,6 +3047,17 @@ _HTML = """<!doctype html>
       }
     }
 
+    function clearCorrespondenceSelection(options = {}) {
+      state.selectedContactKey = null;
+      state.selectedThreadKey = null;
+      state.selectedId = null;
+      state.detail = null;
+      persistSelectionState();
+      if (options.render !== false) {
+        renderCurrentSelection();
+      }
+    }
+
     function renderCurrentSelection() {
       renderChrome();
       if (state.activeView === "drafts") {
@@ -2654,10 +3067,20 @@ _HTML = """<!doctype html>
       const contacts = displayedContacts(state.overview?.contacts || []);
       const selectedContactStillPresent = contacts.some((contact) => contact.contact_key === state.selectedContactKey);
       if (!selectedContactStillPresent) {
-        state.selectedContactKey = contacts[0]?.contact_key ?? null;
+        state.selectedContactKey = null;
+        state.selectedThreadKey = null;
+        state.selectedId = null;
       }
-      state.selectedThreadKey = null;
       renderContactList(state.overview || {});
+      if (!state.selectedContactKey) {
+        persistSelectionState();
+        $("detailPanel").classList.remove("draft-mode");
+        const emptyCopy = state.activeView === "hidden"
+          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
+          : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
+        $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
+        return;
+      }
       const contactMessages = messagesForContact(state.selectedContactKey);
       const selectedMessageStillPresent = contactMessages.some((message) => message.id === state.selectedId);
       if (!selectedMessageStillPresent) {
@@ -2688,11 +3111,18 @@ _HTML = """<!doctype html>
       const usingComposerSeed = state.selectedDraftId == null && Boolean(state.draftComposerSeed);
       const selectedStillPresent = drafts.some((draft) => draft.id === state.selectedDraftId);
       if (!usingComposerSeed && !selectedStillPresent) {
-        state.selectedDraftId = drafts[0]?.id ?? null;
+        state.selectedDraftId = null;
       }
       persistSelectionState();
       renderDraftList();
-      renderDraftDetail(selectedDraft());
+      const draft = selectedDraft();
+      if (!draft) {
+        const detail = $("detailPanel");
+        detail.classList.remove("draft-mode");
+        detail.innerHTML = `<div class="empty">No draft selected yet.</div>`;
+        return;
+      }
+      renderDraftDetail(draft);
     }
 
     function applyOptimisticOverviewUpdate() {
@@ -2780,6 +3210,7 @@ _HTML = """<!doctype html>
         in_reply_to: "",
         references: [],
         thread_key: "",
+        reply_context: null,
         attachments: [],
       };
     }
@@ -2799,6 +3230,9 @@ _HTML = """<!doctype html>
         ? next.references.map((value) => String(value || "").trim()).filter(Boolean)
         : [];
       next.thread_key = String(next.thread_key || "");
+      next.reply_context = next.reply_context && typeof next.reply_context === "object"
+        ? next.reply_context
+        : null;
       next.attachments = Array.isArray(next.attachments) ? next.attachments : [];
       next.label = localDraftLabel(next.subject || next.label || "");
       next.snippet = localDraftSnippet(next.body_text);
@@ -2844,6 +3278,18 @@ _HTML = """<!doctype html>
         in_reply_to: String(replySeed.in_reply_to || ""),
         references: Array.isArray(replySeed.references) ? replySeed.references : [],
         thread_key: String(replySeed.thread_key || ""),
+        reply_context: {
+          is_reply: true,
+          subject: String(message.subject || ""),
+          from: String(message.external_from || message.person || ""),
+          to: String(message.external_to || ""),
+          happened_at: String(message.happened_at || ""),
+          preview: String(message.body_display?.primary_text || message.snippet || ""),
+          message_id: String(message.message_id || ""),
+          in_reply_to: String(replySeed.in_reply_to || ""),
+          thread_key: String(replySeed.thread_key || ""),
+          reference_count: Array.isArray(replySeed.references) ? replySeed.references.length : 0,
+        },
       });
       state.selectedDraftId = null;
       state.draftStatus = "";
@@ -3037,6 +3483,7 @@ _HTML = """<!doctype html>
           in_reply_to: payload.in_reply_to,
           references: payload.references,
           thread_key: payload.thread_key,
+          reply_context: activeDraft.reply_context || null,
           attachments: Array.isArray(activeDraft.attachments) ? activeDraft.attachments : [],
         };
         if (forceRemote) {
@@ -3186,6 +3633,35 @@ _HTML = """<!doctype html>
       }
     }
 
+    async function deleteDraft(draftId) {
+      const numericId = Number(draftId || 0);
+      if (!numericId) return;
+      const previousDraft = selectedDraft();
+      state.draftStatus = "deleting...";
+      renderDraftStatus();
+      removeDraftById(numericId);
+      if (state.selectedDraftId === numericId) {
+        state.selectedDraftId = null;
+        state.draftComposerSeed = null;
+      }
+      persistSelectionState();
+      renderCurrentSelection();
+      try {
+        await postJson(`/api/drafts/${numericId}/delete`, {});
+        state.draftStatus = "draft deleted";
+        loadDrafts().catch(() => {});
+      } catch (error) {
+        if (previousDraft) {
+          upsertDraft(previousDraft);
+          state.selectedDraftId = numericId;
+          persistSelectionState();
+          renderCurrentSelection();
+        }
+        state.draftStatus = String(error?.message || "delete failed");
+        renderDraftStatus();
+      }
+    }
+
     function renderDraftStatus() {
       const statusNode = $("draftStatus");
       if (!statusNode) return;
@@ -3199,6 +3675,38 @@ _HTML = """<!doctype html>
       previewNode.innerHTML = composeDraftPreviewHtml(bodyInput.value);
     }
 
+    function draftReplyContextMarkup(draft) {
+      const context = draft?.reply_context && typeof draft.reply_context === "object"
+        ? draft.reply_context
+        : null;
+      const metadataAttached = Boolean(
+        String(draft?.in_reply_to || "").trim()
+        || String(draft?.thread_key || "").trim()
+        || (Array.isArray(draft?.references) && draft.references.length),
+      );
+      if (!context && !metadataAttached) return "";
+      const subject = String(context?.subject || draft?.subject || "").trim() || "(original message)";
+      const from = String(context?.from || "").trim();
+      const happenedAt = humanTimestamp(String(context?.happened_at || ""));
+      const metaParts = [];
+      if (from) metaParts.push(`From ${from}`);
+      if (happenedAt) metaParts.push(happenedAt);
+      const referenceCount = Number(context?.reference_count || 0);
+      const preview = String(context?.preview || "").trim();
+      const fallback = metadataAttached
+        ? "Thread metadata is attached. The previous email is not inserted into your editable body."
+        : "";
+      return `
+        <div class="draft-reply-context" aria-label="Reply context">
+          <div class="draft-reply-context-title">Replying in thread</div>
+          <div class="draft-reply-context-subject">${escapeHtml(subject)}</div>
+          ${metaParts.length ? `<div class="draft-reply-context-meta">${escapeHtml(metaParts.join(" · "))}</div>` : ""}
+          <div class="draft-reply-context-preview">${escapeHtml(preview || fallback)}</div>
+          ${referenceCount ? `<div class="draft-reply-context-meta">${escapeHtml(`${referenceCount} thread reference${referenceCount === 1 ? "" : "s"} preserved for send`)}</div>` : ""}
+        </div>
+      `;
+    }
+
     function renderDraftDetail(draft) {
       const entry = draft || blankDraft();
       const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
@@ -3206,13 +3714,28 @@ _HTML = """<!doctype html>
       detail.classList.add("draft-mode");
       detail.innerHTML = `
         <div class="detail-head">
-          <div class="message-header">
-            <div class="message-title">${escapeHtml(entry.label || "(untitled draft)")}</div>
-            <div class="message-subtitle">${escapeHtml(entry.updated_at ? `Last saved ${humanTimestamp(entry.updated_at)}` : "Unsaved draft")}</div>
+          <div class="detail-head-row">
+            <div class="message-header">
+              <div class="message-title">${escapeHtml(entry.label || "(untitled draft)")}</div>
+              <div class="message-subtitle">${escapeHtml(entry.updated_at ? `Last saved ${humanTimestamp(entry.updated_at)}` : "Unsaved draft")}</div>
+            </div>
+            ${Number(entry.id || 0) > 0 ? `<button class="delete-button" type="button" id="deleteDraftButton" title="Delete this draft" aria-label="Delete draft">${trashIcon()}</button>` : ""}
           </div>
         </div>
         <div class="detail-body draft-detail-body">
           <form class="draft-form" id="draftForm">
+            ${Number(entry.id || 0) > 0 ? `
+              <div class="draft-delete-confirm hidden" id="draftDeleteConfirm">
+                <div class="draft-delete-confirm-copy">
+                  <strong>Ya sure?</strong>
+                  <span>Delete this draft locally and remove it from the drafts list.</span>
+                </div>
+                <div class="draft-delete-confirm-actions">
+                  <button class="secondary" type="button" id="cancelDraftDeleteButton">no, keep it</button>
+                  <button class="danger" type="button" id="confirmDraftDeleteButton">yes, delete</button>
+                </div>
+              </div>
+            ` : ""}
             <div class="draft-field">
               <label for="draftSubject">Subject</label>
               <input id="draftSubject" type="text" value="${escapeHtml(entry.subject || "")}" placeholder="Draft subject">
@@ -3240,6 +3763,7 @@ _HTML = """<!doctype html>
                 <datalist id="draftContactSuggestions">${contactOptionMarkup(state.contacts)}</datalist>
               </div>
             </details>
+            ${draftReplyContextMarkup(entry)}
             <div class="draft-field draft-attachments-shell">
               <div class="draft-attachments-head">
                 <label>Attachments</label>
@@ -3257,7 +3781,7 @@ _HTML = """<!doctype html>
                           </a>
                           <div class="draft-attachment-meta">${escapeHtml(attachment.kind_label || "file")} · ${escapeHtml(humanAttachmentSize(attachment.size || 0))}</div>
                         </div>
-                        <button class="delete-button" type="button" data-remove-draft-attachment="${escapeHtml(String(attachment.id || 0))}" title="Remove attachment">×</button>
+                        <button class="delete-button" type="button" data-remove-draft-attachment="${escapeHtml(String(attachment.id || 0))}" title="Remove attachment" aria-label="Remove attachment">${trashIcon()}</button>
                       </div>
                     `).join("")
                     : '<div class="draft-attachment-empty">No attachments yet.</div>'
@@ -3338,6 +3862,23 @@ _HTML = """<!doctype html>
       if (sendButton && entry.id) {
         sendButton.addEventListener("click", () => requestSendDraft(entry));
       }
+      const deleteDraftButton = $("deleteDraftButton");
+      const deleteConfirm = $("draftDeleteConfirm");
+      const cancelDraftDeleteButton = $("cancelDraftDeleteButton");
+      const confirmDraftDeleteButton = $("confirmDraftDeleteButton");
+      if (deleteDraftButton && deleteConfirm) {
+        deleteDraftButton.addEventListener("click", () => {
+          deleteConfirm.classList.remove("hidden");
+        });
+      }
+      if (cancelDraftDeleteButton && deleteConfirm) {
+        cancelDraftDeleteButton.addEventListener("click", () => {
+          deleteConfirm.classList.add("hidden");
+        });
+      }
+      if (confirmDraftDeleteButton && entry.id) {
+        confirmDraftDeleteButton.addEventListener("click", () => deleteDraft(Number(entry.id)));
+      }
       renderDraftPreview();
       renderDraftStatus();
     }
@@ -3345,7 +3886,9 @@ _HTML = """<!doctype html>
     function selectContact(contactKey) {
       state.selectedContactKey = contactKey || null;
       state.selectedThreadKey = null;
+      markContactOpened(state.selectedContactKey);
       const messages = messagesForContact(state.selectedContactKey);
+      markMessagesViewed(messages);
       state.selectedId = messages[0]?.id ?? null;
       persistSelectionState();
       renderContactList(state.overview || {});
@@ -3357,14 +3900,67 @@ _HTML = """<!doctype html>
       }
     }
 
+    function setContactSortMode(value) {
+      const nextMode = normalizeContactSortMode(value);
+      if (state.contactSortMode === nextMode) return;
+      state.contactSortMode = nextMode;
+      state.selectedContactKey = null;
+      state.selectedThreadKey = null;
+      state.selectedId = null;
+      state.listSignature = "";
+      persistSelectionState();
+      renderCurrentSelection();
+    }
+
+    function markContactOpened(contactKey) {
+      const cleanContactKey = String(contactKey || "").trim();
+      if (!cleanContactKey || !state.overview) return;
+      const openedAt = new Date().toISOString();
+      let changed = false;
+      state.overview = {
+        ...state.overview,
+        contacts: (state.overview.contacts || []).map((contact) => {
+          if (String(contact?.contact_key || "") !== cleanContactKey) return contact;
+          changed = true;
+          return { ...contact, opened_at: openedAt, touched_at: openedAt };
+        }),
+      };
+      if (changed) {
+        state.listSignature = "";
+        renderContactList(state.overview || {});
+      }
+      postJson("/api/contacts/open", { contact_key: cleanContactKey }, { keepalive: true })
+        .then((payload) => {
+          const serverOpenedAt = String(payload?.opened_at || payload?.touched_at || "").trim();
+          if (!serverOpenedAt || !state.overview) return;
+          let updated = false;
+          state.overview = {
+            ...state.overview,
+            contacts: (state.overview.contacts || []).map((contact) => {
+              if (String(contact?.contact_key || "") !== cleanContactKey) return contact;
+              if (contactOpenedAt(contact) === serverOpenedAt) return contact;
+              updated = true;
+              return { ...contact, opened_at: serverOpenedAt, touched_at: serverOpenedAt };
+            }),
+          };
+          if (updated) {
+            state.listSignature = "";
+            renderContactList(state.overview || {});
+          }
+        })
+        .catch(() => {});
+    }
+
     function updateCorrespondenceSearch(value) {
       state.correspondenceQuery = String(value || "").slice(0, 200);
       const contacts = displayedContacts(state.overview?.contacts || []);
       if (!contacts.length) {
         state.selectedContactKey = null;
+        state.selectedThreadKey = null;
         state.selectedId = null;
       } else if (!contacts.some((contact) => contact.contact_key === state.selectedContactKey)) {
-        state.selectedContactKey = contacts[0].contact_key;
+        state.selectedContactKey = null;
+        state.selectedThreadKey = null;
         state.selectedId = null;
       }
       persistSelectionState();
@@ -3396,7 +3992,7 @@ _HTML = """<!doctype html>
       const messages = (state.overview.messages || []).filter(
         (message) => String(message.contact_key || "") !== String(contactKey),
       );
-      const contacts = groupContacts(messages);
+      const contacts = mergeContactUiMetadata(groupContacts(messages), state.overview.contacts || []);
       state.overview = {
         ...state.overview,
         messages,
@@ -3504,11 +4100,16 @@ _HTML = """<!doctype html>
 
     function renderDetail(message) {
       state.detail = message;
+      const activeContactKey = String(message?.contact_key || state.selectedContactKey || "");
+      if (activeContactKey && state.selectedContactKey !== activeContactKey) {
+        state.selectedContactKey = activeContactKey;
+      }
       markMessageViewed(message);
+      markContactOpened(activeContactKey);
       const detail = $("detailPanel");
       detail.classList.remove("draft-mode");
-      const contact = contactRecord(state.selectedContactKey);
-      const messages = messagesForContact(state.selectedContactKey);
+      const contact = contactRecord(activeContactKey);
+      const messages = messagesForContact(activeContactKey);
       const outbound = String(message.direction || "").toLowerCase() === "outbound";
       const attachments = message.attachments || [];
       const bodyDisplay = message.body_display || {};
@@ -3545,9 +4146,12 @@ _HTML = """<!doctype html>
       ` : "";
       detail.innerHTML = `
         <div class="detail-head">
-          <div class="message-header">
-            <div class="message-title">${escapeHtml(message.contact_label || message.person || message.external_from || "(unknown contact)")}</div>
-            <div class="message-subtitle">${escapeHtml(`${contact?.count || messages.length} message${(contact?.count || messages.length) === 1 ? "" : "s"} in this correspondence`)}</div>
+          <div class="detail-head-row">
+            <div class="message-header">
+              <div class="message-title">${escapeHtml(message.contact_label || message.person || message.external_from || "(unknown contact)")}</div>
+              <div class="message-subtitle">${escapeHtml(`${contact?.count || messages.length} message${(contact?.count || messages.length) === 1 ? "" : "s"} in this correspondence`)}</div>
+            </div>
+            <button class="close-selection-button" type="button" data-clear-selection title="Close this correspondence" aria-label="Deselect correspondence">${closeIcon()}</button>
           </div>
         </div>
         <div class="detail-body">
@@ -3556,7 +4160,7 @@ _HTML = """<!doctype html>
             <select id="messageSelect" aria-label="Select a message from this contact">
               ${messages.map((entry) => `
                 <option value="${entry.id}" ${entry.id === state.selectedId ? "selected" : ""}>
-                  ${escapeHtml(`${messageIsUnread(entry) ? "● " : ""}${messageDirectionLabel(entry)} · ${entry.subject || "(no subject)"} — ${humanTimestamp(entry.happened_at || "")}`)}
+                  ${escapeHtml(`${messageIsNew(entry) ? "● " : ""}${messageDirectionLabel(entry)} · ${entry.subject || "(no subject)"} — ${humanTimestamp(entry.happened_at || "")}`)}
                 </option>
               `).join("")}
             </select>
@@ -3567,7 +4171,7 @@ _HTML = """<!doctype html>
             <div class="item item-action">
               <div class="detail-action-buttons">
                 <button class="secondary inline-reply" type="button" data-reply-message="${message.id}">reply</button>
-                <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence">×</button>
+                <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence" aria-label="Archive message">${trashIcon()}</button>
               </div>
             </div>
           </div>
@@ -3608,6 +4212,10 @@ _HTML = """<!doctype html>
       }
       const deleteButton = detail.querySelector("[data-delete-message]");
       const replyButton = detail.querySelector("[data-reply-message]");
+      const clearButton = detail.querySelector("[data-clear-selection]");
+      if (clearButton) {
+        clearButton.addEventListener("click", () => clearCorrespondenceSelection());
+      }
       if (replyButton) {
         replyButton.addEventListener("click", () => {
           openReplyDraft(message);
@@ -3711,6 +4319,41 @@ _HTML = """<!doctype html>
       refreshMailboxIfNeeded().catch(() => {});
     }
 
+    function targetIsEditable(target) {
+      const tagName = String(target?.tagName || "").toLowerCase();
+      return Boolean(
+        target?.isContentEditable
+        || tagName === "textarea"
+        || tagName === "select"
+        || (tagName === "input" && target?.id !== "correspondenceSearch")
+      );
+    }
+
+    function handleEscape(event) {
+      if (event.key !== "Escape") return;
+      if (state.pendingDelete) {
+        event.preventDefault();
+        closeConfirm();
+        return;
+      }
+      if (targetIsEditable(event.target)) return;
+      if (state.activeView === "drafts") {
+        if (state.selectedDraftId || state.draftComposerSeed) {
+          event.preventDefault();
+          state.selectedDraftId = null;
+          state.draftComposerSeed = null;
+          state.draftStatus = "";
+          persistSelectionState();
+          renderCurrentSelection();
+        }
+        return;
+      }
+      if (state.selectedContactKey || state.selectedId) {
+        event.preventDefault();
+        clearCorrespondenceSelection();
+      }
+    }
+
     async function loadDetail(id) {
       if (!id) return;
       const payload = await getDetail(id);
@@ -3767,6 +4410,9 @@ _HTML = """<!doctype html>
     $("tabDrafts").addEventListener("click", () => setActiveView("drafts"));
     $("tabHidden").addEventListener("click", () => setActiveView("hidden"));
     $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
+    $("sortAllButton").addEventListener("click", () => setContactSortMode("all"));
+    $("sortNewButton").addEventListener("click", () => setContactSortMode("new"));
+    $("sortOpenedButton").addEventListener("click", () => setContactSortMode("opened"));
     $("newDraftButton").addEventListener("click", () => startNewDraft());
     if (state.activeView === "drafts") {
       if (!state.contacts.length) {
@@ -3787,6 +4433,7 @@ _HTML = """<!doctype html>
       refreshMailboxIfNeeded().catch(() => {});
     }, __MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__);
     window.addEventListener("focus", wakeRefresh);
+    document.addEventListener("keydown", handleEscape);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         wakeRefresh();
@@ -4155,6 +4802,107 @@ def _communication_read_key(row: Any) -> str:
     return f"local-id:{int(row['id'])}"
 
 
+def _message_read_keys(message: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+
+    def push_key(prefix: str, value: Any) -> None:
+        clean = str(value or "").strip()
+        if clean:
+            keys.append(f"{prefix}:{clean}")
+
+    push_key("read", message.get("read_key"))
+    push_key("message-id", message.get("message_id"))
+    push_key("external-id", message.get("external_id"))
+    fallback_parts = [
+        str(message.get("source") or "").strip(),
+        str(message.get("direction") or "").strip(),
+        str(message.get("contact_key") or "").strip(),
+        str(message.get("thread_key") or "").strip(),
+        str(message.get("happened_at") or "").strip(),
+        str(message.get("subject") or "").strip(),
+    ]
+    non_empty_fallback_parts = [part for part in fallback_parts if part]
+    if len(non_empty_fallback_parts) >= 4:
+        push_key("fallback", "|".join(non_empty_fallback_parts))
+    push_key("local-id", message.get("id"))
+    legacy_id = str(message.get("id") or "").strip()
+    if legacy_id:
+        keys.append(legacy_id)
+    return list(dict.fromkeys(keys))
+
+
+def _communication_row_read_keys(row: Any) -> list[str]:
+    keys: list[str] = []
+
+    def push_key(prefix: str, value: Any) -> None:
+        clean = str(value or "").strip()
+        if clean:
+            keys.append(f"{prefix}:{clean}")
+
+    push_key("read", _communication_read_key(row))
+    push_key("message-id", row["message_id"])
+    push_key("external-id", row["external_id"])
+    push_key("local-id", row["id"])
+    legacy_id = str(row["id"] or "").strip()
+    if legacy_id:
+        keys.append(legacy_id)
+    return list(dict.fromkeys(keys))
+
+
+def _ensure_existing_correspondence_marked_viewed(connection: sqlite3.Connection) -> None:
+    if _connection_is_query_only(connection):
+        return
+    if store.get_sync_state(connection, store.MAIL_UI_VIEWED_MESSAGES_BASELINE_SYNC_KEY):
+        return
+    seeded_at = store._utc_now_string()
+    viewed_keys = store.get_viewed_mail_message_keys(connection)
+    for row in _list_correspondence_rows(connection, limit=None):
+        if str(row["direction"] or "").lower() == "outbound":
+            continue
+        for read_key in _communication_row_read_keys(row):
+            viewed_keys.setdefault(read_key, seeded_at)
+    if viewed_keys:
+        store.set_viewed_mail_message_keys(connection, viewed_keys)
+    store.set_sync_state(
+        connection,
+        store.MAIL_UI_VIEWED_MESSAGES_SEEDED_SYNC_KEY,
+        seeded_at,
+    )
+    store.set_sync_state(
+        connection,
+        store.MAIL_UI_VIEWED_MESSAGES_BASELINE_SYNC_KEY,
+        seeded_at,
+    )
+
+
+def _viewed_message_keys_for_messages(
+    connection: sqlite3.Connection,
+    messages: list[dict[str, Any]],
+) -> list[str]:
+    viewed_keys = store.get_viewed_mail_message_keys(connection)
+    if not viewed_keys:
+        return []
+    relevant_keys: set[str] = set()
+    for message in messages:
+        for read_key in _message_read_keys(message):
+            if read_key in viewed_keys:
+                relevant_keys.add(read_key)
+    return sorted(relevant_keys)
+
+
+def _connection_is_query_only(connection: sqlite3.Connection) -> bool:
+    try:
+        row = connection.execute("PRAGMA query_only").fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        return bool(int(row[0]))
+    except (TypeError, ValueError):
+        return False
+
+
 def _coalesce_display_paragraphs(text: str) -> str:
     paragraphs: list[str] = []
     current_parts: list[str] = []
@@ -4395,6 +5143,21 @@ def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> 
     }
 
 
+def _summary_search_text(row: Any, *, max_chars: int = 8000) -> str:
+    values = [
+        str(row["subject"] or ""),
+        str(row["person"] or ""),
+        str(row["external_from"] or ""),
+        str(row["external_to"] or ""),
+        str(row["snippet"] or ""),
+        str(row["body_text"] or ""),
+    ]
+    clean = " ".join(" ".join(value.split()) for value in values if value)
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    clean = " ".join(clean.split())
+    return clean[: max(0, int(max_chars))]
+
+
 def _communication_summary(row: Any) -> dict[str, Any]:
     contact = _contact_identity(
         direction=str(row["direction"] or ""),
@@ -4418,6 +5181,7 @@ def _communication_summary(row: Any) -> dict[str, Any]:
         "message_id": str(row["message_id"] or ""),
         "thread_key": str(row["thread_key"] or ""),
         "snippet": str(row["snippet"] or ""),
+        "search_text": _summary_search_text(row),
         "attachment_count": len(_json_value(str(row["attachments_json"] or "[]"), [])),
         **contact,
     }
@@ -4555,6 +5319,75 @@ def _cmail_batch_gap_minutes(*, max_per_hour: int, min_gap_minutes: float) -> fl
     return max(float(min_gap_minutes), hourly_gap)
 
 
+def _reply_context_from_message_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "is_reply": True,
+        "message_id": str(row["message_id"] or ""),
+        "subject": str(row["subject"] or ""),
+        "from": str(row["external_from"] or row["person"] or ""),
+        "to": str(row["external_to"] or ""),
+        "happened_at": str(row["happened_at"] or ""),
+        "preview": _draft_snippet(str(row["body_text"] or row["snippet"] or "")),
+        "thread_key": str(row["thread_key"] or row["external_thread_id"] or ""),
+    }
+
+
+def _draft_reply_context(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any] | None:
+    in_reply_to = str(row["in_reply_to"] or "").strip()
+    thread_key = str(row["thread_key"] or row["external_thread_id"] or "").strip()
+    references = _json_value(str(row["references_json"] or "[]"), [])
+    reference_count = len(references) if isinstance(references, list) else 0
+    if not in_reply_to and not thread_key and not reference_count:
+        return None
+
+    source_row = None
+    if in_reply_to:
+        source_row = connection.execute(
+            """
+            SELECT *
+            FROM communications
+            WHERE message_id = ?
+              AND source != 'cmail_draft'
+              AND status != 'deleted'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (in_reply_to,),
+        ).fetchone()
+    if source_row is None and thread_key:
+        source_row = connection.execute(
+            """
+            SELECT *
+            FROM communications
+            WHERE id != ?
+              AND source != 'cmail_draft'
+              AND status != 'deleted'
+              AND (thread_key = ? OR external_thread_id = ?)
+            ORDER BY happened_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(row["id"]), thread_key, thread_key),
+        ).fetchone()
+
+    context = _reply_context_from_message_row(source_row) or {
+        "is_reply": True,
+        "message_id": in_reply_to,
+        "subject": "",
+        "from": "",
+        "to": "",
+        "happened_at": "",
+        "preview": "Thread metadata is attached. The previous email is not inserted into your editable body.",
+        "thread_key": thread_key,
+    }
+    context["in_reply_to"] = in_reply_to
+    context["reference_count"] = reference_count
+    if thread_key and not context.get("thread_key"):
+        context["thread_key"] = thread_key
+    return context
+
+
 def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     draft_id = int(row["id"])
     return {
@@ -4570,6 +5403,7 @@ def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
         "in_reply_to": str(row["in_reply_to"] or ""),
         "references": _json_value(str(row["references_json"] or "[]"), []),
         "thread_key": str(row["thread_key"] or row["external_thread_id"] or ""),
+        "reply_context": _draft_reply_context(connection, row),
         "attachments": _draft_attachment_summaries(connection, draft_id=draft_id),
     }
 
@@ -4904,6 +5738,25 @@ def send_cmail_draft(
         "draft_id": int(draft_id),
         "draft_status": str(delivery.get("status") or "queued"),
         "delivery": delivery,
+    }
+
+
+def delete_cmail_draft(*, db_path: Path, draft_id: int) -> dict[str, Any]:
+    with store.open_db(db_path) as connection:
+        row = store.get_communication_by_id(connection, int(draft_id))
+        if row is None or str(row["source"] or "") != "cmail_draft":
+            raise KeyError(f"draft {draft_id} not found")
+        deleted = store.set_communication_status(
+            connection,
+            communication_id=int(draft_id),
+            status="deleted",
+        )
+    return {
+        "ok": True,
+        "draft_id": int(draft_id),
+        "deleted": bool(deleted),
+        "archived_for_days": store.DELETED_COMMUNICATION_RETENTION_DAYS,
+        "purge_scheduled": True,
     }
 
 
@@ -5523,7 +6376,19 @@ def _correspondence_messages_from_connection(
     elif hidden_contacts:
         messages = [message for message in messages if str(message.get("contact_key") or "").lower() not in hidden_contacts]
     if limit is not None:
-        messages = messages[: max(1, int(limit))]
+        base_limit = max(1, int(limit))
+        limited_messages = messages[:base_limit]
+        if not hidden:
+            opened_contact_keys = set(store.get_touched_mail_contacts(connection))
+            if opened_contact_keys:
+                included_ids = {int(message["id"]) for message in limited_messages}
+                for message in messages[base_limit:]:
+                    contact_key = str(message.get("contact_key") or "").strip().lower()
+                    if contact_key not in opened_contact_keys or int(message["id"]) in included_ids:
+                        continue
+                    limited_messages.append(message)
+                    included_ids.add(int(message["id"]))
+        messages = limited_messages
     return messages
 
 
@@ -5533,7 +6398,29 @@ def _correspondence_mailbox_version_from_connection(
     hidden: bool = False,
 ) -> dict[str, Any]:
     messages = _correspondence_messages_from_connection(connection, limit=None, hidden=hidden)
-    return _mailbox_version_from_messages(messages)
+    return {
+        **_mailbox_version_from_messages(messages),
+        **_mail_ui_state_version_from_connection(connection),
+    }
+
+
+def _mail_ui_state_version_from_connection(connection: sqlite3.Connection) -> dict[str, Any]:
+    touched_contacts = store.get_touched_mail_contacts(connection)
+    viewed_messages = store.get_viewed_mail_message_keys(connection)
+    hidden_contacts = store.get_hidden_mail_contacts(connection)
+    digest_payload = {
+        "hidden_contacts": hidden_contacts,
+        "opened_contacts": touched_contacts,
+        "viewed_messages": viewed_messages,
+    }
+    digest = hashlib.sha256(json.dumps(digest_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return {
+        "ui_state_digest": digest,
+        "viewed_message_count": len(viewed_messages),
+        "opened_contact_count": len(touched_contacts),
+        "touched_contact_count": len(touched_contacts),
+        "hidden_contact_count": len(hidden_contacts),
+    }
 
 
 def _build_correspondence_overview_from_connection(
@@ -5543,8 +6430,9 @@ def _build_correspondence_overview_from_connection(
     include_details: bool = False,
     hidden: bool = False,
 ) -> dict[str, Any]:
+    _ensure_existing_correspondence_marked_viewed(connection)
     messages = _correspondence_messages_from_connection(connection, limit=limit, hidden=hidden)
-    contacts = _group_contacts(messages)
+    contacts = _apply_contact_touch_metadata(connection, _group_contacts(messages))
     hidden_contacts = _hidden_contacts_from_connection(connection)
     payload = {
         "mailbox": "hidden" if hidden else "correspondence",
@@ -5553,6 +6441,7 @@ def _build_correspondence_overview_from_connection(
         "hidden_contact_count": len(hidden_contacts),
         "messages": messages,
         "contacts": contacts,
+        "viewed_message_keys": _viewed_message_keys_for_messages(connection, messages),
         "cloudflare_queue": _cloudflare_queue_status_from_connection(connection),
         "cloudflare_sync": _cloudflare_sync_status_from_connection(connection),
         "mailbox_version": _correspondence_mailbox_version_from_connection(connection, hidden=hidden),
@@ -5579,6 +6468,23 @@ def _record_cloudflare_queue_heartbeat(*, db_path: Path) -> dict[str, Any] | Non
 
 def _hidden_contacts_from_connection(connection: sqlite3.Connection) -> dict[str, str]:
     return store.get_hidden_mail_contacts(connection)
+
+
+def _apply_contact_touch_metadata(
+    connection: sqlite3.Connection,
+    contacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    touched_contacts = store.get_touched_mail_contacts(connection)
+    if not touched_contacts:
+        for contact in contacts:
+            contact.setdefault("opened_at", "")
+            contact.setdefault("touched_at", "")
+        return contacts
+    for contact in contacts:
+        opened_at = touched_contacts.get(str(contact.get("contact_key") or "").strip().lower(), "")
+        contact["opened_at"] = opened_at
+        contact["touched_at"] = opened_at
+    return contacts
 
 
 def _set_hidden_contacts(
@@ -5615,6 +6521,7 @@ def _build_mail_ui_overview_from_connection(
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     include_details: bool = False,
 ) -> dict[str, Any]:
+    _ensure_existing_correspondence_marked_viewed(connection)
     raw_messages = [
         _communication_summary(row)
         for row in store.list_communications(
@@ -5632,12 +6539,13 @@ def _build_mail_ui_overview_from_connection(
 
     cloudflare = _cloudflare_queue_status_from_connection(connection)
 
-    contacts = _group_contacts(messages)
+    contacts = _apply_contact_touch_metadata(connection, _group_contacts(messages))
     payload = {
         "message_count": len(messages),
         "contact_count": len(contacts),
         "messages": messages,
         "contacts": contacts,
+        "viewed_message_keys": _viewed_message_keys_for_messages(connection, messages),
         "cloudflare_queue": cloudflare,
         "cloudflare_sync": sync,
         "mailbox_version": _mailbox_version_from_connection(
@@ -5836,6 +6744,110 @@ def _frg_booking_duration(value: Any) -> int:
     return max(15, min(8 * 60, duration))
 
 
+def _frg_booking_clock_label(clock: str) -> str:
+    match = re.match(r"^(\d{2}):(\d{2})$", str(clock or "").strip())
+    if not match:
+        return ""
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return ""
+    meridiem = "PM" if hour >= 12 else "AM"
+    hour_12 = hour % 12 or 12
+    return f"{hour_12}:{minute:02d} {meridiem}"
+
+
+def _frg_booking_active_status_clause() -> str:
+    placeholders = ", ".join("?" for _ in FRG_BOOKING_INACTIVE_STATUSES)
+    return f"LOWER(status) NOT IN ({placeholders})"
+
+
+def _frg_booking_hold_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    start_time = str(row["start_time"] or "")
+    end_time = str(row["end_time"] or "")
+    return {
+        "calendarEntryId": int(row["id"]),
+        "selectedDate": str(row["entry_date"] or ""),
+        "selectedTime": _frg_booking_clock_label(start_time),
+        "startTime": start_time,
+        "endTime": end_time,
+    }
+
+
+def _frg_booking_interval_conflict(
+    connection: sqlite3.Connection,
+    *,
+    target_day: date,
+    start_time: str,
+    end_time: str,
+    source_id: int,
+) -> sqlite3.Row | None:
+    if not start_time or not end_time:
+        return None
+    return connection.execute(
+        f"""
+        SELECT *
+        FROM calendar_entries
+        WHERE source = ?
+          AND source_table = ?
+          AND entry_date = ?
+          AND {_frg_booking_active_status_clause()}
+          AND start_time != ''
+          AND start_time < ?
+          AND COALESCE(NULLIF(end_time, ''), start_time) > ?
+          AND (source_id IS NULL OR source_id != ?)
+        ORDER BY start_time ASC, id ASC
+        LIMIT 1
+        """,
+        (
+            FRG_BOOKING_WEBHOOK_SOURCE,
+            FRG_BOOKING_WEBHOOK_SOURCE_TABLE,
+            target_day.isoformat(),
+            *FRG_BOOKING_INACTIVE_STATUSES,
+            end_time,
+            start_time,
+            source_id,
+        ),
+    ).fetchone()
+
+
+def _frg_booking_availability_payload(*, db_path: Path, start_day: date, end_day: date) -> dict[str, Any]:
+    if end_day < start_day:
+        raise ValueError("invalid_frg_booking_availability_range")
+    if (end_day - start_day).days > 120:
+        raise ValueError("frg_booking_availability_range_too_large")
+
+    with store.open_db(db_path) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, entry_date, start_time, end_time
+            FROM calendar_entries
+            WHERE source = ?
+              AND source_table = ?
+              AND entry_date >= ?
+              AND entry_date <= ?
+              AND {_frg_booking_active_status_clause()}
+              AND start_time != ''
+            ORDER BY entry_date ASC, start_time ASC, id ASC
+            """,
+            (
+                FRG_BOOKING_WEBHOOK_SOURCE,
+                FRG_BOOKING_WEBHOOK_SOURCE_TABLE,
+                start_day.isoformat(),
+                end_day.isoformat(),
+                *FRG_BOOKING_INACTIVE_STATUSES,
+            ),
+        ).fetchall()
+
+    return {
+        "ok": True,
+        "start": start_day.isoformat(),
+        "end": end_day.isoformat(),
+        "generatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "heldSlots": [_frg_booking_hold_from_row(row) for row in rows],
+    }
+
+
 def _format_frg_booking_notes(payload: dict[str, Any]) -> str:
     booking = payload.get("booking") if isinstance(payload.get("booking"), dict) else {}
     payment = payload.get("payment") if isinstance(payload.get("payment"), dict) else {}
@@ -5913,11 +6925,14 @@ def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> di
     duration = _frg_booking_duration(booking.get("durationMinutes"))
     start_time, start_hour, start_minute = _frg_booking_clock(booking.get("selectedTime"))
     end_time = _frg_booking_end_clock(start_hour, start_minute, duration)
+    if not start_time or not end_time:
+        raise ValueError("frg_booking_requires_valid_slot_time")
     source_id = _frg_booking_source_id(booking_id)
     draft: dict[str, Any] | None = None
     sent: dict[str, Any] | None = None
 
     with store.open_db(db_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
             """
             SELECT *
@@ -5930,6 +6945,15 @@ def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> di
             (FRG_BOOKING_WEBHOOK_SOURCE, FRG_BOOKING_WEBHOOK_SOURCE_TABLE, source_id),
         ).fetchone()
         if existing is None:
+            conflict = _frg_booking_interval_conflict(
+                connection,
+                target_day=target_day,
+                start_time=start_time,
+                end_time=end_time,
+                source_id=source_id,
+            )
+            if conflict is not None:
+                raise ValueError("frg_booking_slot_unavailable")
             entry_id = store.add_calendar_entry(
                 connection,
                 entry_date=target_day,
@@ -5945,6 +6969,7 @@ def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> di
                 source_id=source_id,
                 notes=_format_frg_booking_notes(payload),
                 tags=["frg", "booking", event_name.replace(".", "-")],
+                commit=False,
             )
             draft = _save_cmail_draft(
                 connection,
@@ -6149,13 +7174,10 @@ _CALENDAR_HTML = """<!doctype html>
       min-height: 100vh;
       color: var(--text);
       font-family: var(--sans);
-      background:
-        radial-gradient(circle at 18% 0%, rgba(184,255,77,0.16) 0, transparent 34%),
-        radial-gradient(circle at 86% 16%, rgba(255,209,102,0.12) 0, transparent 28%),
-        linear-gradient(180deg, #0c120e 0%, var(--bg) 58%);
+      background: linear-gradient(180deg, #12180f 0%, #090d0a 58%, #060806 100%);
     }
     .shell {
-      width: min(1320px, calc(100vw - 32px));
+      width: min(1480px, calc(100vw - 28px));
       margin: 0 auto;
       padding: 22px 0 28px;
       display: grid;
@@ -6172,7 +7194,7 @@ _CALENDAR_HTML = """<!doctype html>
       margin: 0;
       font-size: clamp(40px, 7vw, 82px);
       line-height: 0.92;
-      letter-spacing: -0.07em;
+      letter-spacing: 0;
     }
     .tabbar {
       display: inline-flex;
@@ -6188,14 +7210,14 @@ _CALENDAR_HTML = """<!doctype html>
       padding: 8px 14px;
       border-radius: 999px;
       font: 700 13px/1 var(--mono);
-      letter-spacing: 0.08em;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .tabbar a.active {
       color: #0a1009;
       background: var(--accent);
     }
-    .toolbar, .form-grid {
+    .toolbar, .form-grid, .range-actions {
       display: flex;
       align-items: center;
       gap: 10px;
@@ -6203,7 +7225,7 @@ _CALENDAR_HTML = """<!doctype html>
     }
     input, select, textarea, button {
       border: 1px solid var(--line);
-      border-radius: 13px;
+      border-radius: 8px;
       background: #0d130f;
       color: var(--text);
       padding: 10px 12px;
@@ -6227,14 +7249,19 @@ _CALENDAR_HTML = """<!doctype html>
     button.secondary {
       background: var(--panel-2);
     }
-    .grid {
+    .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+      grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.65fr);
       gap: 14px;
+    }
+    .range-stack {
+      display: grid;
+      gap: 14px;
+      min-width: 0;
     }
     .panel {
       border: 1px solid var(--line);
-      border-radius: 22px;
+      border-radius: 8px;
       background:
         linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)),
         var(--panel);
@@ -6247,11 +7274,12 @@ _CALENDAR_HTML = """<!doctype html>
       justify-content: space-between;
       gap: 14px;
       align-items: center;
+      flex-wrap: wrap;
     }
     .panel-title {
       font-size: 18px;
       font-weight: 800;
-      letter-spacing: -0.02em;
+      letter-spacing: 0;
     }
     .panel-body {
       padding: 18px;
@@ -6265,14 +7293,14 @@ _CALENDAR_HTML = """<!doctype html>
     }
     .stat {
       border: 1px solid var(--line);
-      border-radius: 16px;
+      border-radius: 8px;
       background: rgba(255,255,255,0.025);
       padding: 12px;
     }
     .stat-label {
       color: var(--muted);
       font: 700 11px/1 var(--mono);
-      letter-spacing: 0.1em;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .stat-value {
@@ -6288,12 +7316,12 @@ _CALENDAR_HTML = """<!doctype html>
       margin: 0;
       color: var(--accent);
       font: 800 12px/1 var(--mono);
-      letter-spacing: 0.14em;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .entry {
       border: 1px solid var(--line);
-      border-radius: 16px;
+      border-radius: 8px;
       background: rgba(255,255,255,0.02);
       padding: 12px 13px;
       display: grid;
@@ -6307,10 +7335,31 @@ _CALENDAR_HTML = """<!doctype html>
       font-weight: 800;
       line-height: 1.25;
     }
+    .entry-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: start;
+    }
     .entry-meta, .muted {
       color: var(--muted);
       font-size: 13px;
       line-height: 1.45;
+    }
+    .pill-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .pill {
+      border: 1px solid rgba(184,255,77,0.26);
+      border-radius: 999px;
+      padding: 4px 7px;
+      color: var(--accent);
+      font: 800 11px/1 var(--mono);
+      letter-spacing: 0;
+      text-transform: uppercase;
+      white-space: nowrap;
     }
     .entry-actions {
       display: flex;
@@ -6322,9 +7371,115 @@ _CALENDAR_HTML = """<!doctype html>
       border-radius: 999px;
       font-size: 12px;
     }
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .month {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(0,0,0,0.14);
+      padding: 10px;
+      min-width: 0;
+    }
+    .month-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .month-title {
+      font-weight: 900;
+      font-size: 14px;
+    }
+    .month-count {
+      color: var(--muted);
+      font: 800 11px/1 var(--mono);
+    }
+    .weekdays,
+    .days {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+    }
+    .weekday {
+      color: var(--muted);
+      font: 800 10px/1 var(--mono);
+      text-align: center;
+      text-transform: uppercase;
+    }
+    .day-cell {
+      appearance: none;
+      min-height: 44px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.018);
+      color: var(--text);
+      padding: 5px;
+      display: grid;
+      align-content: space-between;
+      gap: 4px;
+      text-align: left;
+    }
+    .day-cell.blank {
+      visibility: hidden;
+    }
+    .day-cell.has-items {
+      border-color: rgba(184,255,77,0.28);
+      background: rgba(184,255,77,0.08);
+    }
+    .day-cell.today {
+      outline: 2px solid var(--warning);
+      outline-offset: 1px;
+    }
+    .day-cell.selected {
+      border-color: var(--accent);
+      background: rgba(184,255,77,0.18);
+    }
+    .day-number {
+      font-weight: 900;
+      font-size: 13px;
+    }
+    .day-markers {
+      display: flex;
+      gap: 3px;
+      min-height: 6px;
+    }
+    .marker {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .marker.signup { background: var(--warning); }
+    .marker.recurring { background: #7cc7ff; }
+    .marker.urgent { background: var(--danger); }
+    .upcoming-list {
+      display: grid;
+      gap: 8px;
+      max-height: 420px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .upcoming-item {
+      width: 100%;
+      text-align: left;
+      border-radius: 8px;
+      border-color: var(--line);
+      background: rgba(255,255,255,0.02);
+      display: grid;
+      gap: 4px;
+    }
+    .upcoming-date {
+      color: var(--accent);
+      font: 800 11px/1 var(--mono);
+      text-transform: uppercase;
+    }
     .note-card {
       border: 1px solid rgba(184,255,77,0.18);
-      border-radius: 18px;
+      border-radius: 8px;
       background: rgba(184,255,77,0.07);
       padding: 14px;
       display: grid;
@@ -6334,16 +7489,34 @@ _CALENDAR_HTML = """<!doctype html>
       color: var(--muted);
       padding: 14px;
       border: 1px dashed var(--line);
-      border-radius: 16px;
+      border-radius: 8px;
     }
     .status {
       color: var(--muted);
       font-size: 13px;
       min-height: 18px;
     }
+    .capture-panel {
+      align-self: start;
+      position: sticky;
+      top: 14px;
+    }
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .full {
+      grid-column: 1 / -1;
+    }
     @media (max-width: 980px) {
-      .grid { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      .calendar-grid { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .capture-panel { position: static; }
+    }
+    @media (min-width: 981px) and (max-width: 1240px) {
+      .calendar-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -6359,28 +7532,51 @@ _CALENDAR_HTML = """<!doctype html>
     </div>
     <div class="toolbar">
       <input id="calendarDate" type="date">
+      <button class="secondary" type="button" id="todayButton">today</button>
       <button class="secondary" type="button" id="loadDayButton">load day</button>
       <button class="primary" type="button" id="saveDayButton">save historic day</button>
       <button class="secondary" type="button" id="rolloverButton">roll unfinished to tomorrow</button>
       <span class="status" id="statusText"></span>
     </div>
-    <section class="grid">
-      <section class="panel">
+    <section class="layout">
+      <div class="range-stack">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title" id="rangeTitle">Next 365 Days</div>
+              <div class="muted" id="rangeSubtitle">Loading planning horizon…</div>
+            </div>
+            <div class="range-actions">
+              <input id="rangeStart" type="date">
+              <button class="secondary" type="button" id="loadRangeButton">load year</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <section class="stats" id="rangeStats"></section>
+            <div class="calendar-grid" id="calendarGrid"></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title" id="dayTitle">Loading calendar…</div>
+              <div class="muted" id="daySubtitle">Local-first LifeOps day view</div>
+            </div>
+          </div>
+          <div class="panel-body" id="dayBody"></div>
+        </section>
+      </div>
+      <aside class="panel capture-panel">
         <div class="panel-head">
           <div>
-            <div class="panel-title" id="dayTitle">Loading calendar…</div>
-            <div class="muted" id="daySubtitle">Local-first Life Ops day view</div>
+            <div class="panel-title">Capture</div>
+            <div class="muted" id="captureDateLabel"></div>
           </div>
-        </div>
-        <div class="panel-body" id="dayBody"></div>
-      </section>
-      <aside class="panel">
-        <div class="panel-head">
-          <div class="panel-title">Capture</div>
         </div>
         <div class="panel-body">
           <form class="section" id="entryForm">
             <h2>New Entry</h2>
+            <input id="entryDate" type="date">
             <input id="entryTitle" type="text" placeholder="What needs to be tracked?">
             <div class="form-grid">
               <select id="entryType">
@@ -6397,11 +7593,35 @@ _CALENDAR_HTML = """<!doctype html>
                 <option value="high">high</option>
                 <option value="low">low</option>
               </select>
+              <select id="entryList">
+                <option value="personal">personal</option>
+                <option value="professional">professional</option>
+                <option value="general">general</option>
+              </select>
               <input id="entryStartTime" type="time" aria-label="start time">
+              <input id="entryEndTime" type="time" aria-label="end time">
+            </div>
+            <div class="two-col">
+              <select id="repeatFrequency">
+                <option value="">does not repeat</option>
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+                <option value="monthly">monthly</option>
+                <option value="yearly">yearly</option>
+              </select>
+              <input id="repeatInterval" type="number" min="1" value="1" aria-label="repeat interval">
+              <input id="repeatAnchorDate" type="date" aria-label="repeat anchor date">
+              <input id="repeatUntil" type="date" aria-label="repeat until">
+              <input id="repeatCount" type="number" min="1" placeholder="count" aria-label="repeat count">
+              <input id="entryTags" type="text" placeholder="tags">
             </div>
             <textarea id="entryNotes" placeholder="Notes, evidence, context, or why this matters"></textarea>
             <button class="primary" type="submit">add to day</button>
           </form>
+          <section class="section">
+            <h2>Upcoming</h2>
+            <div class="upcoming-list" id="upcomingList"></div>
+          </section>
           <form class="section" id="noteForm">
             <h2>Day Notes</h2>
             <input id="dayIntention" type="text" placeholder="Intention">
@@ -6417,7 +7637,13 @@ _CALENDAR_HTML = """<!doctype html>
   </main>
   <script>
     const INITIAL_DAY = __INITIAL_CALENDAR_JSON__;
-    const state = { day: INITIAL_DAY || null };
+    const INITIAL_RANGE = __INITIAL_RANGE_JSON__;
+    const state = {
+      day: INITIAL_DAY || {},
+      range: INITIAL_RANGE || {},
+      selectedDate: (INITIAL_DAY && INITIAL_DAY.date) || new Date().toISOString().slice(0, 10),
+      rangeStart: (INITIAL_RANGE && INITIAL_RANGE.start_date) || new Date().toISOString().slice(0, 10),
+    };
     const $ = (id) => document.getElementById(id);
 
     function escapeHtml(value) {
@@ -6428,8 +7654,17 @@ _CALENDAR_HTML = """<!doctype html>
         .replaceAll('"', "&quot;");
     }
 
+    function dateObject(value) {
+      return new Date(`${value}T00:00:00`);
+    }
+
+    function labelDate(value) {
+      if (!value) return "";
+      return dateObject(value).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+    }
+
     function tomorrowDate(value) {
-      const date = new Date(`${value}T00:00:00`);
+      const date = dateObject(value);
       date.setDate(date.getDate() + 1);
       return date.toISOString().slice(0, 10);
     }
@@ -6454,19 +7689,48 @@ _CALENDAR_HTML = """<!doctype html>
       $("statusText").textContent = text || "";
     }
 
+    function timeLabel(entry) {
+      if (entry.start_time) return `${entry.start_time}${entry.end_time ? `-${entry.end_time}` : ""}`;
+      if (entry.time) return entry.time;
+      return "anytime";
+    }
+
+    function recurrenceLabel(entry) {
+      const frequency = entry.recurrence_frequency || "";
+      if (!frequency || frequency === "none") return "";
+      const interval = Number(entry.recurrence_interval || 1);
+      const every = interval > 1 ? `every ${interval} ${frequency}s` : frequency;
+      const anchor = entry.recurrence_anchor_date ? `since ${entry.recurrence_anchor_date}` : "";
+      return [every, anchor].filter(Boolean).join(" · ");
+    }
+
     function entryMarkup(entry) {
-      const time = entry.start_time ? `${entry.start_time}${entry.end_time ? `-${entry.end_time}` : ""}` : "anytime";
       const done = entry.status === "done";
+      const repeat = recurrenceLabel(entry);
+      const canUpdateStatus = !entry.is_virtual;
+      const pills = [
+        entry.section,
+        entry.is_recurring ? "repeats" : "",
+        entry.is_virtual ? "projected" : "",
+      ].filter(Boolean);
       return `
         <article class="entry ${done ? "done" : ""}">
-          <div class="entry-title">${escapeHtml(entry.title)}</div>
-          <div class="entry-meta">#${entry.id} · ${escapeHtml(time)} · ${escapeHtml(entry.status)} · ${escapeHtml(entry.type)} · ${escapeHtml(entry.priority)}</div>
-          ${entry.notes ? `<div class="muted">${escapeHtml(entry.notes)}</div>` : ""}
-          <div class="entry-actions">
-            <button type="button" data-entry-status="${entry.id}:done" class="secondary">done</button>
-            <button type="button" data-entry-status="${entry.id}:missed" class="secondary">missed</button>
-            <button type="button" data-entry-status="${entry.id}:deferred" class="secondary">defer</button>
+          <div class="entry-head">
+            <div>
+              <div class="entry-title">${escapeHtml(entry.title)}</div>
+              <div class="entry-meta">#${escapeHtml(entry.id)} · ${escapeHtml(timeLabel(entry))} · ${escapeHtml(entry.status || "scheduled")} · ${escapeHtml(entry.type || entry.kind || "item")} · ${escapeHtml(entry.priority || "normal")}</div>
+            </div>
+            ${pills.length ? `<div class="pill-row">${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}</div>` : ""}
           </div>
+          ${repeat ? `<div class="entry-meta">${escapeHtml(repeat)}</div>` : ""}
+          ${entry.notes ? `<div class="muted">${escapeHtml(entry.notes)}</div>` : ""}
+          ${canUpdateStatus ? `
+            <div class="entry-actions">
+              <button type="button" data-entry-status="${entry.id}:done" class="secondary">done</button>
+              <button type="button" data-entry-status="${entry.id}:missed" class="secondary">missed</button>
+              <button type="button" data-entry-status="${entry.id}:deferred" class="secondary">defer</button>
+            </div>
+          ` : ""}
         </article>
       `;
     }
@@ -6480,9 +7744,92 @@ _CALENDAR_HTML = """<!doctype html>
       `;
     }
 
+    function rangeStatMarkup(label, value) {
+      return `<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(value)}</div></div>`;
+    }
+
+    function dayMarkers(day) {
+      const markers = [];
+      if (day.urgent_count) markers.push("urgent");
+      if (day.signup_count) markers.push("signup");
+      if (day.recurring_count) markers.push("recurring");
+      while (markers.length < Math.min(Number(day.item_count || 0), 3)) markers.push("");
+      return markers.map((name) => `<span class="marker ${name}"></span>`).join("");
+    }
+
+    function monthMarkup(month) {
+      const days = month.days || [];
+      const firstDay = days[0]?.date || `${month.key}-01`;
+      const blanks = Array.from({ length: dateObject(firstDay).getDay() }, () => '<button class="day-cell blank" type="button" tabindex="-1"></button>').join("");
+      const cells = days.map((day) => {
+        const classes = ["day-cell"];
+        if (day.item_count) classes.push("has-items");
+        if (day.is_today) classes.push("today");
+        if (day.date === state.selectedDate) classes.push("selected");
+        return `
+          <button class="${classes.join(" ")}" type="button" data-day="${escapeHtml(day.date)}" title="${escapeHtml(day.label)}">
+            <span class="day-number">${escapeHtml(day.day_number)}</span>
+            <span class="day-markers">${dayMarkers(day)}</span>
+          </button>
+        `;
+      }).join("");
+      return `
+        <section class="month">
+          <div class="month-head">
+            <div class="month-title">${escapeHtml(month.label)}</div>
+            <div class="month-count">${month.item_count || 0}</div>
+          </div>
+          <div class="weekdays">
+            ${["S", "M", "T", "W", "T", "F", "S"].map((day) => `<div class="weekday">${day}</div>`).join("")}
+          </div>
+          <div class="days">${blanks}${cells}</div>
+        </section>
+      `;
+    }
+
+    function upcomingMarkup(item) {
+      return `
+        <button class="upcoming-item" type="button" data-upcoming-day="${escapeHtml(item.date)}">
+          <span class="upcoming-date">${escapeHtml(labelDate(item.date))} · ${escapeHtml(timeLabel(item))}</span>
+          <strong>${escapeHtml(item.title || "(untitled)")}</strong>
+          <span class="entry-meta">${escapeHtml(item.section || item.kind || "calendar")}${item.is_recurring ? " · repeats" : ""}</span>
+        </button>
+      `;
+    }
+
+    function renderRange(payload) {
+      state.range = payload || {};
+      state.rangeStart = state.range.start_date || state.rangeStart;
+      $("rangeStart").value = state.rangeStart;
+      $("rangeSubtitle").textContent = `${state.range.start_date || ""} to ${state.range.end_date || ""}`;
+      const summary = state.range.summary || {};
+      $("rangeStats").innerHTML = [
+        rangeStatMarkup("items", summary.items || 0),
+        rangeStatMarkup("repeat", summary.recurring_occurrences || 0),
+        rangeStatMarkup("signups", summary.signups || 0),
+        rangeStatMarkup("urgent", summary.urgent || 0),
+      ].join("");
+      $("calendarGrid").innerHTML = (state.range.months || []).map(monthMarkup).join("") || `<div class="empty">No range loaded.</div>`;
+      $("upcomingList").innerHTML = (state.range.upcoming || []).slice(0, 40).map(upcomingMarkup).join("") || `<div class="empty">No upcoming calendar items.</div>`;
+      for (const button of document.querySelectorAll("[data-day]")) {
+        button.addEventListener("click", () => loadDay(String(button.getAttribute("data-day") || "")).catch((error) => setStatus(error.message)));
+      }
+      for (const button of document.querySelectorAll("[data-upcoming-day]")) {
+        button.addEventListener("click", () => loadDay(String(button.getAttribute("data-upcoming-day") || "")).catch((error) => setStatus(error.message)));
+      }
+    }
+
+    function syncCaptureDate(day) {
+      $("entryDate").value = day;
+      $("captureDateLabel").textContent = labelDate(day);
+      if (!$("repeatFrequency").value) $("repeatAnchorDate").value = day;
+    }
+
     function renderDay(payload) {
       state.day = payload || {};
-      $("calendarDate").value = state.day.date || new Date().toISOString().slice(0, 10);
+      state.selectedDate = state.day.date || state.selectedDate;
+      $("calendarDate").value = state.selectedDate;
+      syncCaptureDate(state.selectedDate);
       $("dayTitle").textContent = state.day.label || state.day.date || "Calendar";
       const stats = state.day.stats || {};
       const note = state.day.day_note || {};
@@ -6498,10 +7845,10 @@ _CALENDAR_HTML = """<!doctype html>
       const latestSave = (state.day.snapshots || [])[0];
       $("dayBody").innerHTML = `
         <section class="stats">
-          <div class="stat"><div class="stat-label">tracked</div><div class="stat-value">${stats.tracked_entries || 0}</div></div>
-          <div class="stat"><div class="stat-label">done</div><div class="stat-value">${stats.done_entries || 0}</div></div>
-          <div class="stat"><div class="stat-label">not done</div><div class="stat-value">${stats.open_entries || 0}</div></div>
-          <div class="stat"><div class="stat-label">saves</div><div class="stat-value">${(state.day.snapshots || []).length}</div></div>
+          ${rangeStatMarkup("tracked", stats.tracked_entries || 0)}
+          ${rangeStatMarkup("done", stats.done_entries || 0)}
+          ${rangeStatMarkup("not done", stats.open_entries || 0)}
+          ${rangeStatMarkup("saves", (state.day.snapshots || []).length)}
         </section>
         ${(note.intention || note.reflection || note.notes || note.mood || note.energy) ? `
           <section class="note-card">
@@ -6513,7 +7860,7 @@ _CALENDAR_HTML = """<!doctype html>
         ` : ""}
         <section class="section">
           <h2>Tracked</h2>
-          ${entries.length ? entries.map(entryMarkup).join("") : `<div class="empty">No tracked entries for this day yet.</div>`}
+          ${entries.length ? entries.map((entry) => entryMarkup({ ...entry, section: entry.section || "" })).join("") : `<div class="empty">No tracked entries for this day yet.</div>`}
         </section>
         <section class="section">
           <h2>Agenda</h2>
@@ -6521,7 +7868,7 @@ _CALENDAR_HTML = """<!doctype html>
         </section>
         <section class="section">
           <h2>Need To Get To</h2>
-          ${needs.length ? needs.map(entryMarkup).join("") : `<div class="empty">Nothing currently outstanding for this day.</div>`}
+          ${needs.length ? needs.map((entry) => entryMarkup({ ...entry, section: entry.section || "" })).join("") : `<div class="empty">Nothing currently outstanding for this day.</div>`}
         </section>
         ${latestSave ? `
           <section class="section">
@@ -6540,19 +7887,46 @@ _CALENDAR_HTML = """<!doctype html>
           setStatus("updating...");
           const next = await postJson(`/api/calendar/entries/${id}/status`, { status, date: state.day.date });
           renderDay(next.day);
+          await loadRange(state.rangeStart);
           setStatus("updated");
         });
       }
+      renderRange(state.range);
     }
 
     async function loadDay(day) {
+      if (!day) return;
       setStatus("loading...");
       const payload = await fetchJson(`/api/calendar/day?date=${encodeURIComponent(day)}`);
       renderDay(payload.day);
       setStatus("loaded");
     }
 
+    async function loadRange(start) {
+      const cleanStart = start || $("rangeStart").value || state.rangeStart;
+      setStatus("loading year...");
+      const payload = await fetchJson(`/api/calendar/range?start=${encodeURIComponent(cleanStart)}&days=365`);
+      renderRange(payload.range);
+      setStatus("year loaded");
+    }
+
+    $("calendarDate").addEventListener("change", () => loadDay($("calendarDate").value).catch((error) => setStatus(error.message)));
+    $("entryDate").addEventListener("change", () => {
+      $("calendarDate").value = $("entryDate").value;
+      if (!$("repeatFrequency").value) $("repeatAnchorDate").value = $("entryDate").value;
+    });
+    $("repeatFrequency").addEventListener("change", () => {
+      if (!$("repeatAnchorDate").value) $("repeatAnchorDate").value = $("entryDate").value || state.selectedDate;
+    });
     $("loadDayButton").addEventListener("click", () => loadDay($("calendarDate").value).catch((error) => setStatus(error.message)));
+    $("loadRangeButton").addEventListener("click", () => loadRange($("rangeStart").value).catch((error) => setStatus(error.message)));
+    $("todayButton").addEventListener("click", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      $("calendarDate").value = today;
+      $("rangeStart").value = today;
+      await loadDay(today);
+      await loadRange(today);
+    });
     $("saveDayButton").addEventListener("click", async () => {
       try {
         setStatus("saving historic day...");
@@ -6569,6 +7943,7 @@ _CALENDAR_HTML = """<!doctype html>
         setStatus("rolling unfinished work...");
         await postJson("/api/calendar/rollover", { source_date: sourceDate, target_date: tomorrowDate(sourceDate) });
         await loadDay(sourceDate);
+        await loadRange(state.rangeStart);
         setStatus("rolled unfinished work to tomorrow");
       } catch (error) {
         setStatus(error.message);
@@ -6582,18 +7957,33 @@ _CALENDAR_HTML = """<!doctype html>
           setStatus("add a title first");
           return;
         }
+        const tags = $("entryTags").value.split(",").map((value) => value.trim()).filter(Boolean);
+        const repeatCount = $("repeatCount").value ? Number($("repeatCount").value) : null;
         setStatus("adding...");
         const payload = await postJson("/api/calendar/entries", {
-          date: $("calendarDate").value,
+          date: $("entryDate").value || $("calendarDate").value,
           title,
           type: $("entryType").value,
           priority: $("entryPriority").value,
+          list_name: $("entryList").value,
           start_time: $("entryStartTime").value,
+          end_time: $("entryEndTime").value,
           notes: $("entryNotes").value,
+          tags,
+          recurrence_frequency: $("repeatFrequency").value,
+          recurrence_interval: Number($("repeatInterval").value || 1),
+          recurrence_anchor_date: $("repeatAnchorDate").value,
+          recurrence_until: $("repeatUntil").value,
+          recurrence_count: repeatCount,
         });
         $("entryTitle").value = "";
         $("entryNotes").value = "";
+        $("entryTags").value = "";
+        $("repeatFrequency").value = "";
+        $("repeatUntil").value = "";
+        $("repeatCount").value = "";
         renderDay(payload.day);
+        await loadRange(state.rangeStart);
         setStatus("added");
       } catch (error) {
         setStatus(error.message);
@@ -6617,7 +8007,12 @@ _CALENDAR_HTML = """<!doctype html>
         setStatus(error.message);
       }
     });
-    renderDay(INITIAL_DAY);
+    renderDay(INITIAL_DAY || {});
+    if (INITIAL_RANGE && INITIAL_RANGE.months) {
+      renderRange(INITIAL_RANGE);
+    } else {
+      loadRange(state.rangeStart).catch((error) => setStatus(error.message));
+    }
   </script>
 </body>
 </html>
@@ -6639,6 +8034,232 @@ def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
     )
 
 
+def _truthy_env(name: str) -> bool:
+    value = str(os.environ.get(name) or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _resolve_cmail_app_secret() -> str:
+    try:
+        return str(credentials.resolve_secret(name=CMAIL_APP_SECRET_NAME) or "").strip()
+    except Exception:
+        return ""
+
+
+def _cmail_session_signature(*, secret: str, expires_at: int, nonce: str) -> str:
+    signed = f"{int(expires_at)}.{nonce}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+
+
+def _build_cmail_session_token(secret: str) -> str:
+    expires_at = int(time.time()) + CMAIL_SESSION_TTL_SECONDS
+    nonce = secrets.token_urlsafe(18)
+    signature = _cmail_session_signature(secret=secret, expires_at=expires_at, nonce=nonce)
+    return f"v1.{expires_at}.{nonce}.{signature}"
+
+
+def _validate_cmail_session_token(token: str, *, secret: str) -> bool:
+    clean_token = str(token or "").strip()
+    clean_secret = str(secret or "").strip()
+    if not clean_token or not clean_secret:
+        return False
+    parts = clean_token.split(".")
+    if len(parts) != 4 or parts[0] != "v1":
+        return False
+    try:
+        expires_at = int(parts[1])
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    nonce = parts[2]
+    provided_signature = parts[3]
+    expected_signature = _cmail_session_signature(
+        secret=clean_secret,
+        expires_at=expires_at,
+        nonce=nonce,
+    )
+    return hmac.compare_digest(provided_signature, expected_signature)
+
+
+def _render_cmail_lock_html(*, setup_required: bool = False, message: str = "") -> str:
+    status_copy = (
+        "Cmail app unlock is not configured yet. Run cmail auth-code, restart Cmail, then return here."
+        if setup_required
+        else (message or "Cmail is private. Open Tailscale and make sure you are connected, then unlock Cmail.")
+    )
+    setup_class = " setup-required" if setup_required else ""
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0d0b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cmail">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Cmail Locked</title>
+  <link rel="canonical" href="__CMAIL_PUBLIC_URL__/">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d0b;
+      --panel: #111612;
+      --line: #283229;
+      --text: #edf2eb;
+      --muted: #9ca899;
+      --accent: #b8ff4d;
+      --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
+      --sans: "SF Pro Display", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: radial-gradient(circle at top, #111913 0%, var(--bg) 56%);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+    .lock-card {
+      width: min(480px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)), var(--panel);
+      padding: 28px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      font-size: 38px;
+      line-height: 0.95;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+    }
+    .brand::before {
+      content: "";
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 22px rgba(184, 255, 77, 0.42);
+    }
+    .eyebrow {
+      color: var(--accent);
+      font: 700 11px/1 var(--mono);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      letter-spacing: -0.03em;
+    }
+    p {
+      margin: 0 0 18px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+      margin-top: 22px;
+    }
+    input, button {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      padding: 13px 14px;
+      font: 700 15px/1.2 var(--sans);
+    }
+    input {
+      background: #0d120f;
+      color: var(--text);
+      letter-spacing: 0.02em;
+    }
+    button {
+      cursor: pointer;
+      border: none;
+      background: linear-gradient(180deg, #c9ff72 0%, #89c72a 100%);
+      color: #091008;
+    }
+    .setup-required form {
+      display: none;
+    }
+    .status {
+      min-height: 20px;
+      color: var(--muted);
+      font: 700 12px/1.4 var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+  </style>
+</head>
+<body>
+  <main class="lock-card__SETUP_CLASS__">
+    <div class="brand">CMAIL</div>
+    <div class="eyebrow">private mail surface</div>
+    <h1>Unlock Cmail</h1>
+    <p>__STATUS_COPY__</p>
+    <form id="unlockForm">
+      <input id="unlockCode" name="unlock_code" type="password" autocomplete="current-password" placeholder="unlock code" autofocus>
+      <button type="submit">Unlock Cmail</button>
+    </form>
+    <div class="status" id="unlockStatus"></div>
+  </main>
+  <script>
+    const statusCopy = __STATUS_COPY_JSON__;
+    const form = document.getElementById("unlockForm");
+    const input = document.getElementById("unlockCode");
+    const statusNode = document.getElementById("unlockStatus");
+    statusNode.textContent = statusCopy;
+    if (form) {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const unlockCode = String(input.value || "").trim();
+        if (!unlockCode) {
+          statusNode.textContent = "Enter your Cmail unlock code.";
+          return;
+        }
+        statusNode.textContent = "unlocking...";
+        try {
+          const response = await fetch("/api/auth/unlock", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ unlock_code: unlockCode }),
+          });
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.message || payload.error || "unlock failed");
+          }
+          window.location.replace("/");
+        } catch (error) {
+          statusNode.textContent = error?.message || "unlock failed";
+        }
+      });
+    }
+  </script>
+</body>
+</html>
+"""
+    return (
+        template.replace("__CMAIL_PUBLIC_URL__", html_escape(CMAIL_PUBLIC_URL, quote=True))
+        .replace("__SETUP_CLASS__", setup_class)
+        .replace("__STATUS_COPY__", html_escape(status_copy))
+        .replace("__STATUS_COPY_JSON__", json.dumps(status_copy))
+    )
+
+
 def _cmail_version() -> str:
     for package_name in ("life-ops", "lifeops"):
         try:
@@ -6648,13 +8269,21 @@ def _cmail_version() -> str:
     return "0.2.0"
 
 
-def _cmail_health_payload() -> dict[str, Any]:
+def _cmail_health_payload(
+    *,
+    auth_required: bool | None = None,
+    auth_configured: bool | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": True,
         "app": "cmail",
         "version": _cmail_version(),
         "public_url": CMAIL_PUBLIC_URL,
     }
+    if auth_required is not None:
+        payload["auth_required"] = bool(auth_required)
+    if auth_configured is not None:
+        payload["auth_configured"] = bool(auth_configured)
     build_id = str(os.environ.get("LIFE_OPS_BUILD_ID") or os.environ.get("LIFEOPS_BUILD_ID") or "").strip()
     if build_id:
         payload["build"] = build_id
@@ -6702,8 +8331,15 @@ def _render_mail_ui_manifest() -> dict[str, Any]:
     }
 
 
-def _render_calendar_ui_html(initial_day: dict[str, Any] | None = None) -> str:
-    return _CALENDAR_HTML.replace("__INITIAL_CALENDAR_JSON__", json.dumps(initial_day or {}))
+def _render_calendar_ui_html(
+    initial_day: dict[str, Any] | None = None,
+    initial_range: dict[str, Any] | None = None,
+) -> str:
+    return (
+        _CALENDAR_HTML
+        .replace("__INITIAL_CALENDAR_JSON__", json.dumps(initial_day or {}))
+        .replace("__INITIAL_RANGE_JSON__", json.dumps(initial_range or {}))
+    )
 
 
 def _background_mail_ui_sync_loop(
@@ -6730,9 +8366,12 @@ def _make_handler(
     db_path: Path,
     limit: int,
     enable_background_remote_sync: bool = True,
+    require_app_auth: bool | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     snapshot_cache = _MailUiSnapshotCache(db_path=db_path)
     use_live_runtime_reads = not store.encrypted_db_enabled(db_path)
+    auth_requested = _truthy_env(CMAIL_AUTH_REQUIRED_ENV) if require_app_auth is None else bool(require_app_auth)
+    app_auth_required = auth_requested and not _truthy_env(CMAIL_AUTH_DISABLED_ENV)
     sync_request_state: dict[str, Any] = {"thread": None}
     sync_request_lock = threading.Lock()
     heartbeat_request_state: dict[str, Any] = {"thread": None}
@@ -6743,6 +8382,19 @@ def _make_handler(
     overview_cache_lock = threading.Lock()
     drafts_cache_state: dict[str, Any] = {"drafts": None}
     drafts_cache_lock = threading.Lock()
+    viewed_seed_state: dict[str, bool] = {"done": False}
+    viewed_seed_lock = threading.Lock()
+
+    def _ensure_viewed_seeded_from_writable_db() -> None:
+        if viewed_seed_state.get("done"):
+            return
+        with viewed_seed_lock:
+            if viewed_seed_state.get("done"):
+                return
+            with store.open_db(db_path) as writable_connection:
+                _ensure_existing_correspondence_marked_viewed(writable_connection)
+            viewed_seed_state["done"] = True
+            snapshot_cache.invalidate()
 
     def _run_startup_mailbox_maintenance() -> None:
         try:
@@ -6778,6 +8430,7 @@ def _make_handler(
         )
 
     def _build_default_overview_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+        _ensure_viewed_seeded_from_writable_db()
         return {
             "db_path": str(db_path),
             **_build_correspondence_overview_from_connection(
@@ -6803,6 +8456,7 @@ def _make_handler(
         return _clone_json_payload(payload)
 
     def _refresh_default_overview_cache() -> dict[str, Any]:
+        _ensure_viewed_seeded_from_writable_db()
         connection = snapshot_cache.get_connection()
         try:
             payload = _build_default_overview_payload(connection)
@@ -6930,21 +8584,35 @@ def _make_handler(
     ).start()
 
     class MailUIHandler(BaseHTTPRequestHandler):
-        def _send_json(self, payload: dict[str, Any], status_code: int = 200) -> None:
+        def _send_json(
+            self,
+            payload: dict[str, Any],
+            status_code: int = 200,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
             body = _json_bytes(payload)
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_html(self, body_text: str) -> None:
+        def _send_html(
+            self,
+            body_text: str,
+            status_code: int = 200,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
             body = body_text.encode("utf-8")
-            self.send_response(200)
+            self.send_response(status_code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -6970,6 +8638,109 @@ def _make_handler(
                 return {}
             payload = json.loads(body.decode("utf-8"))
             return payload if isinstance(payload, dict) else {}
+
+        def _auth_secret(self) -> str:
+            if not app_auth_required:
+                return ""
+            return _resolve_cmail_app_secret()
+
+        def _session_cookie_secure(self) -> bool:
+            host = str(self.headers.get("Host") or "").strip().lower()
+            host_name = host.split(":", 1)[0].strip("[]")
+            return host_name not in {"", "127.0.0.1", "localhost", "::1"}
+
+        def _session_cookie_value(self) -> str:
+            raw_cookie = str(self.headers.get("Cookie") or "")
+            if not raw_cookie:
+                return ""
+            cookie = SimpleCookie()
+            try:
+                cookie.load(raw_cookie)
+            except CookieError:
+                return ""
+            morsel = cookie.get(CMAIL_SESSION_COOKIE_NAME)
+            return str(morsel.value or "") if morsel is not None else ""
+
+        def _session_cookie_header(self, token: str, *, max_age: int = CMAIL_SESSION_TTL_SECONDS) -> str:
+            parts = [
+                f"{CMAIL_SESSION_COOKIE_NAME}={token}",
+                "Path=/",
+                "HttpOnly",
+                "SameSite=Lax",
+                f"Max-Age={int(max_age)}",
+            ]
+            if self._session_cookie_secure():
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def _clear_session_cookie_header(self) -> str:
+            parts = [
+                f"{CMAIL_SESSION_COOKIE_NAME}=",
+                "Path=/",
+                "HttpOnly",
+                "SameSite=Lax",
+                "Max-Age=0",
+            ]
+            if self._session_cookie_secure():
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def _authenticated(self, secret: str | None = None) -> bool:
+            if not app_auth_required:
+                return True
+            clean_secret = str(secret or self._auth_secret() or "").strip()
+            if not clean_secret:
+                return False
+            return _validate_cmail_session_token(self._session_cookie_value(), secret=clean_secret)
+
+        def _auth_status_payload(self) -> dict[str, Any]:
+            secret = self._auth_secret()
+            return {
+                "ok": True,
+                "app": "cmail",
+                "auth_required": bool(app_auth_required),
+                "auth_configured": bool(secret),
+                "authenticated": self._authenticated(secret),
+            }
+
+        def _require_auth_or_respond(self, *, html_response: bool = False) -> bool:
+            if not app_auth_required:
+                return True
+            secret = self._auth_secret()
+            if not secret:
+                message = "Cmail app unlock is not configured. Run cmail auth-code and restart Cmail."
+                if html_response:
+                    self._send_html(
+                        _render_cmail_lock_html(setup_required=True, message=message),
+                        status_code=503,
+                    )
+                else:
+                    self._send_json(
+                        {
+                            "error": "cmail_auth_not_configured",
+                            "message": message,
+                            "auth_required": True,
+                            "auth_configured": False,
+                        },
+                        status_code=503,
+                    )
+                return False
+            if self._authenticated(secret):
+                return True
+            message = CMAIL_TAILNET_ACCESS_MESSAGE
+            if html_response:
+                self._send_html(_render_cmail_lock_html(message=message), status_code=401)
+            else:
+                self._send_json(
+                    {
+                        "error": "cmail_locked",
+                        "message": message,
+                        "auth_required": True,
+                        "auth_configured": True,
+                    },
+                    status_code=401,
+                )
+            return False
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -6997,11 +8768,66 @@ def _make_handler(
                 self._send_bytes(body, content_type="application/manifest+json")
                 return
 
+            if path == "/healthz":
+                secret = self._auth_secret()
+                self._send_json(
+                    _cmail_health_payload(
+                        auth_required=app_auth_required,
+                        auth_configured=bool(secret),
+                    )
+                )
+                return
+
+            if path == "/api/health":
+                secret = self._auth_secret()
+                self._send_json(
+                    {
+                        **_cmail_health_payload(
+                            auth_required=app_auth_required,
+                            auth_configured=bool(secret),
+                        ),
+                        "db_path": str(db_path),
+                    }
+                )
+                return
+
+            if path == "/api/auth/status":
+                self._send_json(self._auth_status_payload())
+                return
+
+            if path == "/api/frg/bookings/availability":
+                verified, verification_error = _verify_frg_booking_webhook_signature(self.headers, b"")
+                if not verified:
+                    status_code = 503 if verification_error == "frg_booking_webhook_secret_not_configured" else 401
+                    self._send_json({"error": verification_error}, status_code=status_code)
+                    return
+                raw_start = str((query.get("start") or [""])[0] or "").strip()
+                raw_end = str((query.get("end") or [""])[0] or "").strip()
+                try:
+                    start_day = date.fromisoformat(raw_start) if raw_start else date.today()
+                    end_day = date.fromisoformat(raw_end) if raw_end else start_day + timedelta(days=93)
+                    payload = _frg_booking_availability_payload(
+                        db_path=db_path,
+                        start_day=start_day,
+                        end_day=end_day,
+                    )
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                self._send_json(payload)
+                return
+
             if path == "/":
+                if not self._require_auth_or_respond(html_response=True):
+                    return
                 initial_overview = _get_default_overview_cache()
                 if initial_overview is None:
                     try:
                         if use_live_runtime_reads:
+                            _ensure_viewed_seeded_from_writable_db()
                             connection = snapshot_cache.get_connection()
                             try:
                                 initial_overview = _build_default_overview_payload(connection)
@@ -7015,25 +8841,24 @@ def _make_handler(
                 return
 
             if path == "/calendar":
+                if not self._require_auth_or_respond(html_response=True):
+                    return
                 raw_day = str((query.get("date") or [""])[0] or "").strip()
                 try:
                     target_day = date.fromisoformat(raw_day) if raw_day else date.today()
                     connection = snapshot_cache.get_connection()
                     try:
                         initial_day = build_calendar_day(connection, target_day=target_day)
+                        initial_range = build_calendar_range(connection, start_day=target_day, days=365)
                     finally:
                         connection.close()
                 except (TimeoutError, ValueError):
                     initial_day = {}
-                self._send_html(_render_calendar_ui_html(initial_day=initial_day))
+                    initial_range = {}
+                self._send_html(_render_calendar_ui_html(initial_day=initial_day, initial_range=initial_range))
                 return
 
-            if path == "/healthz":
-                self._send_json(_cmail_health_payload())
-                return
-
-            if path == "/api/health":
-                self._send_json({**_cmail_health_payload(), "db_path": str(db_path)})
+            if path.startswith("/api/") and not self._require_auth_or_respond(html_response=False):
                 return
 
             if path == "/api/calendar/day":
@@ -7052,6 +8877,28 @@ def _make_handler(
                     self._send_json({"error": str(exc)}, status_code=503)
                     return
                 self._send_json({"day": day_payload})
+                return
+
+            if path == "/api/calendar/range":
+                raw_start = str((query.get("start") or [""])[0] or "").strip()
+                try:
+                    days = int((query.get("days") or ["365"])[0] or "365")
+                except ValueError:
+                    days = 365
+                try:
+                    start_day = date.fromisoformat(raw_start) if raw_start else date.today()
+                    connection = snapshot_cache.get_connection()
+                    try:
+                        range_payload = build_calendar_range(connection, start_day=start_day, days=days)
+                    finally:
+                        connection.close()
+                except ValueError:
+                    self._send_json({"error": "invalid_calendar_range"}, status_code=400)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                self._send_json({"range": range_payload})
                 return
 
             if path == "/api/contacts":
@@ -7083,6 +8930,14 @@ def _make_handler(
                 return
 
             if path.startswith("/api/drafts/") and path.endswith("/send"):
+                self._send_json({"error": "method_not_allowed"}, status_code=405)
+                return
+
+            if (
+                path.startswith("/api/drafts/")
+                and path.endswith("/delete")
+                and not path.endswith("/attachments/delete")
+            ):
                 self._send_json({"error": "method_not_allowed"}, status_code=405)
                 return
 
@@ -7176,6 +9031,7 @@ def _make_handler(
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 include_details = ((query.get("include_details") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 page_limit = int((query.get("limit") or [str(limit)])[0] or limit)
+                _ensure_viewed_seeded_from_writable_db()
                 is_default_request = _is_default_overview_request(
                     source=source,
                     channel=channel,
@@ -7330,6 +9186,53 @@ def _make_handler(
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
+            if path == "/api/auth/lock":
+                self._send_json(
+                    {"ok": True, "authenticated": False},
+                    extra_headers={"Set-Cookie": self._clear_session_cookie_header()},
+                )
+                return
+
+            if path == "/api/auth/unlock":
+                try:
+                    payload = self._read_json_body()
+                except json.JSONDecodeError:
+                    self._send_json({"error": "invalid_json"}, status_code=400)
+                    return
+                if not app_auth_required:
+                    self._send_json({"ok": True, "authenticated": True, "auth_required": False})
+                    return
+                secret = self._auth_secret()
+                if not secret:
+                    self._send_json(
+                        {
+                            "error": "cmail_auth_not_configured",
+                            "message": "Cmail app unlock is not configured. Run cmail auth-code and restart Cmail.",
+                        },
+                        status_code=503,
+                    )
+                    return
+                unlock_code = str(payload.get("unlock_code") or payload.get("code") or payload.get("password") or "")
+                if not hmac.compare_digest(unlock_code.strip(), secret):
+                    self._send_json(
+                        {
+                            "error": "cmail_unlock_failed",
+                            "message": "That Cmail unlock code did not match.",
+                        },
+                        status_code=401,
+                    )
+                    return
+                token = _build_cmail_session_token(secret)
+                self._send_json(
+                    {"ok": True, "authenticated": True, "auth_required": True},
+                    extra_headers={"Set-Cookie": self._session_cookie_header(token)},
+                )
+                return
+
+            if path.startswith("/api/") and path != "/api/frg/bookings":
+                if not self._require_auth_or_respond(html_response=False):
+                    return
+
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -7356,6 +9259,63 @@ def _make_handler(
                 self._send_json({"ok": True, **result})
                 return
 
+            if path == "/api/messages/read":
+                raw_read_keys = payload.get("read_keys")
+                if not isinstance(raw_read_keys, list):
+                    raw_read_keys = []
+                read_keys = [str(value or "").strip() for value in raw_read_keys if str(value or "").strip()]
+                if not read_keys:
+                    self._send_json({"error": "missing_read_keys"}, status_code=400)
+                    return
+                try:
+                    with store.open_db(db_path) as connection:
+                        result = store.mark_viewed_mail_message_keys(
+                            connection,
+                            read_keys=read_keys[:256],
+                        )
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(None)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "viewed_count": len(result.get("read_keys") or []),
+                        "viewed_message_keys": result.get("read_keys") or [],
+                        "viewed_at": result.get("viewed_at") or "",
+                    }
+                )
+                return
+
+            if path in {"/api/contacts/open", "/api/contacts/touch"}:
+                contact_key = str(payload.get("contact_key") or "").strip()
+                if not contact_key:
+                    self._send_json({"error": "missing_contact_key"}, status_code=400)
+                    return
+                touched_at = str(payload.get("opened_at") or payload.get("touched_at") or "").strip() or None
+                try:
+                    with store.open_db(db_path) as connection:
+                        result = store.mark_touched_mail_contact(
+                            connection,
+                            contact_key=contact_key,
+                            touched_at=touched_at,
+                        )
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(None)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "contact_key": result.get("contact_key") or contact_key,
+                        "opened_at": result.get("touched_at") or "",
+                        "touched_at": result.get("touched_at") or "",
+                    }
+                )
+                return
+
             if path == "/api/calendar/entries":
                 raw_day = str(payload.get("date") or "").strip()
                 title = str(payload.get("title") or "").strip()
@@ -7371,6 +9331,8 @@ def _make_handler(
                         tags = raw_tags
                     else:
                         tags = []
+                    raw_recurrence_count = payload.get("recurrence_count") or payload.get("repeat_count") or None
+                    recurrence_count = int(raw_recurrence_count) if raw_recurrence_count not in (None, "") else None
                     with store.open_db(db_path) as connection:
                         store.add_calendar_entry(
                             connection,
@@ -7384,6 +9346,11 @@ def _make_handler(
                             end_time=str(payload.get("end_time") or ""),
                             notes=str(payload.get("notes") or ""),
                             tags=tags,
+                            recurrence_frequency=str(payload.get("recurrence_frequency") or payload.get("repeat_frequency") or ""),
+                            recurrence_interval=payload.get("recurrence_interval") or payload.get("repeat_interval") or 1,
+                            recurrence_until=payload.get("recurrence_until") or payload.get("repeat_until") or None,
+                            recurrence_count=recurrence_count,
+                            recurrence_anchor_date=payload.get("recurrence_anchor_date") or payload.get("repeat_anchor_date") or None,
                         )
                         day_payload = build_calendar_day(connection, target_day=target_day)
                 except ValueError as exc:
@@ -7643,6 +9610,32 @@ def _make_handler(
                 self._send_json(result)
                 return
 
+            if (
+                path.startswith("/api/drafts/")
+                and path.endswith("/delete")
+                and not path.endswith("/attachments/delete")
+            ):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) != 4:
+                    self._send_json({"error": "invalid_draft_delete_path"}, status_code=400)
+                    return
+                try:
+                    draft_id = int(parts[2])
+                except ValueError:
+                    self._send_json({"error": "invalid_draft_id"}, status_code=400)
+                    return
+                try:
+                    result = delete_cmail_draft(db_path=db_path, draft_id=draft_id)
+                    cached_drafts = _get_drafts_cache() or []
+                    _set_drafts_cache(
+                        [entry for entry in cached_drafts if int(entry.get("id") or 0) != int(draft_id)]
+                    )
+                except KeyError as exc:
+                    self._send_json({"error": str(exc)}, status_code=404)
+                    return
+                self._send_json(result)
+                return
+
             if path.startswith("/api/drafts/") and path.endswith("/attachments"):
                 parts = [part for part in path.split("/") if part]
                 if len(parts) != 4:
@@ -7729,12 +9722,14 @@ def serve_mail_ui(
     port: int = DEFAULT_MAIL_UI_PORT,
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     enable_background_remote_sync: bool = True,
+    require_app_auth: bool | None = None,
 ) -> None:
     print(f"[mail_ui] preparing handler for http://{host}:{port}", flush=True)
     handler = _make_handler(
         db_path=db_path,
         limit=limit,
         enable_background_remote_sync=enable_background_remote_sync,
+        require_app_auth=require_app_auth,
     )
     snapshot_cache = getattr(handler, "_snapshot_cache", None)
     prime_overview_cache = getattr(handler, "_prime_overview_cache", None)

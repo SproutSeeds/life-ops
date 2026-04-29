@@ -293,6 +293,42 @@ class MailUiTests(unittest.TestCase):
         self.assertEqual("healthy", payload["cloudflare_sync"]["status"])
         self.assertEqual("2099-01-01T00:00:00Z", payload["cloudflare_sync"]["last_success_at"])
         self.assertEqual(2, payload["cloudflare_queue"]["pending_count"])
+        self.assertIn("message-id:<msg-002@example.com>", payload["viewed_message_keys"])
+        with store.open_db(self.db_path) as connection:
+            self.assertTrue(store.get_sync_state(connection, store.MAIL_UI_VIEWED_MESSAGES_SEEDED_SYNC_KEY))
+            self.assertTrue(store.get_sync_state(connection, store.MAIL_UI_VIEWED_MESSAGES_BASELINE_SYNC_KEY))
+            viewed_keys = store.get_viewed_mail_message_keys(connection)
+        self.assertIn("message-id:<msg-002@example.com>", viewed_keys)
+
+        with store.open_db(self.db_path) as connection:
+            store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="msg-999",
+                subject="Later inbound",
+                channel="email",
+                happened_at=datetime(2026, 3, 30, 11, 0, 0),
+                follow_up_at=None,
+                direction="inbound",
+                person="Alice Example",
+                organization_name="FRG",
+                status="reference",
+                external_from="Alice Example <alice@example.com>",
+                external_to="cody@frg.earth",
+                message_id="<msg-999@example.com>",
+                thread_key="<thread@example.com>",
+                snippet="Arrived after the baseline seed",
+                body_text="This should still be new.",
+                category="research",
+                priority_level="high",
+                priority_score=95,
+            )
+        next_payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            direction="inbound",
+            limit=10,
+        )
+        self.assertNotIn("message-id:<msg-999@example.com>", next_payload["viewed_message_keys"])
         self.assertNotIn(self.manual_communication_id, [message["id"] for message in payload["messages"]])
 
     def test_build_correspondence_overview_combines_inbound_and_outbound_by_counterparty(self) -> None:
@@ -336,6 +372,31 @@ class MailUiTests(unittest.TestCase):
         self.assertEqual(4, payload["mailbox_version"]["message_count"])
         self.assertEqual(2, payload["mailbox_version"]["contact_count"])
         self.assertEqual(self.outbound_communication_id, payload["mailbox_version"]["latest_message_id"])
+        self.assertIn("ui_state_digest", payload["mailbox_version"])
+
+    def test_opened_correspondence_stays_visible_beyond_visible_page(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            store.mark_touched_mail_contact(
+                connection,
+                contact_key="alice@example.com",
+                touched_at="2026-04-22T13:00:00Z",
+            )
+
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            limit=1,
+        )
+        alice_contact = next(
+            contact
+            for contact in payload["contacts"]
+            if contact["contact_key"] == "alice@example.com"
+        )
+
+        self.assertGreater(payload["message_count"], 1)
+        self.assertEqual("2026-04-22T13:00:00Z", alice_contact["opened_at"])
+        self.assertEqual("2026-04-22T13:00:00Z", alice_contact["touched_at"])
+        self.assertEqual(1, payload["mailbox_version"]["opened_contact_count"])
 
     def test_hidden_correspondence_stays_out_of_main_view_until_restored(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
@@ -419,6 +480,73 @@ class MailUiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_http_app_auth_locks_ui_and_apis_until_unlocked(self) -> None:
+        with mock.patch.dict(os.environ, {mail_ui.CMAIL_APP_SECRET_NAME: "test-unlock-code"}, clear=False):
+            handler = mail_ui._make_handler(db_path=self.db_path, limit=20, require_app_auth=True)
+            server = HTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with urllib.request.urlopen(f"{base_url}/healthz") as response:
+                    healthz = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(healthz["ok"])
+                self.assertTrue(healthz["auth_required"])
+                self.assertTrue(healthz["auth_configured"])
+
+                with self.assertRaises(urllib.error.HTTPError) as locked_root:
+                    urllib.request.urlopen(f"{base_url}/")
+                self.assertEqual(401, locked_root.exception.code)
+                self.assertIn("Unlock Cmail", locked_root.exception.read().decode("utf-8"))
+
+                with self.assertRaises(urllib.error.HTTPError) as locked_api:
+                    urllib.request.urlopen(f"{base_url}/api/overview?direction=inbound")
+                self.assertEqual(401, locked_api.exception.code)
+                self.assertEqual("cmail_locked", json.loads(locked_api.exception.read().decode("utf-8"))["error"])
+
+                bad_unlock = urllib.request.Request(
+                    f"{base_url}/api/auth/unlock",
+                    data=json.dumps({"unlock_code": "wrong"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as bad_response:
+                    urllib.request.urlopen(bad_unlock)
+                self.assertEqual(401, bad_response.exception.code)
+
+                good_unlock = urllib.request.Request(
+                    f"{base_url}/api/auth/unlock",
+                    data=json.dumps({"unlock_code": "test-unlock-code"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(good_unlock) as response:
+                    unlock_payload = json.loads(response.read().decode("utf-8"))
+                    set_cookie = response.headers.get("Set-Cookie") or ""
+                self.assertTrue(unlock_payload["ok"])
+                self.assertIn(mail_ui.CMAIL_SESSION_COOKIE_NAME, set_cookie)
+
+                cookie_header = set_cookie.split(";", 1)[0]
+                authed_request = urllib.request.Request(
+                    f"{base_url}/api/overview?direction=inbound",
+                    headers={"Cookie": cookie_header},
+                )
+                with urllib.request.urlopen(authed_request) as response:
+                    overview = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(1, overview["contact_count"])
+
+                status_request = urllib.request.Request(
+                    f"{base_url}/api/auth/status",
+                    headers={"Cookie": cookie_header},
+                )
+                with urllib.request.urlopen(status_request) as response:
+                    status_payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(status_payload["authenticated"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_build_correspondence_overview_suppresses_orphaned_resend_queue_artifacts(self) -> None:
         with store.open_db(self.db_path) as connection:
@@ -571,12 +699,46 @@ class MailUiTests(unittest.TestCase):
                 self.assertIn('property="og:image:type" content="image/png"', html)
                 self.assertIn("Cmail is private. Open Tailscale", html)
                 self.assertIn('id="correspondenceSearch"', html)
-                self.assertIn('placeholder="search name or email"', html)
+                self.assertIn('placeholder="search name, email, or body"', html)
+                self.assertNotIn('placeholder="search name or email"', html)
+                self.assertIn('aria-label="Hide correspondence"', html)
+                self.assertIn('class="hide-icon"', html)
+                self.assertIn('class="trash-icon"', html)
+                self.assertIn('data-clear-selection', html)
+                self.assertIn("function clearCorrespondenceSelection", html)
+                self.assertIn('event.key !== "Escape"', html)
+                self.assertIn('aria-label="Archive correspondence"', html)
+                self.assertIn('aria-label="Archive message"', html)
+                self.assertIn("state.selectedContactKey = null;", html)
                 self.assertIn('data-reply-message="${message.id}"', html)
                 self.assertIn("lifeops.mail.viewedMessageIds", html)
                 self.assertIn(".unread-orb", html)
                 self.assertIn("function displayedContacts(contacts)", html)
-                self.assertIn('messageIsUnread(entry) ? "● " : ""', html)
+                self.assertIn("function contactMatchesSortMode(contact)", html)
+                self.assertIn("sortAllButton", html)
+                self.assertIn('state.contactSortMode === "new"', html)
+                self.assertIn("return contactHasNewMail(contact);", html)
+                self.assertIn("function messageHasViewedKey(message)", html)
+                self.assertIn("version.ui_state_digest", html)
+                self.assertIn("function messageIsNew(message)", html)
+                self.assertIn("function contactTimestampLabel(contact)", html)
+                self.assertIn('class="thread-timestamp"', html)
+                self.assertIn('No new correspondence.', html)
+                self.assertIn('No opened correspondence yet.', html)
+                self.assertIn("message?.search_text", html)
+                self.assertIn("/api/messages/read", html)
+                self.assertIn("/api/contacts/open", html)
+                self.assertIn("viewed_message_keys", html)
+                self.assertIn("sortOpenedButton", html)
+                self.assertIn('id="sortOpenedButton" role="tab" aria-selected="false">opened</button>', html)
+                self.assertIn('setContactSortMode("opened")', html)
+                self.assertIn('if (clean === "open" || clean === "opened" || clean === "touched") return "opened";', html)
+                self.assertIn("function mergeContactUiMetadata", html)
+                self.assertNotIn('state.contactSortMode = "all";', html)
+                self.assertIn("lifeops.mail.contactSortMode", html)
+                self.assertIn("lifeops.mail.contactSortModeVersion", html)
+                self.assertIn('state.contactSortMode || "all"', html)
+                self.assertIn('messageIsNew(entry) ? "● " : ""', html)
                 self.assertIn("function messageReadKeys(message)", html)
                 self.assertNotIn("all sources", html)
                 self.assertNotIn("quick drafts", html)
@@ -638,6 +800,8 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual(self.latest_communication_id, overview["contacts"][0]["latest_message_id"])
                 self.assertEqual("msg-002", overview["messages"][0]["external_id"])
                 self.assertEqual("message-id:<msg-002@example.com>", overview["messages"][0]["read_key"])
+                self.assertIn("preview image attachment", overview["messages"][0]["search_text"])
+                self.assertIn("message-id:<msg-002@example.com>", overview["viewed_message_keys"])
                 self.assertEqual(
                     [self.latest_communication_id, self.root_communication_id, self.other_thread_communication_id],
                     overview["contacts"][0]["message_ids"],
@@ -671,6 +835,51 @@ class MailUiTests(unittest.TestCase):
                 )
                 self.assertEqual("Preview image for the thread.", detail["attachments"][0]["text_preview"])
                 self.assertEqual(2, len(detail["thread_messages"]))
+
+                mark_read_request = urllib.request.Request(
+                    f"{base_url}/api/messages/read",
+                    data=json.dumps({"read_keys": ["read:unit-test-key", "local-id:unit-test"]}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(mark_read_request) as response:
+                    mark_read_payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(mark_read_payload["ok"])
+                self.assertIn("read:unit-test-key", mark_read_payload["viewed_message_keys"])
+                with store.open_db(self.db_path) as connection:
+                    viewed_keys = store.get_viewed_mail_message_keys(connection)
+                self.assertIn("read:unit-test-key", viewed_keys)
+
+                open_request = urllib.request.Request(
+                    f"{base_url}/api/contacts/open",
+                    data=json.dumps(
+                        {
+                            "contact_key": "alice@example.com",
+                            "opened_at": "2026-04-22T13:00:00Z",
+                        }
+                    ).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(open_request) as response:
+                    open_payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(open_payload["ok"])
+                self.assertEqual("alice@example.com", open_payload["contact_key"])
+                self.assertEqual("2026-04-22T13:00:00Z", open_payload["opened_at"])
+                self.assertEqual("2026-04-22T13:00:00Z", open_payload["touched_at"])
+
+                with urllib.request.urlopen(f"{base_url}/api/overview?source=correspondence") as response:
+                    touched_overview = json.loads(response.read().decode("utf-8"))
+                alice_contact = next(
+                    contact
+                    for contact in touched_overview["contacts"]
+                    if contact["contact_key"] == "alice@example.com"
+                )
+                self.assertEqual("2026-04-22T13:00:00Z", alice_contact["opened_at"])
+                self.assertEqual("2026-04-22T13:00:00Z", alice_contact["touched_at"])
+                self.assertGreaterEqual(touched_overview["mailbox_version"]["viewed_message_count"], 2)
+                self.assertEqual(1, touched_overview["mailbox_version"]["opened_contact_count"])
+                self.assertEqual(1, touched_overview["mailbox_version"]["touched_contact_count"])
 
                 with urllib.request.urlopen(f"{base_url}/api/communications/{self.outbound_communication_id}") as response:
                     outbound_detail = json.loads(response.read().decode("utf-8"))
@@ -814,6 +1023,26 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual(409, error_context.exception.code)
                 error_body = error_context.exception.read().decode("utf-8")
                 self.assertIn("add a recipient first", error_body)
+
+                request = urllib.request.Request(
+                    f"{base_url}/api/drafts/{recipientless_id}/delete",
+                    data=b"{}",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request) as response:
+                    deleted_payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(deleted_payload["deleted"])
+                self.assertEqual(recipientless_id, deleted_payload["draft_id"])
+                with urllib.request.urlopen(f"{base_url}/api/drafts") as response:
+                    drafts_payload = json.loads(response.read().decode("utf-8"))
+                self.assertFalse(
+                    any(int(entry["id"]) == recipientless_id for entry in drafts_payload["drafts"])
+                )
+                with store.open_db(self.db_path) as connection:
+                    deleted_draft_row = store.get_communication_by_id(connection, recipientless_id)
+                self.assertEqual("deleted", str(deleted_draft_row["status"]))
+                self.assertTrue(str(deleted_draft_row["deleted_at"] or ""))
         finally:
             server.shutdown()
             server.server_close()
@@ -840,6 +1069,11 @@ class MailUiTests(unittest.TestCase):
             saved["references"],
         )
         self.assertEqual("<thread@example.com>", saved["thread_key"])
+        self.assertEqual("Re: Structured mail test", saved["reply_context"]["subject"])
+        self.assertEqual("Alice Example <alice@example.com>", saved["reply_context"]["from"])
+        self.assertEqual("<msg-002@example.com>", saved["reply_context"]["message_id"])
+        self.assertEqual(3, saved["reply_context"]["reference_count"])
+        self.assertIn("preview image attachment", saved["reply_context"]["preview"])
 
         with mock.patch(
             "life_ops.mail_ui.resend_send_email",

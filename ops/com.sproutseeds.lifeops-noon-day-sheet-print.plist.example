@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sproutseeds.lifeops-noon-day-sheet-print</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.lifeops/bin/noon_day_sheet_print.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.lifeops</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LIFE_OPS_HOME</key>
+    <string>__HOME__/.lifeops</string>
+    <key>LIFEOPS_REPO_ROOT</key>
+    <string>__LIFEOPS_REPO_ROOT__</string>
+    <key>LIFEOPS_COLLAB_ROOT</key>
+    <string>__COLLAB_REPO_ROOT__</string>
+    <key>LIFEOPS_DAY_SHEET_DB</key>
+    <string>__HOME__/.lifeops/data/cmail_runtime.db</string>
+    <key>LIFEOPS_DAY_SHEET_PRINT_OUTPUT_DIR</key>
+    <string>__HOME__/.codex/memories/lifeops-day-sheet-print</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.codex/memories/lifeops-day-sheet-print/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.codex/memories/lifeops-day-sheet-print/launchd.err.log</string>
+</dict>
+</plist>

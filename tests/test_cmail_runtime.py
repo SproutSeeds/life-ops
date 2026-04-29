@@ -45,6 +45,40 @@ class CmailRuntimeTests(unittest.TestCase):
             os.environ[cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV] = self.original_backup_root
         self.temp_dir.cleanup()
 
+    def test_ensure_cmail_app_secret_creates_reuses_and_rotates_unlock_code(self) -> None:
+        stored: dict[str, str] = {}
+
+        def fake_resolve_secret(*, name: str, path=None) -> str | None:
+            return stored.get(name)
+
+        def fake_set_secret(
+            *,
+            name: str,
+            value: str,
+            backend: str = "auto",
+            path=None,
+            allow_insecure_file_backend: bool = False,
+        ) -> dict[str, str]:
+            stored[name] = value
+            return {"name": name, "backend": backend, "registry_path": "/tmp/keys.json"}
+
+        with mock.patch("life_ops.cmail_runtime.credentials.resolve_secret", side_effect=fake_resolve_secret):
+            with mock.patch("life_ops.cmail_runtime.credentials.set_secret", side_effect=fake_set_secret):
+                created = cmail_runtime.ensure_cmail_app_secret()
+                self.assertTrue(created["created"])
+                self.assertEqual(cmail_runtime.CMAIL_APP_SECRET_NAME, created["name"])
+                self.assertEqual(created["secret"], stored[cmail_runtime.CMAIL_APP_SECRET_NAME])
+
+                reused = cmail_runtime.ensure_cmail_app_secret()
+                self.assertFalse(reused["created"])
+                self.assertFalse(reused["rotated"])
+                self.assertEqual(created["secret"], reused["secret"])
+
+                rotated = cmail_runtime.ensure_cmail_app_secret(rotate=True, value="new-code")
+                self.assertTrue(rotated["rotated"])
+                self.assertEqual("new-code", rotated["secret"])
+                self.assertEqual("new-code", stored[cmail_runtime.CMAIL_APP_SECRET_NAME])
+
     def test_ensure_runtime_db_hydrates_from_canonical_store(self) -> None:
         with mock.patch("life_ops.store.default_db_path", return_value=self.canonical_db_path):
             with store.open_db(self.canonical_db_path) as connection:

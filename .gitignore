@@ -20,4 +20,7 @@ orp/packets/
 orp/state.json
 packages/lifeops-cli/backend/
 .playwright-mcp/
+.clawdad/
 analysis/
+output/
+tmp/

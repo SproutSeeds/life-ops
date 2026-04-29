@@ -145,3 +145,7 @@ await sendEmailDraft({
   },
 });
 ```
+
+## Support
+
+Everything here is released for public use. If `@lifeops/core` saved you time or you want to keep the work moving, you can [support public FRG releases](https://frg.earth/support?utm_source=readme&utm_medium=repo&utm_campaign=public_work_support&package=%40lifeops%2Fcore).

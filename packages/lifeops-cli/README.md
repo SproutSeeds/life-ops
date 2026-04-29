@@ -7,6 +7,7 @@ Maintained by Fractal Research Group (`frg.earth`).
 It is designed for teams and codebases that want a lightweight, installable command line for:
 
 - scaffolding Life Ops starter files
+- keeping persistent local tasks and weekly routines visible until they are actually completed
 - composing a week agenda from structured JSON feeds
 - drafting structured project-share emails and follow-up queues
 - controlling the local managed CMAIL inbox service
@@ -67,9 +68,60 @@ This writes:
 - `lifeops.project.json`
 - `lifeops.recipients.json`
 
+### `lifeops item`
+
+Create and manage persistent local commitments:
+
+```bash
+lifeops item add \
+  --list professional \
+  --title "Write and publish weekly FRG blog post" \
+  --notes "Do not mark done until the post is published and verified live."
+
+lifeops item list --list professional
+lifeops item done 1
+```
+
+Items live in the local Life Ops store under `LIFE_OPS_HOME` or `~/.lifeops`.
+Open items stay visible until they are explicitly completed.
+
+### `lifeops routine`
+
+Create recurring local routines:
+
+```bash
+lifeops routine add \
+  --name "Weekly FRG blog post" \
+  --cadence weekly \
+  --day Wednesday \
+  --time 09:00 \
+  --duration 60 \
+  --task-title "Write and publish weekly FRG blog post" \
+  --task-notes "Do not mark done until the post is published and verified live."
+
+lifeops routine list
+```
+
+Routines are expanded into agenda output. When a routine has `--task-title`, LifeOps also materializes a durable task instance for each occurrence in the agenda window. If that week's task already exists, including as a completed item, LifeOps does not duplicate it.
+
+Existing routines can be connected to a task template:
+
+```bash
+lifeops routine update 1 \
+  --task-title "Write and publish weekly FRG blog post" \
+  --task-notes "Do not mark done until the post is published and verified live."
+```
+
 ### `lifeops agenda`
 
-Render a week agenda from an item feed:
+Render a week agenda from the persistent local Life Ops store:
+
+```bash
+lifeops agenda --days 7 --timezone America/Chicago
+lifeops agenda --format json
+```
+
+Or render from an explicit item feed:
 
 ```bash
 lifeops agenda --input ./lifeops.items.json --days 7 --timezone America/Chicago
@@ -154,3 +206,7 @@ cmail draft-save --id 74222 --attach ./figure.png --format json
 
 This is intended for a self-hosted local mailbox running on your machine.
 The install flow bootstraps the bundled backend into your local Life Ops home before starting the service.
+
+## Support
+
+Everything here is released for public use. If LifeOps saved you time or you want to keep the work moving, you can [support public FRG releases](https://frg.earth/support?utm_source=readme&utm_medium=repo&utm_campaign=public_work_support&package=lifeops).

@@ -1,6 +1,6 @@
 {
   "name": "lifeops",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Primary public Life Ops CLI for agenda composition, project-share drafting, and starter scaffolds.",
   "type": "module",
   "bin": {
@@ -37,6 +37,10 @@
   ],
   "author": "Fractal Research Group <cody@frg.earth>",
   "license": "MIT",
+  "funding": {
+    "type": "individual",
+    "url": "https://frg.earth/support?utm_source=npm&utm_medium=funding&utm_campaign=public_work_support&package=lifeops"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SproutSeeds/life-ops.git",

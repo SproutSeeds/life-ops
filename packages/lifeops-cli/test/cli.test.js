@@ -91,6 +91,304 @@ test("lifeops agenda renders an agenda from JSON input", async () => {
   }
 });
 
+test("lifeops item commands persist local tasks until explicitly completed", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "lifeops-cli-items-"));
+  const storePath = path.join(tempDir, "lifeops.store.json");
+
+  const add = createIo();
+  const addExitCode = await runCli(
+    [
+      "item",
+      "add",
+      "--store",
+      storePath,
+      "--list",
+      "professional",
+      "--title",
+      "Write and publish weekly FRG blog post",
+      "--notes",
+      "Do not mark done until verified live.",
+      "--format",
+      "json",
+    ],
+    add.io,
+  );
+  assert.equal(addExitCode, 0);
+  assert.equal(add.getStderr(), "");
+  const added = JSON.parse(add.getStdout());
+  assert.equal(added.item.id, 1);
+  assert.equal(added.item.status, "open");
+
+  const listOpen = createIo();
+  const listOpenExitCode = await runCli(
+    ["item", "list", "--store", storePath, "--list", "professional", "--format", "json"],
+    listOpen.io,
+  );
+  assert.equal(listOpenExitCode, 0);
+  assert.equal(listOpen.getStderr(), "");
+  const openItems = JSON.parse(listOpen.getStdout());
+  assert.equal(openItems.length, 1);
+  assert.equal(openItems[0].title, "Write and publish weekly FRG blog post");
+
+  const done = createIo();
+  const doneExitCode = await runCli(["item", "done", "1", "--store", storePath, "--format", "json"], done.io);
+  assert.equal(doneExitCode, 0);
+  assert.equal(done.getStderr(), "");
+  const completed = JSON.parse(done.getStdout());
+  assert.equal(completed.item.status, "done");
+  assert.equal(typeof completed.item.completedAt, "string");
+
+  const listAfterDone = createIo();
+  const listAfterDoneExitCode = await runCli(
+    ["item", "list", "--store", storePath, "--status", "open", "--format", "json"],
+    listAfterDone.io,
+  );
+  assert.equal(listAfterDoneExitCode, 0);
+  assert.equal(JSON.parse(listAfterDone.getStdout()).length, 0);
+});
+
+test("lifeops routine commands feed persistent agenda output", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "lifeops-cli-routines-"));
+  const storePath = path.join(tempDir, "lifeops.store.json");
+
+  const itemAdd = createIo();
+  const itemExitCode = await runCli(
+    [
+      "item",
+      "add",
+      "--store",
+      storePath,
+      "--title",
+      "Write and publish weekly FRG blog post",
+      "--notes",
+      "Persistent publishing checkpoint.",
+    ],
+    itemAdd.io,
+  );
+  assert.equal(itemExitCode, 0);
+  assert.equal(itemAdd.getStderr(), "");
+
+  const routineAdd = createIo();
+  const routineExitCode = await runCli(
+    [
+      "routine",
+      "add",
+      "--store",
+      storePath,
+      "--name",
+      "Weekly FRG blog post",
+      "--cadence",
+      "weekly",
+      "--day",
+      "Wednesday",
+      "--time",
+      "09:00",
+      "--duration",
+      "60",
+    ],
+    routineAdd.io,
+  );
+  assert.equal(routineExitCode, 0);
+  assert.equal(routineAdd.getStderr(), "");
+
+  const agenda = createIo();
+  const agendaExitCode = await runCli(
+    [
+      "agenda",
+      "--store",
+      storePath,
+      "--start",
+      "2026-04-29",
+      "--days",
+      "8",
+      "--timezone",
+      "UTC",
+      "--format",
+      "json",
+    ],
+    agenda.io,
+  );
+  assert.equal(agendaExitCode, 0);
+  assert.equal(agenda.getStderr(), "");
+
+  const payload = JSON.parse(agenda.getStdout());
+  assert.equal(payload.floatingItems.some((item) => item.title === "Write and publish weekly FRG blog post"), true);
+  const scheduledRoutineTitles = payload.days.flatMap((day) => day.items.map((item) => item.title));
+  assert.equal(scheduledRoutineTitles.filter((title) => title === "Weekly FRG blog post").length, 2);
+});
+
+test("lifeops routines materialize weekly task instances without duplicates", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "lifeops-cli-materialize-"));
+  const storePath = path.join(tempDir, "lifeops.store.json");
+
+  const routineAdd = createIo();
+  const routineExitCode = await runCli(
+    [
+      "routine",
+      "add",
+      "--store",
+      storePath,
+      "--name",
+      "Weekly FRG blog post",
+      "--cadence",
+      "weekly",
+      "--day",
+      "Wednesday",
+      "--time",
+      "09:00",
+      "--duration",
+      "60",
+      "--task-title",
+      "Write and publish weekly FRG blog post",
+      "--task-priority",
+      "high",
+    ],
+    routineAdd.io,
+  );
+  assert.equal(routineExitCode, 0);
+  assert.equal(routineAdd.getStderr(), "");
+
+  for (let index = 0; index < 2; index += 1) {
+    const agenda = createIo();
+    const agendaExitCode = await runCli(
+      [
+        "agenda",
+        "--store",
+        storePath,
+        "--start",
+        "2026-04-29",
+        "--days",
+        "8",
+        "--timezone",
+        "UTC",
+        "--format",
+        "json",
+      ],
+      agenda.io,
+    );
+    assert.equal(agendaExitCode, 0);
+    assert.equal(agenda.getStderr(), "");
+  }
+
+  const listAll = createIo();
+  const listAllExitCode = await runCli(["item", "list", "--store", storePath, "--status", "all", "--format", "json"], listAll.io);
+  assert.equal(listAllExitCode, 0);
+  assert.equal(listAll.getStderr(), "");
+  const items = JSON.parse(listAll.getStdout());
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item) => item.metadata.occurrenceKey), ["2026-04-29", "2026-05-06"]);
+  assert.equal(items.every((item) => item.priority === "high"), true);
+
+  const done = createIo();
+  const doneExitCode = await runCli(["item", "done", "1", "--store", storePath], done.io);
+  assert.equal(doneExitCode, 0);
+  assert.equal(done.getStderr(), "");
+
+  const agendaAfterDone = createIo();
+  const agendaAfterDoneExitCode = await runCli(
+    [
+      "agenda",
+      "--store",
+      storePath,
+      "--start",
+      "2026-04-29",
+      "--days",
+      "8",
+      "--timezone",
+      "UTC",
+      "--format",
+      "json",
+    ],
+    agendaAfterDone.io,
+  );
+  assert.equal(agendaAfterDoneExitCode, 0);
+  assert.equal(agendaAfterDone.getStderr(), "");
+
+  const finalList = createIo();
+  const finalListExitCode = await runCli(["item", "list", "--store", storePath, "--status", "all", "--format", "json"], finalList.io);
+  assert.equal(finalListExitCode, 0);
+  const finalItems = JSON.parse(finalList.getStdout());
+  assert.equal(finalItems.length, 2);
+  assert.equal(finalItems.filter((item) => item.status === "done").length, 1);
+  assert.equal(finalItems.filter((item) => item.status === "open").length, 1);
+});
+
+test("lifeops agenda adopts an existing open task when connecting a routine template", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "lifeops-cli-adopt-task-"));
+  const storePath = path.join(tempDir, "lifeops.store.json");
+
+  const itemAdd = createIo();
+  const itemExitCode = await runCli(
+    [
+      "item",
+      "add",
+      "--store",
+      storePath,
+      "--title",
+      "Write and publish weekly FRG blog post",
+      "--notes",
+      "Already on the list.",
+    ],
+    itemAdd.io,
+  );
+  assert.equal(itemExitCode, 0);
+  assert.equal(itemAdd.getStderr(), "");
+
+  const routineAdd = createIo();
+  const routineExitCode = await runCli(
+    [
+      "routine",
+      "add",
+      "--store",
+      storePath,
+      "--name",
+      "Weekly FRG blog post",
+      "--cadence",
+      "weekly",
+      "--day",
+      "Wednesday",
+      "--time",
+      "09:00",
+      "--task-title",
+      "Write and publish weekly FRG blog post",
+      "--task-priority",
+      "high",
+    ],
+    routineAdd.io,
+  );
+  assert.equal(routineExitCode, 0);
+  assert.equal(routineAdd.getStderr(), "");
+
+  const agenda = createIo();
+  const agendaExitCode = await runCli(
+    [
+      "agenda",
+      "--store",
+      storePath,
+      "--start",
+      "2026-04-29",
+      "--days",
+      "1",
+      "--timezone",
+      "UTC",
+      "--format",
+      "json",
+    ],
+    agenda.io,
+  );
+  assert.equal(agendaExitCode, 0);
+  assert.equal(agenda.getStderr(), "");
+
+  const listAll = createIo();
+  const listAllExitCode = await runCli(["item", "list", "--store", storePath, "--status", "all", "--format", "json"], listAll.io);
+  assert.equal(listAllExitCode, 0);
+  const items = JSON.parse(listAll.getStdout());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].metadata.routineId, 1);
+  assert.equal(items[0].metadata.occurrenceKey, "2026-04-29");
+  assert.equal(items[0].priority, "high");
+});
+
 test("lifeops share emits JSON packet output and writes packet files", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "lifeops-cli-share-"));
   const { io, getStdout, getStderr } = createIo();
@@ -218,6 +516,29 @@ test("lifeops cmail secure-doctor delegates to the managed cmail service wrapper
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "zsh");
   assert.deepEqual(calls[0].args, ["./bin/cmail-service", "secure-doctor", "--https-port", "4311"]);
+});
+
+test("lifeops cmail auth-code delegates to the managed cmail service wrapper", async () => {
+  const { io, getStdout, getStderr } = createIo();
+  const calls = [];
+  const exitCode = await runCli(
+    ["cmail", "auth-code", "--rotate"],
+    io,
+    {
+      runner: async (payload) => {
+        calls.push(payload);
+        io.stdout.write("auth code ok\n");
+        return 0;
+      },
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(getStderr(), "");
+  assert.match(getStdout(), /auth code ok/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "zsh");
+  assert.deepEqual(calls[0].args, ["./bin/cmail-service", "auth-code", "--rotate"]);
 });
 
 test("lifeops cmail drafts delegates to the bundled backend python CLI", async () => {
@@ -444,5 +765,6 @@ test("lifeops cmail help is available from the shortcut entrypoint", async () =>
   assert.match(getStdout(), /cmail audit/);
   assert.match(getStdout(), /cmail tailscale/);
   assert.match(getStdout(), /cmail secure-doctor/);
+  assert.match(getStdout(), /cmail auth-code/);
   assert.match(getStdout(), /--attach \.\/file\.pdf/);
 });

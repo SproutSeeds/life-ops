@@ -36,6 +36,12 @@ LOW_SIGNAL_ATTACHMENT_NAMES = {
 }
 
 MAIL_UI_HIDDEN_CONTACTS_SYNC_KEY = "mail_ui:hidden_contacts"
+MAIL_UI_TOUCHED_CONTACTS_SYNC_KEY = "mail_ui:touched_contacts"
+MAIL_UI_VIEWED_MESSAGES_SYNC_KEY = "mail_ui:viewed_messages"
+MAIL_UI_VIEWED_MESSAGES_SEEDED_SYNC_KEY = "mail_ui:viewed_messages_seeded_at"
+MAIL_UI_VIEWED_MESSAGES_BASELINE_SYNC_KEY = "mail_ui:viewed_messages_baseline_seeded_at"
+MAIL_UI_TOUCHED_CONTACTS_MAX_KEYS = 10000
+MAIL_UI_VIEWED_MESSAGES_MAX_KEYS = 50000
 MAIL_CONTACTS_BACKFILLED_SYNC_KEY = "mail_contacts:backfilled_at"
 MAIL_CONTACTS_CLEANUP_SYNC_KEY = "mail_contacts:cleanup_v1"
 LIST_ITEM_NAMES = ("personal", "professional")
@@ -43,6 +49,7 @@ LIST_ITEM_STATUSES = ("open", "done")
 CALENDAR_ENTRY_TYPES = ("task", "event", "note", "memory", "habit", "milestone", "carry_forward")
 CALENDAR_ENTRY_STATUSES = ("planned", "in_progress", "done", "missed", "deferred", "canceled", "archived")
 CALENDAR_ENTRY_PRIORITIES = ("urgent", "high", "normal", "low")
+CALENDAR_RECURRENCE_FREQUENCIES = ("", "none", "daily", "weekly", "monthly", "yearly")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -271,6 +278,11 @@ CREATE TABLE IF NOT EXISTS calendar_entries (
     source_id INTEGER,
     notes TEXT NOT NULL DEFAULT '',
     tags_json TEXT NOT NULL DEFAULT '[]',
+    recurrence_frequency TEXT NOT NULL DEFAULT '',
+    recurrence_interval INTEGER NOT NULL DEFAULT 1,
+    recurrence_until TEXT NOT NULL DEFAULT '',
+    recurrence_count INTEGER,
+    recurrence_anchor_date TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT
@@ -903,6 +915,11 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "calendar_entries", "source_id", "INTEGER")
     _ensure_column(connection, "calendar_entries", "notes", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "calendar_entries", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "calendar_entries", "recurrence_frequency", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "recurrence_interval", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(connection, "calendar_entries", "recurrence_until", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_entries", "recurrence_count", "INTEGER")
+    _ensure_column(connection, "calendar_entries", "recurrence_anchor_date", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "calendar_entries", "created_at", "TEXT")
     _ensure_column(connection, "calendar_entries", "updated_at", "TEXT")
     _ensure_column(connection, "calendar_entries", "completed_at", "TEXT")
@@ -1080,6 +1097,12 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_calendar_entries_status_updated
         ON calendar_entries(status, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_entries_recurrence
+        ON calendar_entries(recurrence_frequency, recurrence_anchor_date, recurrence_until, status)
         """
     )
     connection.execute(
@@ -1367,6 +1390,46 @@ def _normalize_calendar_time(value: str) -> str:
     return clean
 
 
+def _normalize_calendar_recurrence_frequency(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if clean == "none":
+        return ""
+    if clean not in CALENDAR_RECURRENCE_FREQUENCIES:
+        valid = ", ".join(value or "none" for value in CALENDAR_RECURRENCE_FREQUENCIES)
+        raise ValueError(f"invalid calendar recurrence '{value}'. Use one of: {valid}")
+    return clean
+
+
+def _normalize_calendar_recurrence_interval(value: int | str | None) -> int:
+    if value in (None, ""):
+        return 1
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("calendar recurrence interval must be a positive integer") from exc
+    if interval < 1:
+        raise ValueError("calendar recurrence interval must be a positive integer")
+    return interval
+
+
+def _normalize_optional_calendar_day(value: date | str | None) -> str:
+    if value in (None, ""):
+        return ""
+    return _normalize_calendar_day(value)
+
+
+def _normalize_optional_positive_int(value: int | str | None) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        clean = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("calendar recurrence count must be a positive integer") from exc
+    if clean < 1:
+        raise ValueError("calendar recurrence count must be a positive integer")
+    return clean
+
+
 def _normalize_tags(values: Optional[list[str]]) -> list[str]:
     if not values:
         return []
@@ -1400,19 +1463,37 @@ def add_calendar_entry(
     source_id: Optional[int] = None,
     notes: str = "",
     tags: Optional[list[str]] = None,
+    recurrence_frequency: str = "",
+    recurrence_interval: int | str | None = 1,
+    recurrence_until: date | str | None = None,
+    recurrence_count: int | str | None = None,
+    recurrence_anchor_date: date | str | None = None,
+    commit: bool = True,
 ) -> int:
     clean_day = _normalize_calendar_day(entry_date)
     clean_title = " ".join(str(title or "").split()).strip()
     if not clean_title:
         raise ValueError("calendar entry title is required")
     clean_status = _normalize_calendar_entry_status(status)
+    clean_recurrence_frequency = _normalize_calendar_recurrence_frequency(recurrence_frequency)
+    clean_recurrence_interval = _normalize_calendar_recurrence_interval(recurrence_interval)
+    clean_recurrence_until = _normalize_optional_calendar_day(recurrence_until)
+    clean_recurrence_count = _normalize_optional_positive_int(recurrence_count)
+    clean_recurrence_anchor = _normalize_optional_calendar_day(recurrence_anchor_date) or clean_day
+    if not clean_recurrence_frequency:
+        clean_recurrence_interval = 1
+        clean_recurrence_until = ""
+        clean_recurrence_count = None
+        clean_recurrence_anchor = ""
     now = _utc_now_string()
     cursor = connection.execute(
         """
         INSERT INTO calendar_entries (
             entry_date, title, entry_type, status, priority, list_name, start_time, end_time,
-            source, source_table, source_id, notes, tags_json, created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source, source_table, source_id, notes, tags_json,
+            recurrence_frequency, recurrence_interval, recurrence_until, recurrence_count, recurrence_anchor_date,
+            created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             clean_day,
@@ -1428,12 +1509,18 @@ def add_calendar_entry(
             int(source_id) if source_id is not None else None,
             str(notes or ""),
             _json_text(_normalize_tags(tags), []),
+            clean_recurrence_frequency,
+            clean_recurrence_interval,
+            clean_recurrence_until,
+            clean_recurrence_count,
+            clean_recurrence_anchor,
             now,
             now,
             now if clean_status == "done" else None,
         ),
     )
-    connection.commit()
+    if commit:
+        connection.commit()
     return int(cursor.lastrowid)
 
 
@@ -1622,6 +1709,41 @@ def list_calendar_entries(
     if limit is not None:
         sql += "\nLIMIT ?"
         params.append(max(1, int(limit)))
+    return connection.execute(sql, params).fetchall()
+
+
+def list_recurring_calendar_entries(
+    connection: sqlite3.Connection,
+    *,
+    start_day: date | str,
+    end_day: date | str,
+    status: str = "all",
+) -> list[sqlite3.Row]:
+    clean_start = _normalize_calendar_day(start_day)
+    clean_end = _normalize_calendar_day(end_day)
+    clauses = [
+        "COALESCE(recurrence_frequency, '') != ''",
+        "COALESCE(recurrence_frequency, '') != 'none'",
+        "COALESCE(NULLIF(recurrence_anchor_date, ''), entry_date) <= ?",
+        "(COALESCE(recurrence_until, '') = '' OR recurrence_until >= ?)",
+    ]
+    params: list[Any] = [clean_end, clean_start]
+    clean_status = str(status or "all").strip().lower()
+    if clean_status != "all":
+        clauses.append("status = ?")
+        params.append(_normalize_calendar_entry_status(clean_status))
+    else:
+        clauses.append("status != 'archived'")
+    sql = f"""
+        SELECT *
+        FROM calendar_entries
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            COALESCE(NULLIF(recurrence_anchor_date, ''), entry_date) ASC,
+            CASE WHEN start_time = '' THEN 1 ELSE 0 END,
+            start_time ASC,
+            id ASC
+    """
     return connection.execute(sql, params).fetchall()
 
 
@@ -3934,6 +4056,127 @@ def clear_hidden_mail_contact(connection: sqlite3.Connection, *, contact_key: st
     hidden_contacts.pop(normalized_key, None)
     set_hidden_mail_contacts(connection, hidden_contacts)
     return True
+
+
+def get_touched_mail_contacts(connection: sqlite3.Connection) -> dict[str, str]:
+    raw = get_sync_state(connection, MAIL_UI_TOUCHED_CONTACTS_SYNC_KEY)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    touched: dict[str, str] = {}
+    for key, value in payload.items():
+        contact_key = str(key or "").strip().lower()
+        touched_at = str(value or "").strip()
+        if contact_key and touched_at:
+            touched[contact_key] = touched_at
+    return touched
+
+
+def set_touched_mail_contacts(connection: sqlite3.Connection, touched_contacts: dict[str, str]) -> None:
+    payload = {
+        str(contact_key).strip().lower(): str(touched_at).strip()
+        for contact_key, touched_at in touched_contacts.items()
+        if str(contact_key).strip() and str(touched_at).strip()
+    }
+    if len(payload) > MAIL_UI_TOUCHED_CONTACTS_MAX_KEYS:
+        payload = dict(
+            sorted(
+                payload.items(),
+                key=lambda item: str(item[1] or ""),
+                reverse=True,
+            )[:MAIL_UI_TOUCHED_CONTACTS_MAX_KEYS]
+        )
+    set_sync_state(connection, MAIL_UI_TOUCHED_CONTACTS_SYNC_KEY, json.dumps(payload, sort_keys=True))
+
+
+def mark_touched_mail_contact(
+    connection: sqlite3.Connection,
+    *,
+    contact_key: str,
+    touched_at: Optional[str] = None,
+) -> dict[str, Any]:
+    normalized_key = str(contact_key or "").strip().lower()
+    if not normalized_key:
+        return {"changed": False, "contact_key": "", "touched_at": str(touched_at or "")}
+    timestamp = str(touched_at or _utc_now_string())
+    touched_contacts = get_touched_mail_contacts(connection)
+    changed = touched_contacts.get(normalized_key) != timestamp
+    touched_contacts[normalized_key] = timestamp
+    set_touched_mail_contacts(connection, touched_contacts)
+    return {"changed": changed, "contact_key": normalized_key, "touched_at": timestamp}
+
+
+def get_viewed_mail_message_keys(connection: sqlite3.Connection) -> dict[str, str]:
+    raw = get_sync_state(connection, MAIL_UI_VIEWED_MESSAGES_SYNC_KEY)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    viewed: dict[str, str] = {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            read_key = str(key or "").strip()
+            viewed_at = str(value or "").strip()
+            if read_key:
+                viewed[read_key] = viewed_at or _utc_now_string()
+    elif isinstance(payload, list):
+        for value in payload:
+            read_key = str(value or "").strip()
+            if read_key:
+                viewed[read_key] = _utc_now_string()
+    return viewed
+
+
+def set_viewed_mail_message_keys(connection: sqlite3.Connection, viewed_messages: dict[str, str]) -> None:
+    payload = {
+        str(read_key).strip(): str(viewed_at or "").strip() or _utc_now_string()
+        for read_key, viewed_at in viewed_messages.items()
+        if str(read_key).strip()
+    }
+    if len(payload) > MAIL_UI_VIEWED_MESSAGES_MAX_KEYS:
+        payload = dict(
+            sorted(
+                payload.items(),
+                key=lambda item: str(item[1] or ""),
+                reverse=True,
+            )[:MAIL_UI_VIEWED_MESSAGES_MAX_KEYS]
+        )
+    set_sync_state(connection, MAIL_UI_VIEWED_MESSAGES_SYNC_KEY, json.dumps(payload, sort_keys=True))
+
+
+def mark_viewed_mail_message_keys(
+    connection: sqlite3.Connection,
+    *,
+    read_keys: list[str],
+    viewed_at: Optional[str] = None,
+) -> dict[str, Any]:
+    clean_keys = []
+    seen_keys: set[str] = set()
+    for value in read_keys:
+        read_key = str(value or "").strip()
+        if not read_key or read_key in seen_keys:
+            continue
+        clean_keys.append(read_key)
+        seen_keys.add(read_key)
+    if not clean_keys:
+        return {"changed": False, "read_keys": [], "viewed_at": str(viewed_at or "")}
+
+    timestamp = str(viewed_at or _utc_now_string())
+    viewed_messages = get_viewed_mail_message_keys(connection)
+    changed = False
+    for read_key in clean_keys:
+        if read_key not in viewed_messages:
+            changed = True
+        viewed_messages[read_key] = timestamp
+    set_viewed_mail_message_keys(connection, viewed_messages)
+    return {"changed": changed, "read_keys": clean_keys, "viewed_at": timestamp}
 
 
 def enqueue_mail_delivery(

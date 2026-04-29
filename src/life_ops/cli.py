@@ -22,10 +22,22 @@ from life_ops.backups import (
 from life_ops.calendar import (
     build_calendar_day,
     build_calendar_history,
+    build_calendar_range,
+    build_day_sheet,
     render_calendar_day_text,
     render_calendar_history_text,
+    render_day_sheet_html,
+    render_day_sheet_latex,
+    render_day_sheet_text,
     rollover_calendar_day,
     save_calendar_day,
+)
+from life_ops.orp_sweep import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_ORP_SWEEP_OUTPUT_DIR,
+    build_orp_project_sweep,
+    render_orp_sweep_markdown,
+    sync_orp_sweep_calendar,
+    write_orp_sweep_reports,
 )
 from life_ops.apple_calendar import (
     DEFAULT_APPLE_CALENDAR_DAYS_AHEAD,
@@ -338,10 +350,36 @@ def build_parser() -> argparse.ArgumentParser:
     calendar_day_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
     calendar_day_parser.add_argument("--format", choices=["text", "json"], default="text")
 
+    day_sheet_parser = subparsers.add_parser("day-sheet", help="Render a printable LifeOps day sheet grouped by section and priority.")
+    day_sheet_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
+    day_sheet_parser.add_argument("--format", choices=["text", "html", "latex", "json"], default="text")
+    day_sheet_parser.add_argument("--max-open-list-items", type=int, default=24)
+    day_sheet_parser.add_argument("--roadmap-days", type=int, default=30, help="Include this many future days in the printed forward view.")
+    day_sheet_parser.add_argument("--roadmap-item-limit", type=int, default=120, help="Maximum forward-view items to include.")
+    day_sheet_parser.add_argument("--featured-project", default=None, help="Feature one project by title instead of using the configured/default project.")
+    day_sheet_parser.add_argument("--no-frg-first-page", action="store_true", help="Render the day sheet without the canonical FRG first page.")
+    day_sheet_parser.add_argument("--page-breaks", action="store_true", help="Insert form-feed page breaks between text sections.")
+    day_sheet_parser.add_argument("--output", type=Path, default=None, help="Write the rendered day sheet to a file instead of stdout.")
+
+    orp_sweep_parser = subparsers.add_parser("orp-sweep", help="Sweep tracked ORP projects into a daily priority report.")
+    orp_sweep_parser.add_argument("--date", dest="target_day", type=_parse_day, default=date.today())
+    orp_sweep_parser.add_argument("--idea-limit", type=int, default=100)
+    orp_sweep_parser.add_argument("--max-projects", type=int, default=12)
+    orp_sweep_parser.add_argument("--calendar-limit", type=int, default=12)
+    orp_sweep_parser.add_argument("--update-calendar", action="store_true", help="Create today's ORP priority tasks in LifeOps.")
+    orp_sweep_parser.add_argument("--dry-run-calendar", action="store_true", help="Show the LifeOps calendar entries that would be created.")
+    orp_sweep_parser.add_argument("--output-dir", type=Path, default=DEFAULT_ORP_SWEEP_OUTPUT_DIR)
+    orp_sweep_parser.add_argument("--format", choices=["text", "json"], default="text")
+
     calendar_history_parser = subparsers.add_parser("calendar-history", help="Render day-by-day saved calendar history.")
     calendar_history_parser.add_argument("--start", type=_parse_day, default=date.today())
     calendar_history_parser.add_argument("--days", type=int, default=7)
     calendar_history_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    calendar_range_parser = subparsers.add_parser("calendar-range", help="Render a forward calendar planning range.")
+    calendar_range_parser.add_argument("--start", type=_parse_day, default=date.today())
+    calendar_range_parser.add_argument("--days", type=int, default=365)
+    calendar_range_parser.add_argument("--format", choices=["json"], default="json")
 
     calendar_add_parser = subparsers.add_parser("calendar-add", help="Add a dated homemade calendar entry.")
     calendar_add_parser.add_argument("--date", dest="entry_date", type=_parse_day, default=date.today())
@@ -354,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
     calendar_add_parser.add_argument("--end-time", type=_parse_time, default=None)
     calendar_add_parser.add_argument("--notes", default="")
     calendar_add_parser.add_argument("--tag", action="append", dest="tags", default=[])
+    calendar_add_parser.add_argument("--repeat", dest="recurrence_frequency", choices=store.CALENDAR_RECURRENCE_FREQUENCIES, default="")
+    calendar_add_parser.add_argument("--repeat-every", dest="recurrence_interval", type=int, default=1)
+    calendar_add_parser.add_argument("--repeat-until", dest="recurrence_until", type=_parse_day, default=None)
+    calendar_add_parser.add_argument("--repeat-count", dest="recurrence_count", type=int, default=None)
+    calendar_add_parser.add_argument("--repeat-anchor", dest="recurrence_anchor_date", type=_parse_day, default=None)
     calendar_add_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     calendar_status_parser = subparsers.add_parser("calendar-status", help="Set a calendar entry status.")
@@ -1238,6 +1281,11 @@ def _calendar_entry_record(row) -> dict:
         "source_id": int(row["source_id"]) if row["source_id"] is not None else None,
         "notes": str(row["notes"] or ""),
         "tags": _load_json_field(str(row["tags_json"] or "[]"), []),
+        "recurrence_frequency": str(row["recurrence_frequency"] or "") if "recurrence_frequency" in row.keys() else "",
+        "recurrence_interval": int(row["recurrence_interval"] or 1) if "recurrence_interval" in row.keys() else 1,
+        "recurrence_until": str(row["recurrence_until"] or "") if "recurrence_until" in row.keys() else "",
+        "recurrence_count": int(row["recurrence_count"] or 0) if "recurrence_count" in row.keys() and row["recurrence_count"] else 0,
+        "recurrence_anchor_date": str(row["recurrence_anchor_date"] or "") if "recurrence_anchor_date" in row.keys() else "",
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
         "completed_at": str(row["completed_at"] or ""),
@@ -4268,6 +4316,63 @@ def run(args: argparse.Namespace) -> str:
                 return json.dumps(payload, indent=2)
             return render_calendar_day_text(payload)
 
+        if command == "day-sheet":
+            payload = build_day_sheet(
+                connection,
+                target_day=args.target_day,
+                max_open_list_items=args.max_open_list_items,
+                roadmap_days=args.roadmap_days,
+                roadmap_item_limit=args.roadmap_item_limit,
+                include_frg_first_page=not args.no_frg_first_page,
+                featured_project_name=args.featured_project,
+            )
+            if args.format == "json":
+                rendered = json.dumps(payload, indent=2)
+            elif args.format == "html":
+                rendered = render_day_sheet_html(payload)
+            elif args.format == "latex":
+                rendered = render_day_sheet_latex(payload)
+            else:
+                rendered = render_day_sheet_text(payload, page_breaks=args.page_breaks)
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(rendered)
+                return f"Wrote day sheet: {args.output}"
+            return rendered
+
+        if command == "orp-sweep":
+            sweep = build_orp_project_sweep(
+                idea_limit=args.idea_limit,
+                max_projects=args.max_projects,
+            )
+            report_path = args.output_dir / "latest.md"
+            calendar_results = None
+            if args.update_calendar or args.dry_run_calendar:
+                calendar_results = sync_orp_sweep_calendar(
+                    connection,
+                    sweep=sweep,
+                    target_day=args.target_day,
+                    report_path=report_path,
+                    calendar_limit=args.calendar_limit,
+                    dry_run=args.dry_run_calendar and not args.update_calendar,
+                )
+            markdown_path, json_path = write_orp_sweep_reports(
+                sweep,
+                output_dir=args.output_dir,
+                calendar_results=calendar_results,
+            )
+            if args.format == "json":
+                return json.dumps(
+                    {
+                        **sweep,
+                        "calendar_results": calendar_results or [],
+                        "report_markdown": str(markdown_path),
+                        "report_json": str(json_path),
+                    },
+                    indent=2,
+                )
+            return render_orp_sweep_markdown(sweep, calendar_results)
+
         if command == "calendar-history":
             payload = build_calendar_history(
                 connection,
@@ -4277,6 +4382,14 @@ def run(args: argparse.Namespace) -> str:
             if args.format == "json":
                 return json.dumps(payload, indent=2)
             return render_calendar_history_text(payload)
+
+        if command == "calendar-range":
+            payload = build_calendar_range(
+                connection,
+                start_day=args.start,
+                days=args.days,
+            )
+            return json.dumps(payload, indent=2)
 
         if command == "calendar-add":
             entry_id = store.add_calendar_entry(
@@ -4291,6 +4404,11 @@ def run(args: argparse.Namespace) -> str:
                 end_time=args.end_time,
                 notes=args.notes,
                 tags=args.tags,
+                recurrence_frequency=args.recurrence_frequency,
+                recurrence_interval=args.recurrence_interval,
+                recurrence_until=args.recurrence_until,
+                recurrence_count=args.recurrence_count,
+                recurrence_anchor_date=args.recurrence_anchor_date,
             )
             row = store.get_calendar_entry(connection, entry_id)
             if row is None:

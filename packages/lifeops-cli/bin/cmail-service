@@ -54,6 +54,7 @@ Commands:
             Show the saved CMAIL tailnet URL and Tailscale Serve status
   secure-doctor
             Verify the canonical private CMAIL URL and health endpoint
+  auth-code Show or create the optional private CMAIL unlock code
   tail      Tail the service logs
   plist     Print the expected LaunchAgent plist path
 EOF
@@ -131,8 +132,11 @@ refresh_service_secrets() {
   fi
   LIFE_OPS_HOME="${STATE_ROOT}" LIFE_OPS_SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}" \
     "${VENV_PYTHON}" -c '
+import os
 from pathlib import Path
-from life_ops.cmail_runtime import write_cmail_service_secret_snapshot
+from life_ops.cmail_runtime import ensure_cmail_app_secret, write_cmail_service_secret_snapshot
+secret_result = ensure_cmail_app_secret()
+os.environ[secret_result["name"]] = secret_result["secret"]
 result = write_cmail_service_secret_snapshot(target=Path("'"${SERVICE_SECRETS_PATH}"'"))
 print(f"Secrets: {result['\''count'\'']} written to {result['\''path'\'']}")
 if result["missing"]:
@@ -147,6 +151,52 @@ run_health_audit() {
   fi
   LIFE_OPS_HOME="${STATE_ROOT}" LIFE_OPS_PACKAGE_ROOT="${BACKEND_DIR}" LIFE_OPS_SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}" \
     "${VENV_PYTHON}" -m life_ops cmail-health-check --repair --format json "${@}"
+}
+
+show_cmail_auth_code() {
+  ensure_venv
+  local rotate="0"
+  local backend="auto"
+  local allow_insecure_file_backend="0"
+  local arg
+  for arg in "${@}"; do
+    case "${arg}" in
+      --rotate)
+        rotate="1"
+        ;;
+      --backend=*)
+        backend="${arg#--backend=}"
+        ;;
+      --allow-insecure-file-backend)
+        allow_insecure_file_backend="1"
+        ;;
+      *)
+        echo "Unknown auth-code option: ${arg}" >&2
+        exit 2
+        ;;
+    esac
+  done
+  CMAIL_AUTH_ROTATE="${rotate}" CMAIL_AUTH_BACKEND="${backend}" CMAIL_AUTH_ALLOW_INSECURE_FILE_BACKEND="${allow_insecure_file_backend}" \
+  LIFE_OPS_HOME="${STATE_ROOT}" LIFE_OPS_PACKAGE_ROOT="${BACKEND_DIR}" LIFE_OPS_SERVICE_SECRETS_PATH="${SERVICE_SECRETS_PATH}" \
+    "${VENV_PYTHON}" -c '
+import os
+from pathlib import Path
+from life_ops.cmail_runtime import ensure_cmail_app_secret, write_cmail_service_secret_snapshot
+
+result = ensure_cmail_app_secret(
+    rotate=os.environ.get("CMAIL_AUTH_ROTATE") == "1",
+    backend=os.environ.get("CMAIL_AUTH_BACKEND", "auto"),
+    allow_insecure_file_backend=os.environ.get("CMAIL_AUTH_ALLOW_INSECURE_FILE_BACKEND") == "1",
+)
+os.environ[result["name"]] = result["secret"]
+snapshot = write_cmail_service_secret_snapshot(target=Path(os.environ["LIFE_OPS_SERVICE_SECRETS_PATH"]))
+state = "rotated" if result.get("rotated") else "created" if result.get("created") else "existing"
+print("CMAIL unlock code:")
+print(result["secret"])
+print(f"State: {state}")
+print(f"Service secrets: {snapshot['\''path'\'']}")
+print("Keep this private. Restart CMAIL after rotating the code.")
+'
 }
 
 render_plist() {
@@ -271,8 +321,11 @@ VENV_PYTHON="${VENV_PYTHON}"
 refresh_service_secrets() {
   LIFE_OPS_HOME="\${STATE_ROOT}" LIFE_OPS_SERVICE_SECRETS_PATH="\${SERVICE_SECRETS_PATH}" \\
     "\${VENV_PYTHON}" -c '
+import os
 from pathlib import Path
-from life_ops.cmail_runtime import write_cmail_service_secret_snapshot
+from life_ops.cmail_runtime import ensure_cmail_app_secret, write_cmail_service_secret_snapshot
+secret_result = ensure_cmail_app_secret()
+os.environ[secret_result["name"]] = secret_result["secret"]
 write_cmail_service_secret_snapshot(target=Path("'"${SERVICE_SECRETS_PATH}"'"))
 '
 }
@@ -502,7 +555,7 @@ tailscale_secure_doctor() {
     exit 1
   fi
 
-  local dns_name official_url compatibility_url expected_proxy serve_json funnel_json serve_text health_body compatibility_health_body
+  local dns_name official_url compatibility_url expected_proxy serve_json funnel_json serve_text health_body compatibility_health_body auth_body
   dns_name="$(tailscale_dns_name "${tailscale_bin}")"
   official_url="${CMAIL_PUBLIC_URL}"
   compatibility_url="$(tailscale_url_for_dns "${dns_name}" "${https_port}")"
@@ -613,13 +666,22 @@ sys.exit(0 if payload["ok"] else 1)
     echo "${compatibility_health_body}"
     exit 1
   }
+  auth_body="$(curl -fsS "${official_url}/api/auth/status" 2>&1)" || {
+    echo "CMAIL secure doctor: FAIL"
+    printf "%s" "${doctor_json}" | "${python_bin}" -m json.tool
+    echo "- app_auth_status_check: failed"
+    echo "${auth_body}"
+    exit 1
+  }
 
-  local health_ok
+  local health_ok auth_ok
   health_ok="$(HEALTH_BODY="${health_body}" "${python_bin}" -c 'import json, os; payload=json.loads(os.environ["HEALTH_BODY"]); print("1" if payload.get("ok") is True and payload.get("app") == "cmail" else "0")' 2>/dev/null || echo "0")"
-  if [[ "${doctor_ok}" != "1" || "${health_ok}" != "1" ]]; then
+  auth_ok="$(AUTH_BODY="${auth_body}" "${python_bin}" -c 'import json, os; payload=json.loads(os.environ["AUTH_BODY"]); print("1" if payload.get("ok") is True and payload.get("app") == "cmail" and (payload.get("auth_required") is not True or payload.get("auth_configured") is True) else "0")' 2>/dev/null || echo "0")"
+  if [[ "${doctor_ok}" != "1" || "${health_ok}" != "1" || "${auth_ok}" != "1" ]]; then
     echo "CMAIL secure doctor: FAIL"
     printf "%s" "${doctor_json}" | "${python_bin}" -m json.tool
     echo "- health_response: ${health_body}"
+    echo "- auth_status_response: ${auth_body}"
     exit 1
   fi
 
@@ -642,6 +704,7 @@ else:
 '
   echo "Canonical health: ${health_body}"
   echo "Compatibility health: ${compatibility_health_body}"
+  echo "App auth status: ${auth_body}"
 }
 
 command_name="${1:-status}"
@@ -763,6 +826,9 @@ case "${command_name}" in
     ;;
   secure-doctor)
     tailscale_secure_doctor "${@:2}"
+    ;;
+  auth-code)
+    show_cmail_auth_code "${@:2}"
     ;;
   watchdog-run)
     refresh_service_secrets
