@@ -491,7 +491,7 @@ class CalendarTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-    def test_signed_frg_booking_webhook_creates_calendar_hold_and_cmail_draft(self) -> None:
+    def test_signed_frg_booking_webhook_creates_calendar_hold_without_default_cmail_draft(self) -> None:
         secret = "test-frg-booking-secret"
         payload = {
             "event": "booking.paid",
@@ -536,14 +536,21 @@ class CalendarTests(unittest.TestCase):
                     "X-FRG-Booking-Signature": f"v1={signature}",
                 },
             )
-            with mock.patch.dict(os.environ, {"FRG_BOOKING_WEBHOOK_SECRET": secret}):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "FRG_BOOKING_WEBHOOK_SECRET": secret,
+                    "FRG_BOOKING_CONFIRMATION_MODE": "",
+                    "FRG_BOOKING_AUTO_SEND_CONFIRMATION": "",
+                },
+            ):
                 with urllib.request.urlopen(request) as response:
                     created = json.loads(response.read().decode("utf-8"))
 
                 self.assertTrue(created["ok"])
                 self.assertFalse(created["duplicate"])
                 self.assertGreater(int(created["calendar_entry_id"]), 0)
-                self.assertGreater(int(created["cmail_draft_id"]), 0)
+                self.assertIsNone(created["cmail_draft_id"])
 
                 day_payload = build_calendar_day(self.connection, target_day=date(2026, 4, 18))
                 self.assertEqual(1, len(day_payload["entries"]))
@@ -555,9 +562,7 @@ class CalendarTests(unittest.TestCase):
                 self.assertIn("Stripe session: cs_test_booking", entry["notes"])
 
                 drafts = mail_ui.list_cmail_drafts(db_path=self.db_path)
-                self.assertEqual(1, len(drafts))
-                self.assertEqual("Ada Lovelace <ada@example.com>", drafts[0]["to"])
-                self.assertIn("FRG booking confirmed", drafts[0]["subject"])
+                self.assertEqual([], drafts)
 
                 duplicate_request = urllib.request.Request(
                     f"{base_url}/api/frg/bookings",
@@ -628,6 +633,128 @@ class CalendarTests(unittest.TestCase):
                 conflict_error = json.loads(raised.exception.read().decode("utf-8"))
                 self.assertEqual("frg_booking_slot_unavailable", conflict_error["error"])
                 self.assertEqual(1, len(build_calendar_day(self.connection, target_day=date(2026, 4, 18))["entries"]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_frg_booking_confirmation_draft_is_explicit_opt_in(self) -> None:
+        payload = {
+            "event": "booking.free_confirmed",
+            "booking": {
+                "id": "frg-booking-draft-mode-001",
+                "name": "Ada Lovelace",
+                "email": "ada@example.com",
+                "focus": "Mentorship",
+                "durationMinutes": 30,
+                "selectedDate": "2026-04-19",
+                "selectedTime": "2:00 PM",
+                "selectedSlotLabel": "Apr 19, 2026, 2:00 PM",
+                "timezone": "America/Chicago",
+            },
+        }
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FRG_BOOKING_CONFIRMATION_MODE": "draft",
+                "FRG_BOOKING_AUTO_SEND_CONFIRMATION": "",
+            },
+        ):
+            created = mail_ui._handle_frg_booking_payload(db_path=self.db_path, payload=payload)
+
+        self.assertFalse(created["duplicate"])
+        self.assertGreater(int(created["calendar_entry_id"]), 0)
+        self.assertGreater(int(created["cmail_draft_id"]), 0)
+        drafts = mail_ui.list_cmail_drafts(db_path=self.db_path)
+        self.assertEqual(1, len(drafts))
+        self.assertEqual("Ada Lovelace <ada@example.com>", drafts[0]["to"])
+        self.assertIn("FRG booking confirmed", drafts[0]["subject"])
+
+    def test_signed_frg_forge_webhook_creates_conference_seat_and_day_sheet_section(self) -> None:
+        secret = "test-frg-forge-secret"
+        payload = {
+            "event": "forge.checkout.completed",
+            "conferenceSeat": {
+                "attendeeEmail": "grace@example.com",
+                "attendeeName": "Grace Hopper",
+                "conferenceId": "frg-forge-pilot",
+                "conferenceStartsAt": None,
+                "conferenceTitle": "FRG Forge",
+                "fulfillmentStatus": "needs_details",
+                "locationLabel": "Pensacola, FL / livestream",
+                "purchasedAt": "2026-04-29T00:00:00.000Z",
+                "seatId": "frg-forge-seat-test-001",
+                "seatLabel": "Founding seat",
+                "status": "paid",
+            },
+            "forge": {
+                "createdAt": "2026-04-29T00:00:00.000Z",
+                "email": "grace@example.com",
+                "id": "frg-forge-seat-test-001",
+                "kind": "founding_seat",
+                "name": "Grace Hopper",
+                "source": "frg-site:forge-symbol",
+            },
+            "lifeOps": {
+                "checklistSection": "Upcoming Conferences",
+                "checklistTitle": "FRG Forge seat sold",
+                "requiredAction": "Send the buyer the Forge details packet and seat confirmation.",
+            },
+            "payment": {
+                "amountTotalCents": 10000,
+                "stripeCheckoutSessionId": "cs_test_forge",
+            },
+        }
+        raw_body = json.dumps(payload).encode("utf-8")
+        timestamp = str(int(datetime.now().timestamp()))
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{timestamp}.".encode("utf-8") + raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base_url}/api/frg/forge",
+                data=raw_body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-FRG-Forge-Timestamp": timestamp,
+                    "X-FRG-Forge-Signature": f"v1={signature}",
+                },
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "FRG_FORGE_WEBHOOK_SECRET": secret,
+                    "FRG_FORGE_CONFIRMATION_MODE": "",
+                    "FRG_FORGE_AUTO_SEND_CONFIRMATION": "",
+                },
+            ):
+                with urllib.request.urlopen(request) as response:
+                    created = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(created["ok"])
+                self.assertFalse(created["duplicate"])
+                self.assertGreater(int(created["calendar_entry_id"]), 0)
+                self.assertIsNone(created["cmail_draft_id"])
+
+                day_sheet = build_day_sheet(self.connection, target_day=date(2026, 4, 29))
+                self.assertEqual(1, day_sheet["summary"]["conference_seats"])
+                self.assertEqual(1, day_sheet["conference_seats"]["total_count"])
+                rendered = render_day_sheet_text(day_sheet)
+                self.assertIn("Upcoming Conferences (1)", rendered)
+                self.assertIn("FRG Forge seat: Grace Hopper", rendered)
+                self.assertIn("grace@example.com", rendered)
+
+                drafts = mail_ui.list_cmail_drafts(db_path=self.db_path)
+                self.assertEqual([], drafts)
         finally:
             server.shutdown()
             server.server_close()

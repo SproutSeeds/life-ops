@@ -113,6 +113,7 @@ from life_ops.cmail_runtime import (
     DEFAULT_CMAIL_RUNTIME_SEND_INTERVAL_SECONDS,
     DEFAULT_CMAIL_RUNTIME_SYNC_INTERVAL_SECONDS,
     default_cmail_runtime_db_path,
+    ensure_cmail_db_matches_live_service,
     ensure_cmail_runtime_db,
     ensure_cmail_runtime_list_items,
     resolve_cmail_db_path,
@@ -608,7 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
         "mail-ui",
         help="Start a super minimal local frontend for the life-ops mail system.",
     )
-    mail_ui_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    mail_ui_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     mail_ui_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
     mail_ui_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
     mail_ui_parser.add_argument("--limit", type=int, default=DEFAULT_MAIL_UI_LIMIT)
@@ -617,7 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-serve",
         help="Start the managed local CMAIL runtime service against the hot runtime mailbox DB.",
     )
-    cmail_serve_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_serve_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_serve_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
     cmail_serve_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
     cmail_serve_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
@@ -630,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-runtime-seal",
         help="Seal the hot runtime mailbox DB back into the encrypted canonical life-ops store.",
     )
-    cmail_runtime_seal_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_runtime_seal_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_runtime_seal_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
     cmail_runtime_seal_parser.add_argument("--format", choices=["text", "json"], default="text")
 
@@ -638,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-health-check",
         help="Audit the managed CMAIL runtime for queue drift, stale correspondence artifacts, and local service health.",
     )
-    cmail_health_check_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_health_check_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_health_check_parser.add_argument("--canonical-db", type=Path, default=store.default_db_path())
     cmail_health_check_parser.add_argument("--host", default=DEFAULT_MAIL_UI_HOST)
     cmail_health_check_parser.add_argument("--port", type=int, default=DEFAULT_MAIL_UI_PORT)
@@ -650,14 +651,14 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-drafts",
         help="List local CMAIL drafts stored for manual review or later send.",
     )
-    cmail_drafts_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_drafts_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_drafts_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     cmail_draft_save_parser = subparsers.add_parser(
         "cmail-draft-save",
         help="Create or update a local CMAIL draft without sending it.",
     )
-    cmail_draft_save_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_draft_save_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_draft_save_parser.add_argument("--id", type=int, default=0)
     cmail_draft_save_parser.add_argument("--to", default="")
     cmail_draft_save_parser.add_argument("--cc", default="")
@@ -679,7 +680,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-draft-send",
         help="Send a saved local CMAIL draft through the configured outbound mail path.",
     )
-    cmail_draft_send_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_draft_send_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_draft_send_parser.add_argument("--id", required=True, type=int)
     cmail_draft_send_parser.add_argument("--send-at", default="", help="Queue delivery no earlier than this ISO timestamp.")
     cmail_draft_send_parser.add_argument("--delay-minutes", type=float, default=0.0)
@@ -689,7 +690,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cmail-batch-send",
         help="Queue multiple CMAIL drafts with cold-outreach throttling.",
     )
-    cmail_batch_send_parser.add_argument("--db", type=Path, default=default_cmail_runtime_db_path())
+    cmail_batch_send_parser.add_argument("--db", type=Path, default=argparse.SUPPRESS)
     cmail_batch_send_parser.add_argument("--ids", default="", help="Comma-separated draft ids to queue.")
     cmail_batch_send_parser.add_argument("--id", action="append", dest="id_values", type=int, default=[])
     cmail_batch_send_parser.add_argument("--start-at", default="", help="First delivery timestamp in ISO format.")
@@ -2888,6 +2889,7 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
 
     if command == "cmail-drafts":
         target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_db_matches_live_service(runtime_db_path=target_db_path)
         ensure_cmail_runtime_db(
             runtime_db_path=target_db_path,
             canonical_db_path=store.default_db_path(),
@@ -2899,6 +2901,7 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
 
     if command == "cmail-draft-save":
         target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_db_matches_live_service(runtime_db_path=target_db_path)
         ensure_cmail_runtime_db(
             runtime_db_path=target_db_path,
             canonical_db_path=store.default_db_path(),
@@ -2937,6 +2940,7 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
 
     if command == "cmail-draft-send":
         target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_db_matches_live_service(runtime_db_path=target_db_path)
         ensure_cmail_runtime_db(
             runtime_db_path=target_db_path,
             canonical_db_path=store.default_db_path(),
@@ -2953,6 +2957,7 @@ def _run_without_db_command(args: argparse.Namespace) -> str | None:
 
     if command == "cmail-batch-send":
         target_db_path = resolve_cmail_db_path(args.db)
+        ensure_cmail_db_matches_live_service(runtime_db_path=target_db_path)
         ensure_cmail_runtime_db(
             runtime_db_path=target_db_path,
             canonical_db_path=store.default_db_path(),

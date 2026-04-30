@@ -20,15 +20,16 @@ ROLLOVER_TYPES = {"task", "habit", "carry_forward", "event"}
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3, "": 4}
 SECTION_ORDER = {
     "Hard Schedule": 0,
-    "Signups / Bookings": 1,
-    "GitHub / Notifications": 2,
-    "ORP / Project Priorities": 3,
-    "Comms / Follow-Ups": 4,
-    "Professional / Projects": 5,
-    "Personal / Home": 6,
-    "General / Admin": 7,
-    "Open Lists": 8,
-    "Completed Today": 9,
+    "Upcoming Conferences": 1,
+    "Signups / Bookings": 2,
+    "GitHub / Notifications": 3,
+    "ORP / Project Priorities": 4,
+    "Comms / Follow-Ups": 5,
+    "Professional / Projects": 6,
+    "Personal / Home": 7,
+    "General / Admin": 8,
+    "Open Lists": 9,
+    "Completed Today": 10,
 }
 ROADMAP_AGENDA_TYPES = {"event", "follow_up"}
 CALENDAR_RANGE_DEFAULT_DAYS = 365
@@ -380,6 +381,16 @@ def _entry_section(entry: dict) -> str:
     title = str(entry.get("title") or "").lower()
     source = str(entry.get("source") or "").lower()
     if (
+        "forge" in tags
+        or "conference" in tags
+        or "conference-seat" in tags
+        or "frg_site_forge" in source
+        or title.startswith("frg forge seat:")
+        or title.startswith("forge seat:")
+        or "conference seat:" in title
+    ):
+        return "Upcoming Conferences"
+    if (
         "booking" in tags
         or "signup" in tags
         or "sign-up" in tags
@@ -412,6 +423,10 @@ def _is_meeting_booking_entry(entry: dict) -> bool:
     if str(entry.get("start_time") or "").strip() or str(entry.get("end_time") or "").strip():
         return True
     return False
+
+
+def _is_conference_seat_entry(entry: dict) -> bool:
+    return _entry_section(entry) == "Upcoming Conferences"
 
 
 def _is_calendar_hold_entry(entry: dict) -> bool:
@@ -762,7 +777,7 @@ def _is_focus_priority_candidate(entry: dict) -> bool:
     if _is_calendar_hold_entry(entry):
         return False
     section = _entry_section(entry)
-    if section == "Signups / Bookings":
+    if section in {"Signups / Bookings", "Upcoming Conferences"}:
         return False
     tags = {str(tag).lower() for tag in entry.get("tags") or []}
     source = str(entry.get("source") or "").lower()
@@ -1350,6 +1365,46 @@ def _list_current_meeting_bookings(
     }
 
 
+def _list_current_conference_seats(
+    connection: sqlite3.Connection,
+    *,
+    item_limit: int,
+    target_day: date,
+) -> dict:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM calendar_entries
+        WHERE status IN ('planned', 'in_progress', 'missed', 'deferred')
+          AND (
+            source = 'frg_site_forge'
+            OR title LIKE 'FRG Forge seat:%'
+            OR title LIKE '%conference seat:%'
+            OR tags_json LIKE '%"forge"%'
+            OR tags_json LIKE '%"conference-seat"%'
+          )
+        ORDER BY
+            entry_date ASC,
+            id ASC
+        LIMIT ?
+        """,
+        (max(1, item_limit) + 1,),
+    ).fetchall()
+    items = [
+        _calendar_entry_roadmap_item(entry)
+        for entry in (_entry_record(row) for row in rows)
+        if _is_conference_seat_entry(entry)
+    ]
+    printed_items = items[:item_limit]
+    return {
+        "start_date": target_day.isoformat(),
+        "items": printed_items,
+        "count": len(printed_items),
+        "total_count": len(items),
+        "overflow_count": max(0, len(items) - len(printed_items)),
+    }
+
+
 def _list_current_calendar_holds(
     connection: sqlite3.Connection,
     *,
@@ -1514,6 +1569,8 @@ def build_day_sheet(
     for entry in day.get("need_to_get_to") or []:
         if _is_project_inventory_entry(entry):
             continue
+        if _is_conference_seat_entry(entry):
+            continue
         section = _entry_section(entry)
         if _is_calendar_hold_entry(entry) and section not in {"Hard Schedule", "Signups / Bookings"}:
             section = "Hard Schedule"
@@ -1544,6 +1601,11 @@ def build_day_sheet(
     )
     meeting_bookings = _list_current_meeting_bookings(
         connection,
+        target_day=target_day,
+    )
+    conference_seats = _list_current_conference_seats(
+        connection,
+        item_limit=roadmap_item_limit,
         target_day=target_day,
     )
     calendar_holds = _list_current_calendar_holds(
@@ -1586,6 +1648,7 @@ def build_day_sheet(
             "focus_priorities": focus_priorities["count"],
             "agent_projects": agent_project_history["count"],
             "featured_project": featured_project["count"],
+            "conference_seats": conference_seats["total_count"],
             "calendar_holds": calendar_holds["total_count"],
             "open_list_items_included": min(len(day.get("open_list_items") or []), max_open_list_items),
             "open_list_items_total": len(day.get("open_list_items") or []),
@@ -1594,6 +1657,7 @@ def build_day_sheet(
         "focus_priorities": focus_priorities,
         "agent_project_history": agent_project_history,
         "featured_project": featured_project,
+        "conference_seats": conference_seats,
         "calendar_holds": calendar_holds,
         "meeting_bookings": meeting_bookings,
         "roadmap": roadmap,
@@ -2246,7 +2310,7 @@ def render_day_sheet_text(payload: dict, *, page_breaks: bool = False) -> str:
     lines.extend(
         [
         f"LifeOps Day Sheet: {payload['label']}",
-        f"- schedule items: {summary.get('items', 0)} | calendar holds: {summary.get('calendar_holds', 0)} | featured project: {summary.get('featured_project', 0)} | urgent: {summary.get('urgent', 0)} | high: {summary.get('high', 0)}",
+        f"- schedule items: {summary.get('items', 0)} | conference seats: {summary.get('conference_seats', 0)} | calendar holds: {summary.get('calendar_holds', 0)} | featured project: {summary.get('featured_project', 0)} | urgent: {summary.get('urgent', 0)} | high: {summary.get('high', 0)}",
         ]
     )
     note = payload.get("day_note") or {}
@@ -2274,6 +2338,16 @@ def render_day_sheet_text(payload: dict, *, page_breaks: bool = False) -> str:
         remaining = summary["open_list_items_total"] - summary["open_list_items_included"]
         lines.append("")
         lines.append(f"Open list overflow: {remaining} additional item(s) not printed.")
+
+    conference_seats = payload.get("conference_seats") or {}
+    conference_items = conference_seats.get("items") or []
+    if conference_items:
+        lines.append("")
+        lines.append(f"Upcoming Conferences ({conference_seats.get('total_count', len(conference_items))})")
+        for item in conference_items:
+            lines.extend(_format_roadmap_item_text(item))
+        if conference_seats.get("overflow_count"):
+            lines.append(f"- ...and {conference_seats['overflow_count']} more seat(s)")
 
     calendar_holds = payload.get("calendar_holds") or {}
     hold_items = calendar_holds.get("items") or []
@@ -2500,6 +2574,24 @@ def render_day_sheet_html(payload: dict) -> str:
             f"<ul>{items}</ul>"
             "</section>"
         )
+    conference_seats = payload.get("conference_seats") or {}
+    conference_items = conference_seats.get("items") or []
+    conference_seats_html = ""
+    if conference_items:
+        items = "\n".join(_render_roadmap_item_html(item) for item in conference_items)
+        overflow = (
+            f"<p class=\"count\">{conference_seats['overflow_count']} more seat(s) not printed</p>"
+            if conference_seats.get("overflow_count")
+            else ""
+        )
+        conference_seats_html = (
+            "<section>"
+            "<h2>Upcoming Conferences</h2>"
+            f"<p class=\"count\">{conference_seats.get('total_count', len(conference_items))} seat(s) sold</p>"
+            f"<ul>{items}</ul>"
+            f"{overflow}"
+            "</section>"
+        )
     calendar_holds = payload.get("calendar_holds") or {}
     hold_items = calendar_holds.get("items") or []
     calendar_holds_html = ""
@@ -2566,6 +2658,7 @@ def render_day_sheet_html(payload: dict) -> str:
     <p>{escape(str(payload['label']))}</p>
     <div class="summary">
       <span>{summary.get('items', 0)} schedule item(s)</span>
+      <span>{summary.get('conference_seats', 0)} conference seat(s)</span>
       <span>{summary.get('calendar_holds', 0)} hold(s)</span>
       <span>{summary.get('featured_project', 0)} featured project</span>
       <span>{summary.get('urgent', 0)} urgent</span>
@@ -2574,6 +2667,7 @@ def render_day_sheet_html(payload: dict) -> str:
     {note_html}
   </header>
   {''.join(sections_html)}
+  {conference_seats_html}
   {calendar_holds_html}
   {featured_project_html}
 </body>
@@ -2732,7 +2826,8 @@ def render_day_sheet_latex(payload: dict) -> str:
     title = _latex_escape("LifeOps Day Sheet")
     label = _latex_escape(payload.get("label") or payload.get("date") or "")
     stats = _latex_escape(
-        f"{summary.get('items', 0)} schedule items / {summary.get('calendar_holds', 0)} calendar holds / "
+        f"{summary.get('items', 0)} schedule items / {summary.get('conference_seats', 0)} conference seats / "
+        f"{summary.get('calendar_holds', 0)} calendar holds / "
         f"{summary.get('featured_project', 0)} featured project / {summary.get('urgent', 0)} urgent / {summary.get('high', 0)} high"
     )
     document: list[str] = [
@@ -2792,6 +2887,21 @@ def render_day_sheet_latex(payload: dict) -> str:
             document.append(r"\end{itemize}")
         else:
             document.append(r"{\small None.}")
+
+    conference_seats = payload.get("conference_seats") or {}
+    conference_items = conference_seats.get("items") or []
+    if conference_items:
+        document.append(r"\Needspace{8\baselineskip}")
+        document.append(
+            r"\section*{"
+            + _latex_escape(f"Upcoming Conferences ({conference_seats.get('total_count', len(conference_items))})")
+            + "}"
+        )
+        document.append(r"\begin{itemize}")
+        document.extend(_latex_item_block(item, include_date=True) for item in conference_items)
+        document.append(r"\end{itemize}")
+        if conference_seats.get("overflow_count"):
+            document.append(r"{\small " + _latex_escape(f"...and {conference_seats['overflow_count']} more") + r"}")
 
     calendar_holds = payload.get("calendar_holds") or {}
     hold_items = calendar_holds.get("items") or []

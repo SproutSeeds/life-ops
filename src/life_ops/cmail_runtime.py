@@ -39,6 +39,8 @@ from life_ops.vault_crypto import MASTER_KEY_NAME
 
 DEFAULT_CMAIL_RUNTIME_DB_NAME = "cmail_runtime.db"
 DEFAULT_CMAIL_RUNTIME_STATE_NAME = "cmail_runtime_state.json"
+DEFAULT_CMAIL_RUNTIME_DB_ENV = "LIFE_OPS_CMAIL_RUNTIME_DB"
+DEFAULT_CMAIL_ALLOW_DB_MISMATCH_ENV = "LIFE_OPS_ALLOW_CMAIL_DB_MISMATCH"
 DEFAULT_CMAIL_RUNTIME_SYNC_INTERVAL_SECONDS = 60.0
 DEFAULT_CMAIL_RUNTIME_SEND_INTERVAL_SECONDS = 2.0
 DEFAULT_CMAIL_RUNTIME_SEAL_INTERVAL_SECONDS = 900.0
@@ -58,7 +60,12 @@ def _utc_now_iso() -> str:
 
 
 def default_cmail_runtime_db_path() -> Path:
-    return store.data_root() / DEFAULT_CMAIL_RUNTIME_DB_NAME
+    override = str(os.getenv(DEFAULT_CMAIL_RUNTIME_DB_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    if str(os.getenv(store.LIFE_OPS_HOME_ENV) or "").strip():
+        return store.data_root() / DEFAULT_CMAIL_RUNTIME_DB_NAME
+    return Path.home() / ".lifeops" / "data" / DEFAULT_CMAIL_RUNTIME_DB_NAME
 
 
 def default_cmail_runtime_state_path(runtime_db_path: Path | None = None) -> Path:
@@ -74,7 +81,40 @@ def resolve_cmail_db_path(db_path: Path | None) -> Path:
     requested = (db_path or store.default_db_path()).expanduser()
     if requested.resolve(strict=False) == store.default_db_path().resolve(strict=False):
         return default_cmail_runtime_db_path()
+    legacy_development_runtime = store.package_root() / "data" / DEFAULT_CMAIL_RUNTIME_DB_NAME
+    if requested.resolve(strict=False) == legacy_development_runtime.resolve(strict=False):
+        return default_cmail_runtime_db_path()
     return requested
+
+
+def _paths_match(left: Path | str, right: Path | str) -> bool:
+    return Path(left).expanduser().resolve(strict=False) == Path(right).expanduser().resolve(strict=False)
+
+
+def ensure_cmail_db_matches_live_service(
+    *,
+    runtime_db_path: Path | None = None,
+    host: str = DEFAULT_MAIL_UI_HOST,
+    port: int = DEFAULT_MAIL_UI_PORT,
+    timeout_seconds: float = 1.0,
+) -> dict[str, Any]:
+    runtime_path = resolve_cmail_db_path(runtime_db_path)
+    service_health = _check_cmail_service_http_health(
+        host=host,
+        port=port,
+        timeout_seconds=timeout_seconds,
+    )
+    payload = service_health.get("payload") or {}
+    live_db_path = str(payload.get("db_path") or "").strip()
+    if bool(service_health.get("ok")) and live_db_path and not _paths_match(runtime_path, live_db_path):
+        if str(os.getenv(DEFAULT_CMAIL_ALLOW_DB_MISMATCH_ENV) or "").strip() in {"1", "true", "yes"}:
+            return service_health
+        raise RuntimeError(
+            "CMAIL database mismatch: refusing to use "
+            f"{runtime_path} while the running CMAIL service is using {live_db_path}. "
+            "Use the live service DB or stop CMAIL before operating on another runtime DB."
+        )
+    return service_health
 
 
 def _write_text_atomic(path: Path, payload: str) -> None:
@@ -556,15 +596,25 @@ def run_cmail_health_check(
     ensure_cmail_runtime_list_items(runtime_db_path=runtime_path, canonical_db_path=canonical_path)
 
     actions: list[str] = []
-    cleanup_result = {"orphaned_resend_ids": [], "superseded_draft_ids": [], "restored_draft_ids": []}
+    cleanup_result = {
+        "orphaned_resend_ids": [],
+        "superseded_draft_ids": [],
+        "restored_draft_ids": [],
+        "generated_frg_confirmation_draft_ids": [],
+    }
     if repair:
         cleanup_result = cleanup_cmail_correspondence_artifacts(db_path=runtime_path)
-        if cleanup_result["orphaned_resend_ids"]:
+        if cleanup_result.get("orphaned_resend_ids"):
             actions.append(f"cleaned orphaned resend artifacts: {cleanup_result['orphaned_resend_ids']}")
-        if cleanup_result["superseded_draft_ids"]:
+        if cleanup_result.get("superseded_draft_ids"):
             actions.append(f"cleaned superseded drafts: {cleanup_result['superseded_draft_ids']}")
         if cleanup_result.get("restored_draft_ids"):
             actions.append(f"restored active draft markers: {cleanup_result['restored_draft_ids']}")
+        if cleanup_result.get("generated_frg_confirmation_draft_ids"):
+            actions.append(
+                "cleaned generated FRG confirmation drafts: "
+                f"{cleanup_result['generated_frg_confirmation_draft_ids']}"
+            )
 
     resend_before = resend_queue_status(db_path=runtime_path, limit=max(100, int(resend_process_limit)))
     resend_processed = {
@@ -640,14 +690,28 @@ def run_cmail_health_check(
         port=port,
         timeout_seconds=health_timeout_seconds,
     )
+    service_db_mismatch = False
+    service_db_path = str((service_health.get("payload") or {}).get("db_path") or "").strip()
+    if bool(service_health.get("ok")) and service_db_path and not _paths_match(runtime_path, service_db_path):
+        service_db_mismatch = True
 
     warnings: list[str] = []
+    if service_db_mismatch:
+        warnings.append(
+            "live CMAIL service DB mismatch: "
+            f"command runtime DB is {runtime_path}, service DB is {service_db_path}"
+        )
     if cloudflare_warning:
         warnings.append(f"cloudflare status unavailable: {cloudflare_warning}")
     if backup_warning:
         warnings.append(f"external backup failed: {backup_warning}")
 
-    ok = bool(service_health.get("ok")) and int(resend_after.get("due_count") or 0) == 0 and int(resend_after.get("active_alert_count") or 0) == 0
+    ok = (
+        bool(service_health.get("ok"))
+        and not service_db_mismatch
+        and int(resend_after.get("due_count") or 0) == 0
+        and int(resend_after.get("active_alert_count") or 0) == 0
+    )
 
     return {
         "ok": ok,

@@ -131,6 +131,21 @@ The FRG booking handoff is a signed receiver at `POST /api/frg/bookings`.
 Production FRG site bookings should set `FRG_BOOKING_WEBHOOK_URL`,
 `FRG_BOOKING_WEBHOOK_SECRET`, and `FRG_BOOKING_WEBHOOK_REQUIRED=1` so Stripe-paid
 bookings fail loudly if they cannot create the LifeOps calendar hold.
+The receiver defaults to calendar-first behavior: it records the booking in
+LifeOps without creating a CMAIL draft. Set `FRG_BOOKING_CONFIRMATION_MODE=draft`
+to keep generated confirmations for manual review, or
+`FRG_BOOKING_CONFIRMATION_MODE=send` to queue confirmations automatically.
+
+Forge conference-seat purchases use a separate signed receiver at
+`POST /api/frg/forge`. Production Forge checkout should set
+`FRG_FORGE_WEBHOOK_URL` to that route when it differs from the booking receiver.
+If Forge-specific variables are absent, the FRG site can derive `/api/frg/forge`
+from `FRG_BOOKING_WEBHOOK_URL` and sign with `FRG_BOOKING_WEBHOOK_SECRET`.
+Paid Forge seats are printed in the day sheet as an `Upcoming Conferences`
+section with the attendee email, Stripe session, and required fulfillment action
+until the seat item is completed.
+Forge confirmations follow the same opt-in pattern with
+`FRG_FORGE_CONFIRMATION_MODE=draft` or `FRG_FORGE_CONFIRMATION_MODE=send`.
 
 Smoke-test the signed handoff without using a real customer booking:
 
@@ -151,9 +166,9 @@ The scheduled ORP sweep is described in
 `~/.codex/memories/lifeops-orp-sweep/` and adds generated `orp-project-sweep`
 calendar entries for the day.
 
-The scheduled 11:11 AM print is described in
+The scheduled 8:30 AM print is described in
 `ops/com.sproutseeds.lifeops-noon-day-sheet-print.plist` and implemented by
-`scripts/noon_day_sheet_print.sh`. At `11:11` local time it:
+`scripts/noon_day_sheet_print.sh`. At `8:30` local time it:
 
 - reruns the GitHub action-plan sweep into LifeOps
 - reruns the ORP project-priority sweep into LifeOps

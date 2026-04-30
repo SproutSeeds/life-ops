@@ -61,6 +61,13 @@ FRG_BOOKING_WEBHOOK_MAX_SKEW_SECONDS = 300
 FRG_BOOKING_WEBHOOK_SOURCE = "frg_site_booking"
 FRG_BOOKING_WEBHOOK_SOURCE_TABLE = "stripe_checkout_sessions"
 FRG_BOOKING_INACTIVE_STATUSES = ("canceled", "cancelled", "completed", "done")
+FRG_BOOKING_CONFIRMATION_MODE_ENV = "FRG_BOOKING_CONFIRMATION_MODE"
+FRG_BOOKING_AUTO_SEND_CONFIRMATION_ENV = "FRG_BOOKING_AUTO_SEND_CONFIRMATION"
+FRG_FORGE_WEBHOOK_SECRET_NAME = "FRG_FORGE_WEBHOOK_SECRET"
+FRG_FORGE_WEBHOOK_SOURCE = "frg_site_forge"
+FRG_FORGE_WEBHOOK_SOURCE_TABLE = "stripe_checkout_sessions"
+FRG_FORGE_CONFIRMATION_MODE_ENV = "FRG_FORGE_CONFIRMATION_MODE"
+FRG_FORGE_AUTO_SEND_CONFIRMATION_ENV = "FRG_FORGE_AUTO_SEND_CONFIRMATION"
 MAIL_UI_BACKGROUND_SYNC_INTERVAL_SECONDS = 2.0
 MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 2000
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -146,6 +153,23 @@ _CMAIL_SIGNATURE_PREVIEW_HTML = """
   </table>
 </div>
 """.strip()
+
+
+def _truthy_env_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _frg_confirmation_mode(*, mode_env_name: str, auto_send_env_name: str) -> str:
+    raw_mode = str(os.environ.get(mode_env_name, "") or "").strip().lower().replace("_", "-")
+    if raw_mode in {"send", "sent", "auto", "auto-send", "autosend"}:
+        return "send"
+    if raw_mode in {"draft", "review", "manual", "manual-review"}:
+        return "draft"
+    if raw_mode in {"none", "off", "disabled", "disable", "skip", "0", "false", "no"}:
+        return "none"
+    if _truthy_env_value(os.environ.get(auto_send_env_name, "")):
+        return "send"
+    return "none"
 
 
 def _mail_ui_static_root() -> Path:
@@ -6347,14 +6371,97 @@ def _cleanup_active_cmail_draft_deleted_markers(db_path: Path) -> list[int]:
         return draft_ids
 
 
+def _generated_frg_confirmation_draft_ids(connection: sqlite3.Connection) -> list[int]:
+    cleanup_clauses: list[str] = []
+    if _frg_confirmation_mode(
+        mode_env_name=FRG_BOOKING_CONFIRMATION_MODE_ENV,
+        auto_send_env_name=FRG_BOOKING_AUTO_SEND_CONFIRMATION_ENV,
+    ) != "draft":
+        cleanup_clauses.append(
+            """
+            (
+                subject LIKE 'FRG booking confirmed%'
+                AND body_text LIKE '%Your Fractal Research Group booking is confirmed.%'
+            )
+            """
+        )
+    if _frg_confirmation_mode(
+        mode_env_name=FRG_FORGE_CONFIRMATION_MODE_ENV,
+        auto_send_env_name=FRG_FORGE_AUTO_SEND_CONFIRMATION_ENV,
+    ) != "draft":
+        cleanup_clauses.append(
+            """
+            (
+                subject LIKE '% seat confirmed'
+                AND body_text LIKE '%I have your Stripe checkout email on file%'
+            )
+            """
+        )
+    if not cleanup_clauses:
+        return []
+
+    rows = connection.execute(
+        f"""
+        SELECT id
+        FROM communications
+        WHERE channel = 'email'
+          AND source = 'cmail_draft'
+          AND direction = 'outbound'
+          AND status = 'draft'
+          AND ({" OR ".join(cleanup_clauses)})
+          AND NOT EXISTS (
+              SELECT 1
+              FROM mail_delivery_queue
+              WHERE mail_delivery_queue.communication_id = communications.id
+                AND mail_delivery_queue.status IN ('queued', 'retrying', 'sending')
+          )
+        ORDER BY id
+        """
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
+
+
+def _cleanup_generated_frg_confirmation_drafts(db_path: Path) -> list[int]:
+    with store.open_db(db_path) as connection:
+        draft_ids = _generated_frg_confirmation_draft_ids(connection)
+        if not draft_ids:
+            return []
+
+        deleted_at = store._utc_now_string()
+        note = (
+            "Retired generated FRG confirmation draft; set "
+            "FRG_BOOKING_CONFIRMATION_MODE=draft or FRG_FORGE_CONFIRMATION_MODE=draft "
+            "to keep generated confirmations for manual review."
+        )
+        placeholders = ", ".join("?" for _ in draft_ids)
+        connection.execute(
+            f"""
+            UPDATE communications
+            SET status = 'deleted',
+                deleted_at = COALESCE(deleted_at, ?),
+                notes = CASE
+                    WHEN TRIM(COALESCE(notes, '')) = '' THEN ?
+                    WHEN instr(notes, ?) > 0 THEN notes
+                    ELSE notes || char(10) || ?
+                END
+            WHERE id IN ({placeholders})
+            """,
+            (deleted_at, note, note, note, *draft_ids),
+        )
+        connection.commit()
+        return draft_ids
+
+
 def cleanup_cmail_correspondence_artifacts(*, db_path: Path) -> dict[str, list[int]]:
     orphaned_resend_ids = _cleanup_orphaned_resend_correspondence(db_path)
     superseded_draft_ids = _cleanup_superseded_cmail_drafts(db_path)
     restored_draft_ids = _cleanup_active_cmail_draft_deleted_markers(db_path)
+    generated_frg_confirmation_draft_ids = _cleanup_generated_frg_confirmation_drafts(db_path)
     return {
         "orphaned_resend_ids": orphaned_resend_ids,
         "superseded_draft_ids": superseded_draft_ids,
         "restored_draft_ids": restored_draft_ids,
+        "generated_frg_confirmation_draft_ids": generated_frg_confirmation_draft_ids,
     }
 
 
@@ -6695,6 +6802,39 @@ def _verify_frg_booking_webhook_signature(headers: Any, raw_body: bytes) -> tupl
     return True, ""
 
 
+def _verify_frg_forge_webhook_signature(headers: Any, raw_body: bytes) -> tuple[bool, str]:
+    secret = (
+        os.environ.get(FRG_FORGE_WEBHOOK_SECRET_NAME, "").strip()
+        or str(credentials.resolve_secret(name=FRG_FORGE_WEBHOOK_SECRET_NAME) or "").strip()
+        or os.environ.get(FRG_BOOKING_WEBHOOK_SECRET_NAME, "").strip()
+        or str(credentials.resolve_secret(name=FRG_BOOKING_WEBHOOK_SECRET_NAME) or "").strip()
+    )
+    if not secret:
+        return False, "frg_forge_webhook_secret_not_configured"
+
+    timestamp = str(headers.get("X-FRG-Forge-Timestamp") or "").strip()
+    signature = str(headers.get("X-FRG-Forge-Signature") or "").strip()
+    if signature.startswith("v1="):
+        signature = signature[3:]
+    if not timestamp or not signature:
+        return False, "missing_frg_forge_signature"
+
+    try:
+        timestamp_value = int(timestamp)
+    except ValueError:
+        return False, "invalid_frg_forge_timestamp"
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    if abs(now - timestamp_value) > FRG_BOOKING_WEBHOOK_MAX_SKEW_SECONDS:
+        return False, "stale_frg_forge_signature"
+
+    expected = _frg_booking_webhook_signature(raw_body, timestamp=timestamp, secret=secret)
+    if not hmac.compare_digest(expected, signature):
+        return False, "invalid_frg_forge_signature"
+
+    return True, ""
+
+
 def _frg_booking_text(value: Any, limit: int = 1800) -> str:
     return " ".join(str(value or "").strip().split())[:limit]
 
@@ -6928,6 +7068,10 @@ def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> di
     if not start_time or not end_time:
         raise ValueError("frg_booking_requires_valid_slot_time")
     source_id = _frg_booking_source_id(booking_id)
+    confirmation_mode = _frg_confirmation_mode(
+        mode_env_name=FRG_BOOKING_CONFIRMATION_MODE_ENV,
+        auto_send_env_name=FRG_BOOKING_AUTO_SEND_CONFIRMATION_ENV,
+    )
     draft: dict[str, Any] | None = None
     sent: dict[str, Any] | None = None
 
@@ -6971,23 +7115,156 @@ def _handle_frg_booking_payload(*, db_path: Path, payload: dict[str, Any]) -> di
                 tags=["frg", "booking", event_name.replace(".", "-")],
                 commit=False,
             )
-            draft = _save_cmail_draft(
-                connection,
-                {
-                    "subject": f"FRG booking confirmed · {booking.get('selectedSlotLabel') or target_day.isoformat()}",
-                    "to": formataddr((name, email)),
-                    "body_text": _frg_booking_confirmation_body(payload),
-                },
-            )
+            if confirmation_mode in {"draft", "send"}:
+                draft = _save_cmail_draft(
+                    connection,
+                    {
+                        "subject": f"FRG booking confirmed · {booking.get('selectedSlotLabel') or target_day.isoformat()}",
+                        "to": formataddr((name, email)),
+                        "body_text": _frg_booking_confirmation_body(payload),
+                    },
+                )
             duplicate = False
         else:
             entry_id = int(existing["id"])
             duplicate = True
 
-    if (
-        draft is not None
-        and os.environ.get("FRG_BOOKING_AUTO_SEND_CONFIRMATION", "").strip().lower() in {"1", "true", "yes", "on"}
-    ):
+    if draft is not None and confirmation_mode == "send":
+        sent = send_cmail_draft(db_path=db_path, draft_id=int(draft["id"]))
+
+    return {
+        "calendar_entry_id": entry_id,
+        "cmail_draft_id": int(draft["id"]) if draft is not None else None,
+        "cmail_sent": sent,
+        "duplicate": duplicate,
+    }
+
+
+def _frg_forge_entry_day(value: Any) -> date:
+    raw_value = _frg_booking_text(value, limit=64)
+    if raw_value:
+        try:
+            return date.fromisoformat(raw_value[:10])
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).date()
+
+
+def _format_frg_forge_notes(payload: dict[str, Any]) -> str:
+    seat = payload.get("conferenceSeat") if isinstance(payload.get("conferenceSeat"), dict) else {}
+    forge = payload.get("forge") if isinstance(payload.get("forge"), dict) else {}
+    payment = payload.get("payment") if isinstance(payload.get("payment"), dict) else {}
+    life_ops = payload.get("lifeOps") if isinstance(payload.get("lifeOps"), dict) else {}
+    lines = [
+        f"Email: {_frg_booking_text(seat.get('attendeeEmail') or forge.get('email'), limit=240)}",
+        f"Name: {_frg_booking_text(seat.get('attendeeName') or forge.get('name'), limit=240)}",
+        f"Event: {_frg_booking_text(payload.get('event'), limit=120)}",
+        f"Conference: {_frg_booking_text(seat.get('conferenceTitle'), limit=240)}",
+        f"Conference ID: {_frg_booking_text(seat.get('conferenceId'), limit=240)}",
+        f"Seat ID: {_frg_booking_text(seat.get('seatId') or forge.get('id'), limit=240)}",
+        f"Seat label: {_frg_booking_text(seat.get('seatLabel'), limit=240)}",
+        f"Location: {_frg_booking_text(seat.get('locationLabel'), limit=240)}",
+        f"Fulfillment: {_frg_booking_text(seat.get('fulfillmentStatus'), limit=120)}",
+        f"Required action: {_frg_booking_text(life_ops.get('requiredAction'), limit=480)}",
+    ]
+    purchased_at = _frg_booking_text(seat.get("purchasedAt") or forge.get("createdAt"), limit=120)
+    if purchased_at:
+        lines.append(f"Purchased at: {purchased_at}")
+    stripe_session_id = _frg_booking_text(payment.get("stripeCheckoutSessionId"), limit=240)
+    if stripe_session_id:
+        lines.append(f"Stripe session: {stripe_session_id}")
+    total_cents = payment.get("amountTotalCents")
+    if total_cents is not None:
+        lines.append(f"Payment total cents: {total_cents}")
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _frg_forge_confirmation_body(payload: dict[str, Any]) -> str:
+    seat = payload.get("conferenceSeat") if isinstance(payload.get("conferenceSeat"), dict) else {}
+    forge = payload.get("forge") if isinstance(payload.get("forge"), dict) else {}
+    name = _frg_booking_text(seat.get("attendeeName") or forge.get("name"), limit=120)
+    first_name = name.split(" ")[0] if name else "there"
+    conference_title = _frg_booking_text(seat.get("conferenceTitle"), limit=180) or "FRG Forge"
+    lines = [
+        f"Hi {first_name},",
+        "",
+        f"Your {conference_title} seat is confirmed.",
+        "",
+        "I have your Stripe checkout email on file and will send the venue, livestream, software bundle, and one-on-one session details here.",
+        "",
+        "If you need the details sent somewhere else, reply with the right email address.",
+    ]
+    return "\n".join(lines)
+
+
+def _handle_frg_forge_payload(*, db_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    event_name = _frg_booking_text(payload.get("event"), limit=120)
+    if event_name != "forge.checkout.completed":
+        raise ValueError("unsupported_frg_forge_event")
+
+    seat = payload.get("conferenceSeat") if isinstance(payload.get("conferenceSeat"), dict) else {}
+    forge = payload.get("forge") if isinstance(payload.get("forge"), dict) else {}
+    seat_id = _frg_booking_text(seat.get("seatId") or forge.get("id"), limit=240)
+    name = _frg_booking_text(seat.get("attendeeName") or forge.get("name"), limit=240)
+    email = _frg_booking_text(seat.get("attendeeEmail") or forge.get("email"), limit=240).lower()
+    conference_title = _frg_booking_text(seat.get("conferenceTitle"), limit=240) or "FRG Forge"
+    if not seat_id or not email:
+        raise ValueError("frg_forge_requires_seat_id_and_email")
+
+    entry_day = _frg_forge_entry_day(seat.get("conferenceStartsAt") or seat.get("purchasedAt") or forge.get("createdAt"))
+    source_id = _frg_booking_source_id(seat_id)
+    confirmation_mode = _frg_confirmation_mode(
+        mode_env_name=FRG_FORGE_CONFIRMATION_MODE_ENV,
+        auto_send_env_name=FRG_FORGE_AUTO_SEND_CONFIRMATION_ENV,
+    )
+    draft: dict[str, Any] | None = None
+    sent: dict[str, Any] | None = None
+
+    with store.open_db(db_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM calendar_entries
+            WHERE source = ?
+              AND source_table = ?
+              AND source_id = ?
+            LIMIT 1
+            """,
+            (FRG_FORGE_WEBHOOK_SOURCE, FRG_FORGE_WEBHOOK_SOURCE_TABLE, source_id),
+        ).fetchone()
+        if existing is None:
+            display_name = name or email
+            entry_id = store.add_calendar_entry(
+                connection,
+                entry_date=entry_day,
+                title=f"{conference_title} seat: {display_name}",
+                entry_type="task",
+                status="planned",
+                priority="high",
+                list_name="professional",
+                source=FRG_FORGE_WEBHOOK_SOURCE,
+                source_table=FRG_FORGE_WEBHOOK_SOURCE_TABLE,
+                source_id=source_id,
+                notes=_format_frg_forge_notes(payload),
+                tags=["frg", "forge", "conference", "conference-seat", event_name.replace(".", "-")],
+                commit=False,
+            )
+            if confirmation_mode in {"draft", "send"}:
+                draft = _save_cmail_draft(
+                    connection,
+                    {
+                        "subject": f"{conference_title} seat confirmed",
+                        "to": formataddr((name, email)) if name else email,
+                        "body_text": _frg_forge_confirmation_body(payload),
+                    },
+                )
+            duplicate = False
+        else:
+            entry_id = int(existing["id"])
+            duplicate = True
+
+    if draft is not None and confirmation_mode == "send":
         sent = send_cmail_draft(db_path=db_path, draft_id=int(draft["id"]))
 
     return {
@@ -9229,7 +9506,7 @@ def _make_handler(
                 )
                 return
 
-            if path.startswith("/api/") and path != "/api/frg/bookings":
+            if path.startswith("/api/") and path not in {"/api/frg/bookings", "/api/frg/forge"}:
                 if not self._require_auth_or_respond(html_response=False):
                     return
 
@@ -9248,6 +9525,26 @@ def _make_handler(
                     return
                 try:
                     result = _handle_frg_booking_payload(db_path=db_path, payload=payload)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                snapshot_cache.invalidate()
+                _set_default_overview_cache(None)
+                self._send_json({"ok": True, **result})
+                return
+
+            if path == "/api/frg/forge":
+                raw_body = getattr(self, "_last_raw_body", b"")
+                verified, verification_error = _verify_frg_forge_webhook_signature(self.headers, raw_body)
+                if not verified:
+                    status_code = 503 if verification_error == "frg_forge_webhook_secret_not_configured" else 401
+                    self._send_json({"error": verification_error}, status_code=status_code)
+                    return
+                try:
+                    result = _handle_frg_forge_payload(db_path=db_path, payload=payload)
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, status_code=400)
                     return

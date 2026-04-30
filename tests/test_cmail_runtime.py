@@ -24,6 +24,8 @@ class CmailRuntimeTests(unittest.TestCase):
         self.original_life_ops_home = os.environ.get(store.LIFE_OPS_HOME_ENV)
         self.original_legacy_home = os.environ.get(cmail_runtime.DEFAULT_CMAIL_LEGACY_HOME_ENV)
         self.original_backup_root = os.environ.get(cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV)
+        self.original_runtime_db = os.environ.get(cmail_runtime.DEFAULT_CMAIL_RUNTIME_DB_ENV)
+        self.original_allow_db_mismatch = os.environ.get(cmail_runtime.DEFAULT_CMAIL_ALLOW_DB_MISMATCH_ENV)
         os.environ[vault_crypto.MASTER_KEY_NAME] = vault_crypto._b64url_encode(b"c" * 32)
 
     def tearDown(self) -> None:
@@ -43,6 +45,14 @@ class CmailRuntimeTests(unittest.TestCase):
             os.environ.pop(cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV, None)
         else:
             os.environ[cmail_runtime.DEFAULT_CMAIL_EXTERNAL_BACKUP_ROOT_ENV] = self.original_backup_root
+        if self.original_runtime_db is None:
+            os.environ.pop(cmail_runtime.DEFAULT_CMAIL_RUNTIME_DB_ENV, None)
+        else:
+            os.environ[cmail_runtime.DEFAULT_CMAIL_RUNTIME_DB_ENV] = self.original_runtime_db
+        if self.original_allow_db_mismatch is None:
+            os.environ.pop(cmail_runtime.DEFAULT_CMAIL_ALLOW_DB_MISMATCH_ENV, None)
+        else:
+            os.environ[cmail_runtime.DEFAULT_CMAIL_ALLOW_DB_MISMATCH_ENV] = self.original_allow_db_mismatch
         self.temp_dir.cleanup()
 
     def test_ensure_cmail_app_secret_creates_reuses_and_rotates_unlock_code(self) -> None:
@@ -159,6 +169,56 @@ class CmailRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 cmail_runtime.default_cmail_runtime_db_path().resolve(strict=False),
                 resolved.resolve(strict=False),
+            )
+
+    def test_default_cmail_runtime_path_uses_home_state_root_without_life_ops_home(self) -> None:
+        os.environ.pop(store.LIFE_OPS_HOME_ENV, None)
+        os.environ.pop(cmail_runtime.DEFAULT_CMAIL_RUNTIME_DB_ENV, None)
+        fake_home = Path(self.temp_dir.name) / "home"
+
+        with mock.patch.object(cmail_runtime.Path, "home", return_value=fake_home):
+            self.assertEqual(
+                fake_home / ".lifeops" / "data" / "cmail_runtime.db",
+                cmail_runtime.default_cmail_runtime_db_path(),
+            )
+
+    def test_resolve_cmail_db_path_maps_legacy_development_runtime_to_home_default(self) -> None:
+        os.environ.pop(store.LIFE_OPS_HOME_ENV, None)
+        os.environ.pop(cmail_runtime.DEFAULT_CMAIL_RUNTIME_DB_ENV, None)
+        fake_home = Path(self.temp_dir.name) / "home"
+        fake_package_root = Path(self.temp_dir.name) / "life-ops"
+
+        with (
+            mock.patch.object(cmail_runtime.Path, "home", return_value=fake_home),
+            mock.patch("life_ops.store.package_root", return_value=fake_package_root),
+        ):
+            resolved = cmail_runtime.resolve_cmail_db_path(
+                fake_package_root / "data" / "cmail_runtime.db"
+            )
+
+        self.assertEqual(fake_home / ".lifeops" / "data" / "cmail_runtime.db", resolved)
+
+    def test_ensure_cmail_db_matches_live_service_rejects_mismatch(self) -> None:
+        live_runtime_path = Path(self.temp_dir.name) / "live" / "cmail_runtime.db"
+        wrong_runtime_path = Path(self.temp_dir.name) / "wrong" / "cmail_runtime.db"
+        service_health = {
+            "ok": True,
+            "url": "http://127.0.0.1:4311/api/health",
+            "payload": {"ok": True, "db_path": str(live_runtime_path)},
+            "error": "",
+        }
+
+        with mock.patch("life_ops.cmail_runtime._check_cmail_service_http_health", return_value=service_health):
+            with self.assertRaisesRegex(RuntimeError, "CMAIL database mismatch"):
+                cmail_runtime.ensure_cmail_db_matches_live_service(
+                    runtime_db_path=wrong_runtime_path,
+                )
+
+            self.assertEqual(
+                service_health,
+                cmail_runtime.ensure_cmail_db_matches_live_service(
+                    runtime_db_path=live_runtime_path,
+                ),
             )
 
     def test_runtime_worker_failure_records_alert_and_recovery_clears_it(self) -> None:

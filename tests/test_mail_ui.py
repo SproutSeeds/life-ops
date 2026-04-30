@@ -588,6 +588,44 @@ class MailUiTests(unittest.TestCase):
         self.assertEqual("deleted", str(row["status"] or ""))
         self.assertIn("orphaned outbound Resend artifact", str(row["notes"] or ""))
 
+    def test_cleanup_generated_frg_confirmation_drafts_keeps_manual_drafts(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            generated = mail_ui._save_cmail_draft(
+                connection,
+                {
+                    "subject": "FRG booking confirmed · Apr 18, 2026, 1:00 PM",
+                    "to": "Ada Lovelace <ada@example.com>",
+                    "body_text": (
+                        "Hi Ada,\n\n"
+                        "Your Fractal Research Group booking is confirmed.\n\n"
+                        "When: Apr 18, 2026, 1:00 PM"
+                    ),
+                },
+            )
+            manual = mail_ui._save_cmail_draft(
+                connection,
+                {
+                    "subject": "FRG booking confirmed · manual follow-up",
+                    "to": "Ada Lovelace <ada@example.com>",
+                    "body_text": "Manual note I am still editing.",
+                },
+            )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FRG_BOOKING_CONFIRMATION_MODE": "",
+                "FRG_FORGE_CONFIRMATION_MODE": "",
+            },
+        ):
+            cleaned_ids = mail_ui._cleanup_generated_frg_confirmation_drafts(self.db_path)
+
+        self.assertEqual([int(generated["id"])], cleaned_ids)
+        drafts = mail_ui.list_cmail_drafts(db_path=self.db_path)
+        draft_ids = [int(draft["id"]) for draft in drafts]
+        self.assertIn(int(manual["id"]), draft_ids)
+        self.assertNotIn(int(generated["id"]), draft_ids)
+
     def test_mail_contacts_are_persisted_and_searchable(self) -> None:
         with store.open_db(self.db_path) as connection:
             contacts = store.list_mail_contacts(connection, limit=20)
