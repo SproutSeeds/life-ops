@@ -80,6 +80,9 @@ _SIGNATURE_TAIL_RE = re.compile(r"(?:\s|^)--\s+[^\n]+$", re.DOTALL)
 _GMAIL_QUOTE_RE = re.compile(r"""<div\b[^>]*\bclass\s*=\s*(["'])[^"']*\bgmail_quote\b[^"']*\1[^>]*>""", re.IGNORECASE)
 _PLAIN_TEXT_URL_RE = re.compile(r"(?P<url>\bhttps?://[^\s<>'\"]+|\bmailto:[^\s<>'\"]+|\bwww\.[^\s<>'\"]+)", re.IGNORECASE)
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}"
+_CMAIL_DEFAULT_SENDER = "Cody <cody@frg.earth>"
+_CMAIL_DECKFOUND_SUPPORT_SENDER = "DeckFound Support <support@deckfound.com>"
+_CMAIL_DECKFOUND_SUPPORT_ADDRESS = "support@deckfound.com"
 _CMAIL_SIGNATURE_TEXT = (
     "Best,\n\n"
     "Cody Mitchell\n"
@@ -89,12 +92,19 @@ _CMAIL_SIGNATURE_TEXT = (
     "https://github.com/SproutSeeds\n"
     "cody@frg.earth"
 )
+_CMAIL_DECKFOUND_SIGNATURE_TEXT = (
+    "Best,\n\n"
+    "DeckFound Support\n"
+    "https://deckfound.com\n"
+    "support@deckfound.com"
+)
 _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_SPACED = "Best,\n\nCody Mitchell\nFractal Research Group\nhttps://frg.earth\ncody@frg.earth"
 _CMAIL_LEGACY_SIGNATURE_TEXT_SPACED = "Best,\n\nCody Mitchell\nFractal Research Group\ncody@frg.earth"
 _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE = "Best,\nCody Mitchell\nFractal Research Group\nhttps://frg.earth\ncody@frg.earth"
 _CMAIL_LEGACY_SIGNATURE_TEXT = "Best,\nCody Mitchell\nFractal Research Group\ncody@frg.earth"
 _CMAIL_KNOWN_SIGNATURE_TEXTS = (
     _CMAIL_SIGNATURE_TEXT,
+    _CMAIL_DECKFOUND_SIGNATURE_TEXT,
     _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_SPACED,
     _CMAIL_LEGACY_SIGNATURE_TEXT_SPACED,
     _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE,
@@ -148,6 +158,54 @@ _CMAIL_SIGNATURE_PREVIEW_HTML = """
         <div><a href="https://www.npmjs.com/~sproutseeds" style="color:#b8ff4d; text-decoration:none;">npmjs.com/~sproutseeds</a></div>
         <div><a href="https://github.com/SproutSeeds" style="color:#b8ff4d; text-decoration:none;">github.com/SproutSeeds</a></div>
         <div><a href="mailto:cody@frg.earth" style="color:#edf2eb; text-decoration:none;">cody@frg.earth</a></div>
+      </td>
+    </tr>
+  </table>
+</div>
+""".strip()
+
+_CMAIL_DECKFOUND_SIGNATURE_EMAIL_HTML = """
+<div style="margin-top:24px;">
+  <p style="margin:0 0 24px 0; color:#111111; font:500 15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">Best,</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="padding:0 14px 0 0; vertical-align:top;">
+        <img
+          src="https://deckfound.com/assets/favicon-192.png"
+          alt="DeckFound mark"
+          width="44"
+          height="44"
+          style="display:block; width:44px; height:44px; border:0; border-radius:9px;"
+        >
+      </td>
+      <td style="vertical-align:top; color:#111111; font:500 14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
+        <div style="font-weight:700;">DeckFound Support</div>
+        <div><a href="https://deckfound.com" style="color:#1155cc; text-decoration:none;">deckfound.com</a></div>
+        <div><a href="mailto:support@deckfound.com" style="color:#111111; text-decoration:none;">support@deckfound.com</a></div>
+      </td>
+    </tr>
+  </table>
+</div>
+""".strip()
+
+_CMAIL_DECKFOUND_SIGNATURE_PREVIEW_HTML = """
+<div style="margin-top:24px;">
+  <p style="margin:0 0 24px 0; color:#edf2eb; font:500 15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">Best,</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="padding:0 14px 0 0; vertical-align:top;">
+        <img
+          src="https://deckfound.com/assets/favicon-192.png"
+          alt="DeckFound mark"
+          width="44"
+          height="44"
+          style="display:block; width:44px; height:44px; border:0; border-radius:9px;"
+        >
+      </td>
+      <td style="vertical-align:top; color:#edf2eb; font:500 14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        <div style="font-weight:700;">DeckFound Support</div>
+        <div><a href="https://deckfound.com" style="color:#b8ff4d; text-decoration:none;">deckfound.com</a></div>
+        <div><a href="mailto:support@deckfound.com" style="color:#edf2eb; text-decoration:none;">support@deckfound.com</a></div>
       </td>
     </tr>
   </table>
@@ -1780,7 +1838,8 @@ _HTML = """<!doctype html>
     const SERVER_BOOTSTRAP_OVERVIEW = __INITIAL_OVERVIEW_JSON__;
     const CMAIL_SIGNATURE_TEXT = __CMAIL_SIGNATURE_TEXT_JSON__;
     const CMAIL_KNOWN_SIGNATURE_TEXTS = __CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__;
-    const CMAIL_SIGNATURE_PREVIEW_HTML = __CMAIL_SIGNATURE_PREVIEW_HTML_JSON__;
+    const CMAIL_DEFAULT_SENDER = __CMAIL_DEFAULT_SENDER_JSON__;
+    const CMAIL_SENDER_IDENTITIES = __CMAIL_SENDER_IDENTITIES_JSON__;
     const TAILNET_ACCESS_MESSAGE = __CMAIL_TAILNET_ACCESS_MESSAGE_JSON__;
     const CORRESPONDENCE_SOURCE = "correspondence";
 
@@ -1874,10 +1933,14 @@ _HTML = """<!doctype html>
         .join("");
     }
 
-    function composeDraftPreviewHtml(bodyText) {
+    function composeDraftPreviewHtml(bodyText, fromValue = CMAIL_DEFAULT_SENDER) {
       const unsigned = normalizeDraftPreviewBody(bodyText);
       const bodyMarkup = paragraphHtml(unsigned);
-      return bodyMarkup ? `${bodyMarkup}${CMAIL_SIGNATURE_PREVIEW_HTML}` : CMAIL_SIGNATURE_PREVIEW_HTML;
+      const identity = CMAIL_SENDER_IDENTITIES.find((entry) => entry.value === fromValue)
+        || CMAIL_SENDER_IDENTITIES.find((entry) => entry.value === CMAIL_DEFAULT_SENDER)
+        || CMAIL_SENDER_IDENTITIES[0];
+      const signatureHtml = String(identity?.signature_preview_html || "");
+      return bodyMarkup ? `${bodyMarkup}${signatureHtml}` : signatureHtml;
     }
 
     function persistPendingDeleteState() {
@@ -3223,6 +3286,7 @@ _HTML = """<!doctype html>
     function blankDraft() {
       return {
         id: null,
+        from: CMAIL_DEFAULT_SENDER,
         subject: "",
         label: "(untitled draft)",
         to: "",
@@ -3245,6 +3309,7 @@ _HTML = """<!doctype html>
         ...(seed || {}),
       };
       next.subject = String(next.subject || "");
+      next.from = String(next.from || CMAIL_DEFAULT_SENDER);
       next.to = String(next.to || "");
       next.cc = String(next.cc || "");
       next.bcc = String(next.bcc || "");
@@ -3296,6 +3361,7 @@ _HTML = """<!doctype html>
       if (!message) return;
       const replySeed = message?.drafts?.reply || {};
       state.draftComposerSeed = seededDraft({
+        from: String(replySeed.from || CMAIL_DEFAULT_SENDER),
         to: replyRecipientValue(message),
         cc: String(replySeed.cc || ""),
         subject: String(replySeed.subject || ""),
@@ -3473,11 +3539,12 @@ _HTML = """<!doctype html>
       const forceRemote = Boolean(options?.forceRemote);
       if (state.draftSaveInFlight) return null;
       const subjectInput = $("draftSubject");
+      const fromInput = $("draftFrom");
       const toInput = $("draftTo");
       const ccInput = $("draftCc");
       const bccInput = $("draftBcc");
       const bodyInput = $("draftBody");
-      if (!subjectInput || !toInput || !ccInput || !bccInput || !bodyInput) return null;
+      if (!subjectInput || !fromInput || !toInput || !ccInput || !bccInput || !bodyInput) return null;
       state.draftSaveInFlight = true;
       state.draftStatus = "saving...";
       renderDraftStatus();
@@ -3485,6 +3552,7 @@ _HTML = """<!doctype html>
         const activeDraft = selectedDraft() || blankDraft();
         const localId = Number(state.selectedDraftId || 0) || nextTemporaryDraftId();
         const payload = {
+          from: fromInput.value,
           subject: subjectInput.value,
           to: toInput.value,
           cc: ccInput.value,
@@ -3496,6 +3564,7 @@ _HTML = """<!doctype html>
         };
         const localDraft = {
           id: localId,
+          from: payload.from,
           subject: payload.subject,
           label: localDraftLabel(payload.subject),
           to: payload.to,
@@ -3695,8 +3764,9 @@ _HTML = """<!doctype html>
     function renderDraftPreview() {
       const previewNode = $("draftPreview");
       const bodyInput = $("draftBody");
-      if (!previewNode || !bodyInput) return;
-      previewNode.innerHTML = composeDraftPreviewHtml(bodyInput.value);
+      const fromInput = $("draftFrom");
+      if (!previewNode || !bodyInput || !fromInput) return;
+      previewNode.innerHTML = composeDraftPreviewHtml(bodyInput.value, fromInput.value);
     }
 
     function draftReplyContextMarkup(draft) {
@@ -3760,6 +3830,14 @@ _HTML = """<!doctype html>
                 </div>
               </div>
             ` : ""}
+            <div class="draft-field">
+              <label for="draftFrom">From</label>
+              <select id="draftFrom">
+                ${CMAIL_SENDER_IDENTITIES.map((identity) => `
+                  <option value="${escapeHtml(identity.value)}" ${identity.value === entry.from ? "selected" : ""}>${escapeHtml(identity.label)}</option>
+                `).join("")}
+              </select>
+            </div>
             <div class="draft-field">
               <label for="draftSubject">Subject</label>
               <input id="draftSubject" type="text" value="${escapeHtml(entry.subject || "")}" placeholder="Draft subject">
@@ -3838,6 +3916,10 @@ _HTML = """<!doctype html>
       const bodyInput = $("draftBody");
       if (bodyInput) {
         bodyInput.addEventListener("input", () => renderDraftPreview());
+      }
+      const fromInput = $("draftFrom");
+      if (fromInput) {
+        fromInput.addEventListener("change", () => renderDraftPreview());
       }
       for (const fieldId of ["draftTo", "draftCc", "draftBcc"]) {
         const input = $(fieldId);
@@ -5416,6 +5498,7 @@ def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
     draft_id = int(row["id"])
     return {
         "id": draft_id,
+        "from": _cmail_sender_identity(str(row["external_from"] or "")),
         "subject": str(row["subject"] or ""),
         "label": _draft_label(str(row["subject"] or "")),
         "to": str(row["external_to"] or ""),
@@ -5486,6 +5569,48 @@ def _sorted_drafts(drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _cmail_sender_identity(value: str = "") -> str:
+    sender_email = parseaddr(str(value or ""))[1].strip().lower()
+    if sender_email == _CMAIL_DECKFOUND_SUPPORT_ADDRESS:
+        return _CMAIL_DECKFOUND_SUPPORT_SENDER
+    return _CMAIL_DEFAULT_SENDER
+
+
+def _cmail_sender_reply_to(value: str = "") -> str:
+    sender = _cmail_sender_identity(value)
+    return parseaddr(sender)[1].strip()
+
+
+def _cmail_sender_for_message(
+    *,
+    direction: str = "",
+    external_from: str = "",
+    external_to: str = "",
+) -> str:
+    clean_direction = str(direction or "").strip().lower()
+    identity_field = external_from if clean_direction == "outbound" else external_to
+    recipient_addresses = {
+        str(email or "").strip().lower()
+        for _name, email in getaddresses([str(identity_field or "")])
+        if str(email or "").strip()
+    }
+    if _CMAIL_DECKFOUND_SUPPORT_ADDRESS in recipient_addresses:
+        return _CMAIL_DECKFOUND_SUPPORT_SENDER
+    return _CMAIL_DEFAULT_SENDER
+
+
+def _cmail_signature_text(sender: str = "") -> str:
+    if _cmail_sender_identity(sender) == _CMAIL_DECKFOUND_SUPPORT_SENDER:
+        return _CMAIL_DECKFOUND_SIGNATURE_TEXT
+    return _CMAIL_SIGNATURE_TEXT
+
+
+def _cmail_signature_email_html(sender: str = "") -> str:
+    if _cmail_sender_identity(sender) == _CMAIL_DECKFOUND_SUPPORT_SENDER:
+        return _CMAIL_DECKFOUND_SIGNATURE_EMAIL_HTML
+    return _CMAIL_SIGNATURE_EMAIL_HTML
+
+
 def _strip_trailing_cmail_signature(body_text: str) -> str:
     clean = str(body_text or "").rstrip()
     changed = True
@@ -5500,11 +5625,12 @@ def _strip_trailing_cmail_signature(body_text: str) -> str:
     return clean
 
 
-def _compose_cmail_body_text(body_text: str) -> str:
+def _compose_cmail_body_text(body_text: str, *, sender: str = _CMAIL_DEFAULT_SENDER) -> str:
     unsigned = _strip_trailing_cmail_signature(body_text)
+    signature = _cmail_signature_text(sender)
     if not unsigned:
-        return _CMAIL_SIGNATURE_TEXT
-    return f"{unsigned}\n\n{_CMAIL_SIGNATURE_TEXT}"
+        return signature
+    return f"{unsigned}\n\n{signature}"
 
 
 def _paragraph_html(text: str) -> str:
@@ -5520,12 +5646,13 @@ def _paragraph_html(text: str) -> str:
     )
 
 
-def _compose_cmail_html_body(body_text: str) -> str:
+def _compose_cmail_html_body(body_text: str, *, sender: str = _CMAIL_DEFAULT_SENDER) -> str:
     unsigned = _strip_trailing_cmail_signature(body_text)
     body_markup = _paragraph_html(unsigned)
+    signature_html = _cmail_signature_email_html(sender)
     if body_markup:
-        return f"{body_markup}\n{_CMAIL_SIGNATURE_EMAIL_HTML}"
-    return _CMAIL_SIGNATURE_EMAIL_HTML
+        return f"{body_markup}\n{signature_html}"
+    return signature_html
 
 
 def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -5542,6 +5669,7 @@ def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
     draft_id = int(payload.get("id") or 0)
+    external_from = _cmail_sender_identity(str(payload.get("from") or ""))
     subject = str(payload.get("subject") or "").strip()
     external_to = str(payload.get("to") or "").strip()
     external_cc = str(payload.get("cc") or "").strip()
@@ -5555,8 +5683,8 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
         for item in (payload.get("attachment_paths") or [])
         if str(item).strip()
     ]
-    body_text = _compose_cmail_body_text(raw_body_text)
-    html_body = _compose_cmail_html_body(raw_body_text)
+    body_text = _compose_cmail_body_text(raw_body_text, sender=external_from)
+    html_body = _compose_cmail_html_body(raw_body_text, sender=external_from)
     happened_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     snippet = _draft_snippet(body_text)
 
@@ -5565,7 +5693,7 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             """
             UPDATE communications
             SET subject = ?, happened_at = ?, status = 'draft', source = 'cmail_draft',
-                external_to = ?, external_cc = ?, external_bcc = ?, body_text = ?, html_body = ?,
+                external_from = ?, external_to = ?, external_cc = ?, external_bcc = ?, body_text = ?, html_body = ?,
                 snippet = ?, direction = 'outbound', channel = 'email',
                 in_reply_to = ?, references_json = ?, thread_key = ?, deleted_at = NULL
             WHERE id = ? AND source = 'cmail_draft'
@@ -5573,6 +5701,7 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             (
                 subject,
                 happened_at,
+                external_from,
                 external_to,
                 external_cc,
                 external_bcc,
@@ -5619,7 +5748,7 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
         (
             subject,
             happened_at,
-            "Cody <cody@frg.earth>",
+            external_from,
             external_to,
             external_cc,
             external_bcc,
@@ -5672,6 +5801,7 @@ def get_cmail_draft_scaffold(
     if not isinstance(scaffold, dict):
         raise KeyError(f"draft scaffold {mode!r} not found for communication {communication_id}")
     return {
+        "from": str(scaffold.get("from") or _CMAIL_DEFAULT_SENDER),
         "subject": str(scaffold.get("subject") or ""),
         "to": str(scaffold.get("to") or ""),
         "cc": str(scaffold.get("cc") or ""),
@@ -5701,9 +5831,10 @@ def send_cmail_draft(
             raise KeyError(f"draft {draft_id} not found")
         if str(row["status"] or "") != "draft":
             raise ValueError(f"draft {draft_id} is not sendable")
+        from_value = _cmail_sender_identity(str(row["external_from"] or ""))
         subject = str(row["subject"] or "")
-        body_text = str(row["body_text"] or "")
-        html_body = _compose_cmail_html_body(str(row["body_text"] or ""))
+        body_text = _compose_cmail_body_text(str(row["body_text"] or ""), sender=from_value)
+        html_body = _compose_cmail_html_body(str(row["body_text"] or ""), sender=from_value)
         to_values = _address_field_values(str(row["external_to"] or ""))
         cc_values = _address_field_values(str(row["external_cc"] or ""))
         bcc_values = _address_field_values(str(row["external_bcc"] or ""))
@@ -5735,6 +5866,8 @@ def send_cmail_draft(
             to=to_values,
             cc=cc_values,
             bcc=bcc_values,
+            from_email=from_value,
+            reply_to=_cmail_sender_reply_to(from_value),
             subject=subject,
             text=body_text,
             html=html_body,
@@ -5892,7 +6025,13 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
         if direction == "outbound"
         else (external_reply_to or external_from)
     )
+    sender = _cmail_sender_for_message(
+        direction=direction,
+        external_from=external_from,
+        external_to=external_to,
+    )
     common = {
+        "from": sender,
         "subject": _reply_subject(subject),
         "in_reply_to": message_id,
         "references": references,
@@ -5915,6 +6054,7 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
             "cc": external_cc,
         },
         "new_draft": {
+            "from": sender,
             "label": "fresh draft scaffold",
             "meta": "Fresh draft keeps the recipient context but drops thread metadata.",
             "to": reply_target,
@@ -8306,7 +8446,24 @@ def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
         .replace("__INITIAL_OVERVIEW_JSON__", json.dumps(initial_overview or {}))
         .replace("__CMAIL_SIGNATURE_TEXT_JSON__", json.dumps(_CMAIL_SIGNATURE_TEXT))
         .replace("__CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__", json.dumps(list(_CMAIL_KNOWN_SIGNATURE_TEXTS)))
-        .replace("__CMAIL_SIGNATURE_PREVIEW_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_PREVIEW_HTML))
+        .replace("__CMAIL_DEFAULT_SENDER_JSON__", json.dumps(_CMAIL_DEFAULT_SENDER))
+        .replace(
+            "__CMAIL_SENDER_IDENTITIES_JSON__",
+            json.dumps(
+                [
+                    {
+                        "value": _CMAIL_DEFAULT_SENDER,
+                        "label": "Cody · cody@frg.earth",
+                        "signature_preview_html": _CMAIL_SIGNATURE_PREVIEW_HTML,
+                    },
+                    {
+                        "value": _CMAIL_DECKFOUND_SUPPORT_SENDER,
+                        "label": "DeckFound Support · support@deckfound.com",
+                        "signature_preview_html": _CMAIL_DECKFOUND_SIGNATURE_PREVIEW_HTML,
+                    },
+                ]
+            ),
+        )
         .replace("__CMAIL_TAILNET_ACCESS_MESSAGE_JSON__", json.dumps(CMAIL_TAILNET_ACCESS_MESSAGE))
     )
 

@@ -50,6 +50,23 @@ class MailUiTests(unittest.TestCase):
         self.assertIn("https://github.com/SproutSeeds", html)
         self.assertNotIn("color:#edf2eb", html)
 
+    def test_compose_deckfound_body_uses_support_signature(self) -> None:
+        text = mail_ui._compose_cmail_body_text(
+            "Thanks for reaching out.",
+            sender=mail_ui._CMAIL_DECKFOUND_SUPPORT_SENDER,
+        )
+        html = mail_ui._compose_cmail_html_body(
+            "Thanks for reaching out.",
+            sender=mail_ui._CMAIL_DECKFOUND_SUPPORT_SENDER,
+        )
+
+        self.assertIn("DeckFound Support", text)
+        self.assertIn("support@deckfound.com", text)
+        self.assertNotIn("Fractal Research Group", text)
+        self.assertIn("deckfound.com/assets/favicon-192.png", html)
+        self.assertIn("support@deckfound.com", html)
+        self.assertNotIn("frg-bimi-iris-floating.png", html)
+
     def test_mail_ui_includes_mobile_first_responsive_styles(self) -> None:
         self.assertIn('@media (max-width: 720px)', mail_ui._HTML)
         self.assertIn('env(safe-area-inset-top, 0px)', mail_ui._HTML)
@@ -1159,6 +1176,69 @@ class MailUiTests(unittest.TestCase):
 
         self.assertEqual("queued", result["draft_status"])
         self.assertEqual("2099-01-01T12:00:00Z", resend_send.call_args.kwargs["scheduled_at"])
+
+    def test_deckfound_reply_and_send_use_support_identity(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            support_message_id = store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="deckfound-support-001",
+                subject="DeckFound install question",
+                channel="email",
+                happened_at=datetime(2026, 8, 23, 16, 0, 0),
+                follow_up_at=None,
+                direction="inbound",
+                person="DeckFound Customer",
+                organization_name="",
+                status="reference",
+                external_from="Customer <customer@example.com>",
+                external_to="DeckFound Support <support@deckfound.com>",
+                message_id="<deckfound-support-001@example.com>",
+                thread_key="<deckfound-support-thread@example.com>",
+                snippet="Can you help with installation?",
+                body_text="Can you help with installation?",
+                category="support",
+                priority_level="normal",
+                priority_score=50,
+            )
+            detail = mail_ui._communication_detail(connection, support_message_id)
+
+        self.assertEqual(
+            mail_ui._CMAIL_DECKFOUND_SUPPORT_SENDER,
+            detail["drafts"]["reply"]["from"],
+        )
+
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                "from": detail["drafts"]["reply"]["from"],
+                "subject": detail["drafts"]["reply"]["subject"],
+                "to": detail["drafts"]["reply"]["to"],
+                "body_text": "Absolutely — here is how to install DeckFound.",
+                "in_reply_to": detail["drafts"]["reply"]["in_reply_to"],
+                "references": detail["drafts"]["reply"]["references"],
+                "thread_key": detail["drafts"]["reply"]["thread_key"],
+            },
+        )
+        self.assertEqual(mail_ui._CMAIL_DECKFOUND_SUPPORT_SENDER, saved["from"])
+        self.assertIn("DeckFound Support", saved["body_text"])
+        self.assertNotIn("Fractal Research Group", saved["body_text"])
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 2003},
+        ) as resend_send:
+            result = mail_ui.send_cmail_draft(
+                db_path=self.db_path,
+                draft_id=int(saved["id"]),
+            )
+
+        self.assertEqual("queued", result["draft_status"])
+        send_kwargs = resend_send.call_args.kwargs
+        self.assertEqual(mail_ui._CMAIL_DECKFOUND_SUPPORT_SENDER, send_kwargs["from_email"])
+        self.assertEqual("support@deckfound.com", send_kwargs["reply_to"])
+        self.assertIn("DeckFound Support", send_kwargs["text"])
+        self.assertIn("deckfound.com/assets/favicon-192.png", send_kwargs["html"])
 
     def test_send_cmail_draft_batch_schedules_drafts_with_default_gap(self) -> None:
         first = mail_ui.save_cmail_draft(
