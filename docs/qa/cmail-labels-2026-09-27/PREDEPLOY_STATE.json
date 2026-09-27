@@ -1,0 +1,38 @@
+{
+  "captured_at": "2026-09-27T08:02:30+00:00",
+  "installed_equals_bundle": true,
+  "installed_sha256_prefix": {
+    "mail_ui.py": "5d8103c680b5",
+    "store.py": "b34591e2b261",
+    "mail_ingest.py": "2097cbb73114"
+  },
+  "label_tables": {
+    "present": true,
+    "rows": {
+      "mail_labels": 0,
+      "mail_label_rules": 0,
+      "mail_label_conversations": 0
+    },
+    "note": "Checkout-based scheduled jobs opened the runtime DB after the checkout schema change and created the empty tables and communications.envelope_to column before deployment. The additions are additive."
+  },
+  "envelope_to_rows_set": 0,
+  "communication_count": 76868,
+  "delivery_queue": {
+    "sent": 293,
+    "superseded": 2,
+    "in_flight": 0
+  },
+  "default_overview": {
+    "message_count": 380,
+    "contact_count": 337,
+    "labels_key": false
+  },
+  "seal": {
+    "sealed_at": "2026-09-27T08:03:21Z",
+    "snapshot_sha256": "f04f03e32da585c1a7bfb1908b81cdf9b00bd12cb14335c0e9f8678a543592b9"
+  },
+  "encrypted_backup": {
+    "backup_id": "life-ops-db-20260927T080328Z",
+    "plaintext_sha256": "f04f03e32da585c1a7bfb1908b81cdf9b00bd12cb14335c0e9f8678a543592b9"
+  }
+}

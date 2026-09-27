@@ -32,6 +32,7 @@ from life_ops import credentials
 from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
 from life_ops import mail_identities
+from life_ops import mail_labels
 from life_ops import mail_spam
 from life_ops import mail_vault
 from life_ops.frg_booking_availability import build_frg_booking_availability_payload
@@ -87,6 +88,17 @@ MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS = 2000
 MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 15000
 MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT = 8
 MAIL_UI_SUMMARY_SEARCH_MAX_CHARS = 2000
+MAIL_UI_LABEL_VIEW_MESSAGE_CAP = 1000
+MAIL_UI_LABEL_MUTATION_PATHS = frozenset(
+    {
+        "/api/labels",
+        "/api/labels/update",
+        "/api/labels/delete",
+        "/api/labels/rules",
+        "/api/labels/rules/remove",
+        "/api/labels/conversation",
+    }
+)
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 MAIL_UI_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 3.0
 MAX_DRAFT_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -914,6 +926,8 @@ _HTML = """<!doctype html>
       -webkit-overflow-scrolling: touch;
     }
     .thread {
+      /* Rows keep their full height; the list scrolls instead of squeezing them. */
+      flex-shrink: 0;
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
       cursor: pointer;
@@ -1106,6 +1120,157 @@ _HTML = """<!doctype html>
     .spam-dialog button, [data-spam-sender], [data-restore-sender] { cursor: pointer; }
     .spam-dialog button:disabled { cursor: wait; }
     .spam-feedback { min-height: 1.5em; overflow-wrap: anywhere; }
+    .scope-pickers {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .scope-pickers select {
+      width: auto;
+      flex: 1 1 190px;
+    }
+    .label-picker { min-width: 160px; }
+    .mail-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .mail-label-chip {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-top: 5px;
+      padding: 4px 8px;
+      border: 1px solid rgba(237, 242, 235, 0.22);
+      border-radius: 999px;
+      color: var(--text);
+      background: rgba(237, 242, 235, 0.06);
+      font: 700 10px/1 var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .panel-search-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .save-search-label {
+      margin-top: 10px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(184, 255, 77, 0.26);
+      background: transparent;
+      color: var(--accent);
+      font: 800 10px/1 var(--mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .label-dialog .label-card {
+      display: grid;
+      gap: 10px;
+      padding: 14px 0;
+      border-top: 1px solid var(--line);
+    }
+    .label-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .label-card-title { display: grid; gap: 4px; min-width: 0; }
+    .label-card-title strong { overflow-wrap: anywhere; }
+    .label-card-title small,
+    .label-muted,
+    .label-toggle small,
+    .label-suggestion small { color: var(--muted); }
+    .label-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .label-card-actions button,
+    .label-inline-form button { padding: 8px 12px; }
+    .label-rules { display: flex; flex-wrap: wrap; gap: 6px; }
+    .label-rule-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 4px 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font: 600 12px/1.3 var(--mono);
+      overflow-wrap: anywhere;
+    }
+    .label-rule-chip em {
+      color: var(--muted);
+      font-style: normal;
+      font-size: 10px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .label-rule-chip button {
+      border: 0;
+      padding: 2px 8px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1;
+    }
+    .spam-dialog form.label-inline-form {
+      display: flex;
+      gap: 8px;
+      margin: 0;
+    }
+    .label-inline-form input { flex: 1 1 auto; min-width: 0; }
+    .label-suggestions summary { cursor: pointer; color: var(--muted); }
+    .label-suggestion {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 0;
+    }
+    .label-suggestion span:first-child { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+    .label-suggestion .label-card-actions { flex: 0 0 auto; flex-wrap: nowrap; }
+    .label-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+    .label-toggle {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+      cursor: pointer;
+    }
+    .label-toggle span { display: grid; gap: 3px; overflow-wrap: anywhere; }
+    .spam-dialog .label-toggle input[type="checkbox"] {
+      appearance: auto;
+      -webkit-appearance: checkbox;
+      flex: 0 0 auto;
+      width: 18px;
+      height: 18px;
+      margin: 2px 0 0;
+      padding: 0;
+      accent-color: var(--accent);
+    }
+    .link-button {
+      border: 0;
+      padding: 4px 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+      text-decoration: underline;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
     .confirm-card {
       width: min(420px, calc(100vw - 48px));
       border-radius: 20px;
@@ -1779,6 +1944,8 @@ _HTML = """<!doctype html>
         justify-content: space-between;
       }
       .identity-picker { min-width: 0; flex: 1 1 180px; font-size: 16px; }
+      .scope-pickers { flex: 1 1 100%; min-width: 0; }
+      .scope-pickers select { flex: 1 1 140px; }
       .hero-title {
         gap: 10px;
         font-size: clamp(40px, 13vw, 56px);
@@ -1958,14 +2125,20 @@ _HTML = """<!doctype html>
     <div class="topbar">
       <div class="brand-lockup">
         <h1 class="hero-title">CMAIL</h1>
-        <select class="identity-picker" id="identitySelect" aria-label="Inbox identity">
-          <option value="all">All inboxes</option>
-          <option value="frg">Cody / FRG</option>
-          <option value="frg_info">FRG Info</option>
-          <option value="codacli">Cody / CodaCLI</option>
-          <option value="bind_my_soul">Bind My Soul Support</option>
-          <option value="deckfound">DeckFound Support</option>
-        </select>
+        <div class="scope-pickers">
+          <select class="identity-picker" id="identitySelect" aria-label="Inbox identity">
+            <option value="all">All inboxes</option>
+            <option value="frg">Cody / FRG</option>
+            <option value="frg_info">FRG Info</option>
+            <option value="codacli">Cody / CodaCLI</option>
+            <option value="bind_my_soul">Bind My Soul Support</option>
+            <option value="deckfound">DeckFound Support</option>
+          </select>
+          <select class="identity-picker label-picker" id="labelSelect" aria-label="Label">
+            <option value="">All labels</option>
+            <option value="__manage__">Create a label…</option>
+          </select>
+        </div>
       </div>
       <div class="topbar-actions">
         <div class="tabbar" role="tablist" aria-label="Mail views">
@@ -1998,10 +2171,13 @@ _HTML = """<!doctype html>
         </div>
         <div class="panel-search" id="correspondenceSearchWrap">
           <input id="correspondenceSearch" type="search" placeholder="search name, email, or body" autocomplete="off" spellcheck="false">
-          <div class="correspondence-sort-toggle" role="tablist" aria-label="Correspondence priority">
-            <button class="sort-toggle-button active" type="button" id="sortAllButton" role="tab" aria-selected="true">all</button>
-            <button class="sort-toggle-button" type="button" id="sortNewButton" role="tab" aria-selected="false">new</button>
-            <button class="sort-toggle-button" type="button" id="sortOpenedButton" role="tab" aria-selected="false">opened</button>
+          <div class="panel-search-row">
+            <div class="correspondence-sort-toggle" role="tablist" aria-label="Correspondence priority">
+              <button class="sort-toggle-button active" type="button" id="sortAllButton" role="tab" aria-selected="true">all</button>
+              <button class="sort-toggle-button" type="button" id="sortNewButton" role="tab" aria-selected="false">new</button>
+              <button class="sort-toggle-button" type="button" id="sortOpenedButton" role="tab" aria-selected="false">opened</button>
+            </div>
+            <button class="save-search-label hidden" type="button" id="saveSearchLabelButton">save as label</button>
           </div>
         </div>
         <div class="thread-list" id="threadList"></div>
@@ -2023,6 +2199,28 @@ _HTML = """<!doctype html>
     <div class="spam-feedback" id="spamFeedback" role="status" aria-live="polite"></div>
     <div id="spamSenderList"></div>
   </dialog>
+  <dialog class="spam-dialog label-dialog" id="labelDialog" aria-labelledby="labelDialogTitle">
+    <header><h2 id="labelDialogTitle">Labels</h2><button class="secondary" id="closeLabelDialog" type="button">Back</button></header>
+    <p>A label gathers correspondence into its own view. Add a keyword, an exact email address, or an @domain. Keywords match whole words; end one with * to match word beginnings, like grant*. One match brings in its whole conversation, including your replies. Labeled mail stays in Correspondence.</p>
+    <form id="labelCreateForm">
+      <label for="labelNameInput">New label</label>
+      <input type="text" id="labelNameInput" maxlength="40" placeholder="Label name" required autocomplete="off">
+      <input type="text" id="labelFirstRuleInput" maxlength="120" placeholder="keyword, person@example.com, or @domain.com (optional)" aria-label="First rule" autocomplete="off" spellcheck="false">
+      <button class="primary" type="submit" id="createLabelButton">Create label</button>
+    </form>
+    <div class="spam-feedback" id="labelFeedback" role="status" aria-live="polite"></div>
+    <div id="labelList"></div>
+  </dialog>
+  <dialog class="spam-dialog label-dialog" id="conversationLabelDialog" aria-labelledby="conversationLabelTitle">
+    <header><h2 id="conversationLabelTitle">Label this conversation</h2><button class="secondary" id="closeConversationLabelDialog" type="button">Back</button></header>
+    <p id="conversationLabelContext"></p>
+    <div id="conversationLabelList"></div>
+    <form id="conversationLabelCreateForm" class="label-inline-form">
+      <input type="text" id="conversationLabelNameInput" maxlength="40" placeholder="New label name" aria-label="New label name" required autocomplete="off">
+      <button class="secondary" type="submit">Create and add</button>
+    </form>
+    <div class="spam-feedback" id="conversationLabelFeedback" role="status" aria-live="polite"></div>
+  </dialog>
   <script>
     // Version this cache whenever the overview wire shape changes. Older CMAIL
     // builds stored multi-megabyte mailbox payloads here, which made a fixed
@@ -2034,6 +2232,8 @@ _HTML = """<!doctype html>
     const SELECTED_MESSAGE_STORAGE_KEY = "lifeops.mail.selectedMessage";
     const ACTIVE_VIEW_STORAGE_KEY = "lifeops.mail.activeView";
     const SELECTED_IDENTITY_STORAGE_KEY = "lifeops.mail.selectedIdentity";
+    const SELECTED_LABEL_STORAGE_KEY = "lifeops.mail.selectedLabel";
+    const LABEL_MANAGE_VALUE = "__manage__";
     const CORRESPONDENCE_QUERY_STORAGE_KEY = "lifeops.mail.correspondenceQuery";
     const CONTACT_SORT_MODE_STORAGE_KEY = "lifeops.mail.contactSortMode";
     const CONTACT_SORT_MODE_VERSION_STORAGE_KEY = "lifeops.mail.contactSortModeVersion";
@@ -2191,10 +2391,11 @@ _HTML = """<!doctype html>
     }
 
     function persistOverviewCache(payload) {
-      if (state.selectedIdentity !== "all") return;
+      if (state.selectedIdentity !== "all" || state.selectedLabel) return;
       try {
         const minimalPayload = {
           mailbox: payload?.mailbox || "correspondence",
+          labels: payload?.labels || [],
           message_count: payload?.message_count || 0,
           contact_count: payload?.contact_count || 0,
           hidden_contact_count: payload?.hidden_contact_count || 0,
@@ -2368,6 +2569,20 @@ _HTML = """<!doctype html>
       return normalizeActiveView(initialUrlParams.get("view") || loadStoredText(ACTIVE_VIEW_STORAGE_KEY));
     }
 
+    function initialSelectedLabel() {
+      const urlLabel = String(initialUrlParams.get("label") || "").trim().toLowerCase();
+      if (urlLabel) return urlLabel.slice(0, 80);
+      // A deep link names one item; open it without a stored label filter hiding it.
+      if (initialSelectedMessageId() || initialSelectedDraftId() || initialDraftComposerSeed()) return "";
+      return String(loadStoredText(SELECTED_LABEL_STORAGE_KEY) || "").trim().toLowerCase().slice(0, 80);
+    }
+
+    function normalizeLabelList(labels) {
+      return (Array.isArray(labels) ? labels : [])
+        .filter((label) => label && label.id != null && String(label.name || "").trim())
+        .map((label) => ({ ...label, id: Number(label.id) }));
+    }
+
     function normalizeContactSortMode(value) {
       const clean = String(value || "").trim().toLowerCase();
       if (clean === "open" || clean === "opened" || clean === "touched") return "opened";
@@ -2477,6 +2692,10 @@ _HTML = """<!doctype html>
     const state = {
       activeView: initialActiveView(),
       selectedIdentity: initialSelectedIdentity,
+      selectedLabel: initialSelectedLabel(),
+      labels: normalizeLabelList(SERVER_BOOTSTRAP_OVERVIEW?.labels || loadStoredJson(OVERVIEW_CACHE_STORAGE_KEY)?.labels),
+      conversationLabelTarget: null,
+      overviewRequestSeq: 0,
       correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
       contactSortMode: loadContactSortMode(),
       selectedContactKey: loadStoredText(SELECTED_CONTACT_STORAGE_KEY),
@@ -3181,6 +3400,131 @@ _HTML = """<!doctype html>
       `).join("");
     }
 
+    function labelRecord(ref) {
+      const clean = String(ref ?? "").trim().toLowerCase();
+      if (!clean) return null;
+      return state.labels.find((label) => String(label.id) === clean || String(label.slug || "").toLowerCase() === clean) || null;
+    }
+
+    function selectedLabelRecord() {
+      return labelRecord(state.selectedLabel);
+    }
+
+    function persistLabelSelection() {
+      try {
+        if (state.selectedLabel) {
+          window.localStorage.setItem(SELECTED_LABEL_STORAGE_KEY, String(state.selectedLabel));
+        } else {
+          window.localStorage.removeItem(SELECTED_LABEL_STORAGE_KEY);
+        }
+      } catch (_error) {
+        // Ignore local storage failures; the label still applies for this session.
+      }
+    }
+
+    function labelCountCopy(label) {
+      const contacts = Number(label?.contact_count || 0);
+      const messages = Number(label?.message_count || 0);
+      return `${contacts} contact${contacts === 1 ? "" : "s"} · ${messages} message${messages === 1 ? "" : "s"}`;
+    }
+
+    function labelChipMarkup(labelId, reason = "") {
+      const label = labelRecord(labelId);
+      if (!label) return "";
+      const title = reason ? ` title="${escapeHtml(reason)}"` : "";
+      return `<span class="mail-label-chip"${title}>${escapeHtml(label.name)}</span>`;
+    }
+
+    function renderLabelPicker() {
+      const select = $("labelSelect");
+      if (!select) return;
+      const selected = selectedLabelRecord();
+      const options = [`<option value="">All labels</option>`];
+      for (const label of state.labels) {
+        const count = Number(label.contact_count || 0);
+        options.push(`<option value="${label.id}">${escapeHtml(label.name)}${count ? ` · ${count}` : ""}</option>`);
+      }
+      options.push(`<option value="${LABEL_MANAGE_VALUE}">${state.labels.length ? "Manage labels…" : "Create a label…"}</option>`);
+      const markup = options.join("");
+      if (select.dataset.markup !== markup) {
+        select.innerHTML = markup;
+        select.dataset.markup = markup;
+      }
+      select.value = selected ? String(selected.id) : "";
+      select.classList.toggle("hidden", state.activeView === "drafts");
+    }
+
+    function mergeLabelList(labels) {
+      // Overview payloads carry counts only; keep rules already loaded by the label manager.
+      const previous = new Map(state.labels.map((label) => [label.id, label]));
+      return normalizeLabelList(labels).map((label) => (
+        Array.isArray(label.rules) ? label : { ...label, rules: previous.get(label.id)?.rules }
+      ));
+    }
+
+    function applyLabelStateFromOverview(payload) {
+      if (Array.isArray(payload?.labels)) {
+        state.labels = mergeLabelList(payload.labels);
+      }
+      let cleared = false;
+      if (payload?.label?.id != null) {
+        state.selectedLabel = String(payload.label.id);
+      } else if (payload?.label_error && state.selectedLabel) {
+        state.selectedLabel = "";
+        cleared = true;
+      }
+      persistLabelSelection();
+      renderLabelPicker();
+      return cleared;
+    }
+
+    function setSelectedLabel(value) {
+      const next = String(value || "");
+      if (next === String(state.selectedLabel || "")) {
+        renderLabelPicker();
+        return;
+      }
+      state.selectedLabel = next;
+      persistLabelSelection();
+      state.selectedContactKey = null;
+      state.selectedThreadKey = null;
+      state.selectedId = null;
+      state.detail = null;
+      state.listSignature = "";
+      state.overview = null;
+      persistSelectionState();
+      renderChrome();
+      $("threadList").innerHTML = `<div class="empty">Loading…</div>`;
+      $("detailPanel").innerHTML = `<div class="empty">No correspondence selected yet.</div>`;
+      loadOverview({ sync: false }).catch((error) => {
+        $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+      });
+    }
+
+    function detailLabelChipsMarkup(messageId) {
+      const summary = (state.overview?.messages || []).find((entry) => Number(entry.id) === Number(messageId));
+      if (!summary) return "";
+      const reasons = summary.label_reasons || {};
+      return (summary.label_ids || []).map((id) => labelChipMarkup(id, reasons[String(id)] || "")).join("");
+    }
+
+    function renderDetailLabelChips() {
+      const target = document.querySelector("[data-detail-label-chips]");
+      if (!target || !state.detail) return;
+      target.innerHTML = detailLabelChipsMarkup(state.detail.id);
+    }
+
+    function friendlyErrorMessage(error, fallback) {
+      const raw = String(error?.message || "").trim();
+      if (!raw) return fallback;
+      try {
+        const parsed = JSON.parse(raw);
+        return String(parsed?.error || parsed?.message || fallback);
+      } catch (_error) {
+        return raw;
+      }
+    }
+
     function renderChrome() {
       const inboxActive = state.activeView === "inbox";
       const draftsActive = state.activeView === "drafts";
@@ -3191,12 +3535,19 @@ _HTML = """<!doctype html>
       $("tabDrafts").setAttribute("aria-selected", draftsActive ? "true" : "false");
       $("tabHidden").classList.toggle("active", hiddenActive);
       $("tabHidden").setAttribute("aria-selected", hiddenActive ? "true" : "false");
-      $("panelTitle").textContent = hiddenActive ? "spam" : draftsActive ? "drafts" : "correspondence";
+      const activeLabel = draftsActive ? null : selectedLabelRecord();
+      const mailboxTitle = hiddenActive ? "spam" : draftsActive ? "drafts" : "correspondence";
+      $("panelTitle").textContent = activeLabel ? `${mailboxTitle} · ${activeLabel.name}` : mailboxTitle;
       $("newDraftButton").classList.toggle("hidden", !draftsActive);
       $("spamSendersButton").classList.toggle("hidden", !hiddenActive);
       $("correspondenceSearchWrap").classList.toggle("hidden", draftsActive);
       $("correspondenceSearch").placeholder = hiddenActive ? "search spam" : "search name, email, or body";
       $("correspondenceSearch").value = state.correspondenceQuery || "";
+      $("saveSearchLabelButton").classList.toggle(
+        "hidden",
+        !inboxActive || String(state.correspondenceQuery || "").trim().length < 2,
+      );
+      renderLabelPicker();
       const sortAllButton = $("sortAllButton");
       const sortNewButton = $("sortNewButton");
       const sortOpenedButton = $("sortOpenedButton");
@@ -3347,11 +3698,22 @@ _HTML = """<!doctype html>
 
     function renderContactList(payload) {
       const hiddenActive = state.activeView === "hidden";
+      const activeLabel = selectedLabelRecord();
       let contacts = displayedContacts(payload.contacts || []);
+      const contactLabelIds = (contact) => {
+        const ids = new Set();
+        for (const message of messagesForContact(String(contact?.contact_key || ""))) {
+          for (const labelId of message.label_ids || []) ids.add(Number(labelId));
+        }
+        if (activeLabel) ids.delete(Number(activeLabel.id));
+        return Array.from(ids).filter((labelId) => labelRecord(labelId)).slice(0, 2);
+      };
       const signature = JSON.stringify([
         state.activeView,
         state.correspondenceQuery || "",
         state.contactSortMode || "all",
+        state.selectedLabel || "",
+        state.labels.map((label) => [label.id, label.name]),
         contacts.map((contact) => [
           contact.contact_key,
           contact.latest_message_id,
@@ -3360,6 +3722,7 @@ _HTML = """<!doctype html>
           contactOpenedAt(contact),
           contactHasNewMail(contact) ? 1 : 0,
           (contact.threads || []).map((thread) => [thread.thread_key, thread.latest_message_id, thread.count]),
+          contactLabelIds(contact),
         ]),
       ]);
       $("threadCount").textContent = `${contacts.length} contact${contacts.length === 1 ? "" : "s"}`;
@@ -3373,10 +3736,16 @@ _HTML = """<!doctype html>
           emptyCopy = state.correspondenceQuery
             ? "No opened correspondence matches that search."
             : "No opened correspondence yet.";
+        } else if (activeLabel) {
+          emptyCopy = state.correspondenceQuery
+            ? `No ${escapeHtml(activeLabel.name)} correspondence matches that search.`
+            : `Nothing in ${escapeHtml(activeLabel.name)} here yet. Add a rule in Manage labels, or open a message and choose labels.`;
         } else {
           emptyCopy = hiddenActive
             ? (state.correspondenceQuery ? "No spam matches that search." : "Spam is empty. Use Manage senders to keep an email address out of sight.")
-            : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
+            : (state.correspondenceQuery
+              ? "No recent correspondence matches that search. Save it as a label to search all mail."
+              : "No correspondence yet.");
         }
         $("threadList").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         state.listSignature = signature;
@@ -3412,7 +3781,10 @@ _HTML = """<!doctype html>
             <span class="unread-orb ${contactHasNewMail(contact) ? "" : "hidden"}" aria-hidden="true"></span>
             <div class="thread-copy">
               <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
-              ${state.selectedIdentity === "all" ? `<span class="mail-identity-chip">${escapeHtml(contact.mail_identity_short_label || (messagesForContact(contact.contact_key)[0]?.mail_identity_short_label) || "FRG")}</span>` : ""}
+              <div class="mail-chip-row">
+                ${state.selectedIdentity === "all" ? `<span class="mail-identity-chip">${escapeHtml(contact.mail_identity_short_label || (messagesForContact(contact.contact_key)[0]?.mail_identity_short_label) || "FRG")}</span>` : ""}
+                ${contactLabelIds(contact).map((labelId) => labelChipMarkup(labelId)).join("")}
+              </div>
               <div class="thread-timestamp">${escapeHtml(contactTimestampLabel(contact))}</div>
             </div>
           </div>
@@ -3667,6 +4039,7 @@ _HTML = """<!doctype html>
       }
       renderChrome();
       renderContactList(state.overview || {});
+      renderDetailLabelChips();
     }
 
     function renderDraftSelection() {
@@ -4674,6 +5047,355 @@ _HTML = """<!doctype html>
       }
     }
 
+    let labelReturnFocus = null;
+    let labelBusy = false;
+
+    function labelRequestScope() {
+      return {
+        identity: state.selectedIdentity,
+        mailbox: state.activeView === "hidden" ? "hidden" : "correspondence",
+      };
+    }
+
+    function setLabelControlsDisabled(disabled) {
+      for (const dialogId of ["labelDialog", "conversationLabelDialog"]) {
+        for (const control of $(dialogId).querySelectorAll("button:not([id^='close']), input[type='checkbox']")) {
+          control.disabled = disabled;
+        }
+      }
+    }
+
+    async function updateLabels(path, payload, successMessage, options = {}) {
+      if (labelBusy) return null;
+      labelBusy = true;
+      setLabelControlsDisabled(true);
+      const feedback = options.feedback || $("labelFeedback");
+      try {
+        const result = await postJson(path, { ...labelRequestScope(), ...payload });
+        state.labels = normalizeLabelList(result.labels);
+        if (state.selectedLabel && !labelRecord(state.selectedLabel)) {
+          state.selectedLabel = "";
+          persistLabelSelection();
+        }
+        renderLabelPicker();
+        feedback.textContent = typeof successMessage === "function" ? successMessage(result) : successMessage;
+        if (!options.skipReload) {
+          try {
+            await loadOverview({ sync: false, render: state.activeView !== "drafts", preserveActiveDetail: true });
+          } catch (_error) {
+            feedback.textContent += " Refresh the mailbox to update its view.";
+          }
+        }
+        options.onSuccess?.(result);
+        if ($("labelDialog").open) renderLabelManager(state.labels);
+        if ($("conversationLabelDialog").open) renderConversationLabels();
+        return result;
+      } catch (error) {
+        feedback.textContent = friendlyErrorMessage(error, "Unable to update labels.");
+        return null;
+      } finally {
+        labelBusy = false;
+        setLabelControlsDisabled(false);
+      }
+    }
+
+    async function openLabelManager(prefill = {}) {
+      labelReturnFocus = document.activeElement;
+      $("labelNameInput").value = String(prefill.name || "");
+      $("labelFirstRuleInput").value = String(prefill.rule || "");
+      $("labelFeedback").textContent = "";
+      renderLabelManager(state.labels);
+      $("labelDialog").showModal();
+      $("labelNameInput").focus();
+      if (prefill.name) $("labelNameInput").select();
+      try {
+        const payload = await fetchJson(`/api/labels?${new URLSearchParams(labelRequestScope()).toString()}`);
+        state.labels = normalizeLabelList(payload.labels);
+        renderLabelPicker();
+        if ($("labelDialog").open) renderLabelManager(state.labels);
+      } catch (error) {
+        $("labelFeedback").textContent = friendlyErrorMessage(error, "Unable to load labels.");
+      }
+    }
+
+    function closeLabelManager() {
+      $("labelDialog").close();
+      const target = labelReturnFocus?.isConnected ? labelReturnFocus : $("labelSelect");
+      target?.focus?.();
+    }
+
+    function renderLabelManager(labels) {
+      const list = $("labelList");
+      // Keep open suggestion lists and unsent rule text across refreshes.
+      const openSuggestions = new Set(
+        Array.from(list.querySelectorAll("[data-label-suggestions][open]")).map((node) => node.dataset.labelSuggestions),
+      );
+      const pendingRules = new Map(
+        Array.from(list.querySelectorAll("[data-add-label-rule]")).map((form) => [form.dataset.addLabelRule, form.querySelector("input")?.value || ""]),
+      );
+      if (!labels.length) {
+        list.innerHTML = '<p class="label-muted">No labels yet. Name one above and add a keyword, an email address, or an @domain.</p>';
+        return;
+      }
+      list.innerHTML = labels.map((label) => {
+        const suggestionCount = Number(label.suggestion_count || 0);
+        const rules = label.rules || [];
+        const rulesMarkup = !Array.isArray(label.rules)
+          ? '<small class="label-muted">Loading rules…</small>'
+          : rules.length
+            ? rules.map((rule) => `
+                <span class="label-rule-chip">${escapeHtml(rule.text)} <em>${escapeHtml(rule.kind)}</em><button type="button" data-remove-label-rule="${rule.id}" data-label-id="${label.id}" aria-label="Remove ${escapeHtml(rule.text)} from ${escapeHtml(label.name)}">×</button></span>
+              `).join("")
+            : '<small class="label-muted">No rules. Conversations you add by hand appear here.</small>';
+        return `
+          <section class="label-card" data-label-card="${label.id}">
+            <div class="label-card-head">
+              <div class="label-card-title">
+                <strong>${escapeHtml(label.name)}</strong>
+                <small>${escapeHtml(labelCountCopy(label))}</small>
+              </div>
+              <div class="label-card-actions">
+                <button class="secondary" type="button" data-view-label="${label.id}">View</button>
+                <button class="secondary" type="button" data-rename-label="${label.id}">Rename</button>
+                <button class="secondary" type="button" data-delete-label="${label.id}">Delete</button>
+              </div>
+            </div>
+            <div class="label-rules">${rulesMarkup}</div>
+            <form class="label-inline-form" data-add-label-rule="${label.id}">
+              <input type="text" maxlength="120" placeholder="Add keyword, email, or @domain" aria-label="Add a rule to ${escapeHtml(label.name)}" autocomplete="off" spellcheck="false">
+              <button class="secondary" type="submit">Add</button>
+            </form>
+            ${suggestionCount ? `
+              <details class="label-suggestions" data-label-suggestions="${label.id}">
+                <summary>${suggestionCount === 1 ? "1 suggested conversation mentions" : `${suggestionCount} suggested conversations mention`} ${escapeHtml(label.name)}</summary>
+                <div class="label-suggestion-list"><small class="label-muted">Loading…</small></div>
+              </details>
+            ` : ""}
+          </section>
+        `;
+      }).join("");
+      for (const button of list.querySelectorAll("[data-view-label]")) {
+        button.addEventListener("click", () => {
+          closeLabelManager();
+          if (state.activeView === "drafts") setActiveView("inbox");
+          setSelectedLabel(button.dataset.viewLabel);
+        });
+      }
+      for (const button of list.querySelectorAll("[data-rename-label]")) {
+        button.addEventListener("click", () => {
+          const label = labelRecord(button.dataset.renameLabel);
+          const title = button.closest("[data-label-card]")?.querySelector(".label-card-title");
+          if (!label || !title) return;
+          title.innerHTML = `
+            <form class="label-inline-form">
+              <input type="text" maxlength="40" value="${escapeHtml(label.name)}" aria-label="New name for ${escapeHtml(label.name)}" required autocomplete="off">
+              <button class="secondary" type="submit">Save</button>
+            </form>
+          `;
+          const form = title.querySelector("form");
+          const input = form.querySelector("input");
+          input.focus();
+          input.select();
+          form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            updateLabels("/api/labels/update", { label: label.id, name: input.value }, (result) => `Renamed to ${result.label?.name || input.value}.`);
+          });
+        });
+      }
+      for (const button of list.querySelectorAll("[data-delete-label]")) {
+        button.addEventListener("click", () => {
+          if (button.dataset.confirming !== "1") {
+            button.dataset.confirming = "1";
+            button.textContent = "Confirm delete";
+            window.setTimeout(() => {
+              if (!button.isConnected) return;
+              button.dataset.confirming = "";
+              button.textContent = "Delete";
+            }, 4000);
+            return;
+          }
+          updateLabels("/api/labels/delete", { label: Number(button.dataset.deleteLabel) }, "Label deleted. Its mail stays in Correspondence.");
+        });
+      }
+      for (const button of list.querySelectorAll("[data-remove-label-rule]")) {
+        button.addEventListener("click", () => {
+          updateLabels(
+            "/api/labels/rules/remove",
+            { label: Number(button.dataset.labelId), rule_id: Number(button.dataset.removeLabelRule) },
+            "Rule removed.",
+          );
+        });
+      }
+      for (const form of list.querySelectorAll("[data-add-label-rule]")) {
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const input = form.querySelector("input");
+          updateLabels(
+            "/api/labels/rules",
+            { label: Number(form.dataset.addLabelRule), rule: input.value },
+            (result) => `Added ${result.rule?.text || "the rule"}.`,
+            { onSuccess: () => { input.value = ""; } },
+          );
+        });
+      }
+      for (const details of list.querySelectorAll("[data-label-suggestions]")) {
+        details.addEventListener("toggle", () => {
+          if (details.open) loadLabelSuggestions(details);
+        });
+        if (openSuggestions.has(details.dataset.labelSuggestions)) details.open = true;
+      }
+      for (const form of list.querySelectorAll("[data-add-label-rule]")) {
+        const pending = pendingRules.get(form.dataset.addLabelRule);
+        if (pending) form.querySelector("input").value = pending;
+      }
+    }
+
+    async function loadLabelSuggestions(details) {
+      const labelId = Number(details.dataset.labelSuggestions);
+      const target = details.querySelector(".label-suggestion-list");
+      try {
+        const params = new URLSearchParams({ ...labelRequestScope(), label: String(labelId) });
+        const payload = await fetchJson(`/api/labels/suggestions?${params.toString()}`);
+        const suggestions = payload.suggestions || [];
+        target.innerHTML = suggestions.length ? suggestions.map((suggestion) => `
+          <div class="label-suggestion">
+            <span>
+              <strong>${escapeHtml(suggestion.contact_label || "(unknown contact)")}</strong>
+              <small>${escapeHtml(suggestion.subject || "(no subject)")} · ${escapeHtml(humanTimestamp(suggestion.happened_at))} · ${escapeHtml(String(suggestion.message_count || 1))} message${Number(suggestion.message_count || 1) === 1 ? "" : "s"}</small>
+            </span>
+            <span class="label-card-actions">
+              <button class="secondary" type="button" data-suggestion-action="add" data-communication-id="${suggestion.communication_id}">Add</button>
+              <button class="secondary" type="button" data-suggestion-action="remove" data-communication-id="${suggestion.communication_id}">Dismiss</button>
+            </span>
+          </div>
+        `).join("") : '<small class="label-muted">No suggestions right now.</small>';
+        for (const button of target.querySelectorAll("[data-suggestion-action]")) {
+          button.addEventListener("click", () => {
+            const action = button.dataset.suggestionAction;
+            updateLabels(
+              "/api/labels/conversation",
+              { label: labelId, communication_id: Number(button.dataset.communicationId), action },
+              action === "add" ? "Conversation added." : "Suggestion dismissed.",
+            );
+          });
+        }
+      } catch (error) {
+        target.textContent = friendlyErrorMessage(error, "Unable to load suggestions.");
+      }
+    }
+
+    function conversationTargetSummary() {
+      const target = state.conversationLabelTarget;
+      if (!target) return null;
+      const summary = (state.overview?.messages || []).find((entry) => Number(entry.id) === target.id);
+      if (summary) {
+        target.summary = { label_ids: [...(summary.label_ids || [])], label_reasons: { ...(summary.label_reasons || {}) } };
+      }
+      return target.summary || { label_ids: [], label_reasons: {} };
+    }
+
+    function openConversationLabels(message) {
+      labelReturnFocus = document.activeElement;
+      state.conversationLabelTarget = {
+        id: Number(message.id),
+        contactEmail: String(message.contact_email || "").trim().toLowerCase(),
+        contactLabel: String(message.contact_label || message.person || message.external_from || "").trim(),
+        subject: String(message.subject || "").trim(),
+        summary: null,
+      };
+      $("conversationLabelFeedback").textContent = "";
+      $("conversationLabelNameInput").value = "";
+      renderConversationLabels();
+      $("conversationLabelDialog").showModal();
+      ($("conversationLabelList").querySelector("input") || $("conversationLabelNameInput")).focus();
+    }
+
+    function closeConversationLabels() {
+      $("conversationLabelDialog").close();
+      state.conversationLabelTarget = null;
+      const target = labelReturnFocus?.isConnected ? labelReturnFocus : $("detailPanel");
+      target?.focus?.();
+    }
+
+    function adjustConversationTarget(labelId, action) {
+      const target = state.conversationLabelTarget;
+      if (!target) return;
+      target.summary = target.summary || { label_ids: [], label_reasons: {} };
+      const ids = new Set(target.summary.label_ids.map(Number));
+      if (action === "add") ids.add(Number(labelId));
+      else ids.delete(Number(labelId));
+      target.summary.label_ids = Array.from(ids);
+    }
+
+    function renderConversationLabels() {
+      const target = state.conversationLabelTarget;
+      if (!target) return;
+      const summary = conversationTargetSummary();
+      const applied = new Set((summary.label_ids || []).map(Number));
+      $("conversationLabelContext").textContent = `${target.contactLabel || "This conversation"} · ${target.subject || "(no subject)"}. A label covers the whole conversation, including replies. Unchecking keeps it out even when a rule matches.`;
+      $("conversationLabelList").innerHTML = state.labels.length ? state.labels.map((label) => {
+        const checked = applied.has(Number(label.id));
+        const reason = checked ? String((summary.label_reasons || {})[String(label.id)] || "") : "";
+        const hasPersonRule = (label.rules || []).some((rule) => rule.kind === "address" && rule.value === target.contactEmail);
+        return `
+          <div class="label-toggle-row">
+            <label class="label-toggle">
+              <input type="checkbox" data-conversation-label="${label.id}" ${checked ? "checked" : ""}>
+              <span><strong>${escapeHtml(label.name)}</strong>${reason ? `<small>${escapeHtml(reason)}</small>` : ""}</span>
+            </label>
+            ${target.contactEmail && !hasPersonRule ? `<button class="link-button" type="button" data-person-rule="${label.id}">all mail with ${escapeHtml(target.contactEmail)}</button>` : ""}
+          </div>
+        `;
+      }).join("") : '<p class="label-muted">No labels yet. Name one below to create it and add this conversation.</p>';
+      for (const input of $("conversationLabelList").querySelectorAll("[data-conversation-label]")) {
+        input.addEventListener("change", () => {
+          const labelId = Number(input.dataset.conversationLabel);
+          const name = labelRecord(labelId)?.name || "the label";
+          const action = input.checked ? "add" : "remove";
+          updateLabels(
+            "/api/labels/conversation",
+            { label: labelId, communication_id: target.id, action },
+            action === "add" ? `Added to ${name}.` : `Removed from ${name}. It stays out even when a rule matches.`,
+            { feedback: $("conversationLabelFeedback"), onSuccess: () => adjustConversationTarget(labelId, action) },
+          ).then((result) => {
+            if (!result) renderConversationLabels();
+          });
+        });
+      }
+      for (const button of $("conversationLabelList").querySelectorAll("[data-person-rule]")) {
+        button.addEventListener("click", () => {
+          const name = labelRecord(button.dataset.personRule)?.name || "The label";
+          updateLabels(
+            "/api/labels/rules",
+            { label: Number(button.dataset.personRule), rule: target.contactEmail },
+            `${name} now includes all mail with ${target.contactEmail}.`,
+            { feedback: $("conversationLabelFeedback") },
+          );
+        });
+      }
+    }
+
+    async function createLabelForConversation(event) {
+      event.preventDefault();
+      const target = state.conversationLabelTarget;
+      if (!target) return;
+      const feedback = $("conversationLabelFeedback");
+      const created = await updateLabels(
+        "/api/labels",
+        { name: $("conversationLabelNameInput").value, rules: [] },
+        "Label created.",
+        { feedback, skipReload: true },
+      );
+      if (!created?.label) return;
+      $("conversationLabelNameInput").value = "";
+      await updateLabels(
+        "/api/labels/conversation",
+        { label: created.label.id, communication_id: target.id, action: "add" },
+        `Created ${created.label.name} and added this conversation.`,
+        { feedback, onSuccess: () => adjustConversationTarget(created.label.id, "add") },
+      );
+    }
+
     async function hideContact(contactKey) {
       const cleanContactKey = String(contactKey || "").trim();
       if (!cleanContactKey) return;
@@ -4812,7 +5534,10 @@ _HTML = """<!doctype html>
             <div class="message-header">
               <div class="message-title">${escapeHtml(message.contact_label || message.person || message.external_from || "(unknown contact)")}</div>
               <div class="message-subtitle">${escapeHtml(`${contact?.count || messages.length} message${(contact?.count || messages.length) === 1 ? "" : "s"} in this correspondence`)}</div>
-              <span class="mail-identity-chip">${escapeHtml(message.mail_identity_label || "Cody / FRG")}</span>
+              <div class="mail-chip-row">
+                <span class="mail-identity-chip">${escapeHtml(message.mail_identity_label || "Cody / FRG")}</span>
+                <span class="mail-chip-row" data-detail-label-chips>${detailLabelChipsMarkup(message.id)}</span>
+              </div>
             </div>
             <button class="close-selection-button" type="button" data-clear-selection title="Close this correspondence" aria-label="Deselect correspondence">${closeIcon()}</button>
           </div>
@@ -4834,6 +5559,7 @@ _HTML = """<!doctype html>
             <div class="item item-action">
               <div class="detail-action-buttons">
                 <button class="secondary inline-reply" type="button" data-reply-message="${message.id}">reply</button>
+                <button class="secondary" type="button" data-label-conversation="${message.id}">labels</button>
                 <button class="secondary" type="button" ${message.is_spam ? "data-restore-sender" : "data-spam-sender"}>${message.is_spam ? "Restore sender" : "Move sender to Spam"}</button>
                 <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence" aria-label="Archive message">${trashIcon()}</button>
               </div>
@@ -4852,6 +5578,7 @@ _HTML = """<!doctype html>
         </div>
       `;
       prepareExternalEmailLinks(detail);
+      detail.querySelector("[data-label-conversation]")?.addEventListener("click", () => openConversationLabels(message));
       detail.querySelector("[data-spam-sender]")?.addEventListener("click", () => openSpamRules(message.contact_email || activeContactKey));
       detail.querySelector("[data-restore-sender]")?.addEventListener("click", async () => {
         try { await unhideContact(activeContactKey); }
@@ -4907,8 +5634,17 @@ _HTML = """<!doctype html>
         mailbox,
         identity: state.selectedIdentity,
       });
+      if (state.selectedLabel) params.set("label", state.selectedLabel);
       if (sync) params.set("sync", "1");
-      state.overview = normalizeOverviewPayload(await fetchJson(`/api/overview?${params.toString()}`), { allowPendingResolution: true });
+      const requestSeq = (state.overviewRequestSeq = (state.overviewRequestSeq || 0) + 1);
+      const payload = await fetchJson(`/api/overview?${params.toString()}`);
+      // A newer load (another label, inbox, or folder) supersedes this response.
+      if (requestSeq !== state.overviewRequestSeq) return;
+      if (applyLabelStateFromOverview(payload)) {
+        // The selected label was deleted elsewhere; show the full mailbox instead.
+        return loadOverview({ sync, render, preserveActiveDetail });
+      }
+      state.overview = normalizeOverviewPayload(payload, { allowPendingResolution: true });
       primeViewedMessagesFromOverview(state.overview);
       if (mailbox === "correspondence") {
         persistOverviewCache(state.overview);
@@ -5017,6 +5753,16 @@ _HTML = """<!doctype html>
 
     function handleEscape(event) {
       if (event.key !== "Escape") return;
+      if ($("conversationLabelDialog").open) {
+        event.preventDefault();
+        closeConversationLabels();
+        return;
+      }
+      if ($("labelDialog").open) {
+        event.preventDefault();
+        closeLabelManager();
+        return;
+      }
       if ($("spamDialog").open) {
         event.preventDefault();
         closeSpamRules();
@@ -5079,6 +5825,7 @@ _HTML = """<!doctype html>
     function renderInitialOverview() {
       if (state.activeView === "hidden") return;
       if (state.selectedIdentity !== "all") return;
+      if (state.selectedLabel) return;
       const candidates = [
         SERVER_BOOTSTRAP_OVERVIEW,
         loadStoredJson(OVERVIEW_CACHE_STORAGE_KEY),
@@ -5132,6 +5879,34 @@ _HTML = """<!doctype html>
     $("spamSenderForm").addEventListener("submit", (event) => {
       event.preventDefault();
       updateSpamRules("/api/spam/senders", { sender: $("spamSenderInput").value });
+    });
+    $("labelSelect").addEventListener("change", (event) => {
+      const value = String(event.target.value || "");
+      if (value === LABEL_MANAGE_VALUE) {
+        renderLabelPicker();
+        openLabelManager();
+        return;
+      }
+      setSelectedLabel(value);
+    });
+    $("closeLabelDialog").addEventListener("click", closeLabelManager);
+    $("labelDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeLabelManager(); });
+    $("labelCreateForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const rule = $("labelFirstRuleInput").value.trim();
+      updateLabels(
+        "/api/labels",
+        { name: $("labelNameInput").value, rules: rule ? [rule] : [] },
+        (result) => `${result.label?.name || "Label"} created. Choose View to open it.`,
+        { onSuccess: () => { $("labelNameInput").value = ""; $("labelFirstRuleInput").value = ""; } },
+      );
+    });
+    $("closeConversationLabelDialog").addEventListener("click", closeConversationLabels);
+    $("conversationLabelDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeConversationLabels(); });
+    $("conversationLabelCreateForm").addEventListener("submit", createLabelForConversation);
+    $("saveSearchLabelButton").addEventListener("click", () => {
+      const query = String(state.correspondenceQuery || "").trim();
+      if (query) openLabelManager({ name: query.replace(/^@/, "").slice(0, 40), rule: query });
     });
     $("agentTerminalButton").addEventListener("click", openCmailAgentTerminal);
     $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
@@ -7003,7 +7778,13 @@ def _cloudflare_queue_status_from_connection(connection: sqlite3.Connection) -> 
 
 def _list_correspondence_rows(connection: sqlite3.Connection, *, limit: int | None) -> list[sqlite3.Row]:
     suppressed_ids = set(_orphaned_resend_correspondence_ids(connection))
-    query = """
+    # Read-only snapshots can predate the envelope column until the first write.
+    envelope_column = (
+        "communications.envelope_to"
+        if "envelope_to" in store._column_names(connection, "communications")
+        else "'' AS envelope_to"
+    )
+    query = f"""
         SELECT
             communications.id,
             communications.subject,
@@ -7022,7 +7803,10 @@ def _list_correspondence_rows(connection: sqlite3.Connection, *, limit: int | No
             communications.external_cc,
             communications.external_bcc,
             communications.external_reply_to,
+            {envelope_column},
             communications.message_id,
+            communications.in_reply_to,
+            communications.references_json,
             communications.thread_key,
             communications.snippet,
             communications.body_text,
@@ -7322,40 +8106,78 @@ def _correspondence_messages_from_connection(
     hidden: bool = False,
     identity: str = mail_identities.ALL_MAIL_IDENTITIES,
 ) -> list[dict[str, Any]]:
+    messages, _ = _correspondence_view_from_connection(connection, limit=limit, hidden=hidden, identity=identity)
+    return messages
+
+
+def _correspondence_view_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    limit: int | None,
+    hidden: bool = False,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+    label: str | None = None,
+    include_labels: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     hidden_contacts = _hidden_contacts_from_connection(connection)
     rows = _list_correspondence_rows(connection, limit=None)
     messages = [_communication_summary(row) for row in rows]
+    label_ref = str(label or "").strip()
+    evaluation = mail_labels.evaluate(connection, rows) if (include_labels or label_ref) else None
+    mail_labels.annotate_messages(messages, evaluation)
     identity_key = mail_identities.normalize_mail_identity(identity, allow_all=True)
     if identity_key != mail_identities.ALL_MAIL_IDENTITIES:
         messages = [message for message in messages if message.get("mail_identity") == identity_key]
     for message in messages:
         message["is_spam"] = mail_spam.is_spam(message, hidden_contacts)
     messages = [message for message in messages if message["is_spam"] == hidden]
+    label_state: dict[str, Any] = {
+        "labels": mail_labels.summarize(evaluation, messages),
+        "label": None,
+        "evaluation": evaluation,
+        "scoped_messages": messages,
+    }
+    top_up_contact_keys: set[str] | None = None
+    if label_ref:
+        selected = evaluation.label(label_ref) if evaluation is not None else None
+        if selected is None:
+            label_state["label_error"] = "not_found"
+            messages = []
+        else:
+            label_state["label"] = next(entry for entry in label_state["labels"] if entry["id"] == selected["id"])
+            messages = [message for message in messages if selected["id"] in message.get("label_ids", ())]
+            # A label view lists every labeled contact; only oversized labels are trimmed.
+            limit = None if len(messages) <= MAIL_UI_LABEL_VIEW_MESSAGE_CAP else MAIL_UI_LABEL_VIEW_MESSAGE_CAP
+            top_up_contact_keys = {
+                str(message.get("contact_key") or "").strip().lower()
+                for message in messages
+                if str(message.get("contact_key") or "").strip()
+            }
     if limit is not None:
         base_limit = max(1, int(limit))
         limited_messages = messages[:base_limit]
-        if not hidden:
-            opened_contact_keys = set(store.get_touched_mail_contacts(connection))
-            if opened_contact_keys:
-                included_ids = {int(message["id"]) for message in limited_messages}
-                included_contact_keys = {
-                    str(message.get("contact_key") or "").strip().lower()
-                    for message in limited_messages
-                    if str(message.get("contact_key") or "").strip()
-                }
-                for message in messages[base_limit:]:
-                    contact_key = str(message.get("contact_key") or "").strip().lower()
-                    if (
-                        contact_key not in opened_contact_keys
-                        or contact_key in included_contact_keys
-                        or int(message["id"]) in included_ids
-                    ):
-                        continue
-                    limited_messages.append(message)
-                    included_ids.add(int(message["id"]))
-                    included_contact_keys.add(contact_key)
+        if top_up_contact_keys is None and not hidden:
+            top_up_contact_keys = set(store.get_touched_mail_contacts(connection))
+        if top_up_contact_keys:
+            included_ids = {int(message["id"]) for message in limited_messages}
+            included_contact_keys = {
+                str(message.get("contact_key") or "").strip().lower()
+                for message in limited_messages
+                if str(message.get("contact_key") or "").strip()
+            }
+            for message in messages[base_limit:]:
+                contact_key = str(message.get("contact_key") or "").strip().lower()
+                if (
+                    contact_key not in top_up_contact_keys
+                    or contact_key in included_contact_keys
+                    or int(message["id"]) in included_ids
+                ):
+                    continue
+                limited_messages.append(message)
+                included_ids.add(int(message["id"]))
+                included_contact_keys.add(contact_key)
         messages = limited_messages
-    return messages
+    return messages, label_state
 
 
 def _correspondence_mailbox_version_from_connection(
@@ -7377,6 +8199,7 @@ def _mail_ui_state_version_from_connection(connection: sqlite3.Connection) -> di
     hidden_contacts = store.get_hidden_mail_contacts(connection)
     digest_payload = {
         "hidden_contacts": hidden_contacts,
+        "labels": mail_labels.state_digest(connection),
         "opened_contacts": touched_contacts,
         "viewed_messages": viewed_messages,
     }
@@ -7397,15 +8220,25 @@ def _build_correspondence_overview_from_connection(
     include_details: bool = False,
     hidden: bool = False,
     identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+    label: str | None = None,
 ) -> dict[str, Any]:
     _ensure_existing_correspondence_marked_viewed(connection)
-    messages = _correspondence_messages_from_connection(connection, limit=limit, hidden=hidden, identity=identity)
+    messages, label_state = _correspondence_view_from_connection(
+        connection,
+        limit=limit,
+        hidden=hidden,
+        identity=identity,
+        label=label,
+        include_labels=True,
+    )
     contacts = _apply_contact_touch_metadata(connection, _group_contacts(messages))
     hidden_contacts = _hidden_contacts_from_connection(connection)
     payload = {
         "mailbox": "hidden" if hidden else "correspondence",
         "identity": mail_identities.normalize_mail_identity(identity, allow_all=True),
         "identities": mail_identities.public_mail_identities(),
+        "labels": label_state["labels"],
+        "label": label_state["label"],
         "message_count": len(messages),
         "contact_count": len(contacts),
         "hidden_contact_count": len(hidden_contacts),
@@ -7415,14 +8248,91 @@ def _build_correspondence_overview_from_connection(
         "cloudflare_queue": _cloudflare_queue_status_from_connection(connection),
         "cloudflare_sync": _cloudflare_sync_status_from_connection(connection),
         "resend_queue": _resend_queue_status_from_connection(connection),
-        "mailbox_version": _correspondence_mailbox_version_from_connection(connection, hidden=hidden, identity=identity),
+        # Label-independent, matching /api/sync-status so label views don't reload in a loop.
+        "mailbox_version": {
+            **_mailbox_version_from_messages(label_state["scoped_messages"]),
+            **_mail_ui_state_version_from_connection(connection),
+        },
     }
+    if label_state.get("label_error"):
+        payload["label_error"] = label_state["label_error"]
     if include_details:
         payload["details"] = {
             str(message["id"]): _communication_detail(connection, int(message["id"]))
             for message in messages
         }
     return payload
+
+
+def _labels_payload_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+    hidden: bool = False,
+) -> list[dict[str, Any]]:
+    _, label_state = _correspondence_view_from_connection(
+        connection,
+        limit=None,
+        hidden=hidden,
+        identity=identity,
+        include_labels=True,
+    )
+    evaluation = label_state["evaluation"]
+    if evaluation is None:
+        return []
+    rules = {label["id"]: label["rules"] for label in evaluation.labels}
+    return [{**entry, "rules": rules.get(entry["id"], [])} for entry in label_state["labels"]]
+
+
+def _label_suggestions_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    label: str,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+    hidden: bool = False,
+) -> dict[str, Any]:
+    _, label_state = _correspondence_view_from_connection(
+        connection,
+        limit=None,
+        hidden=hidden,
+        identity=identity,
+        include_labels=True,
+    )
+    evaluation = label_state["evaluation"]
+    selected = evaluation.label(label) if evaluation is not None else None
+    if selected is None:
+        raise LookupError("That label no longer exists.")
+    return {
+        "label_id": selected["id"],
+        "suggestions": mail_labels.suggestions(evaluation, label_state["scoped_messages"], selected["id"]),
+    }
+
+
+def _apply_label_mutation(connection: sqlite3.Connection, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    label_ref = payload.get("label")
+    if path == "/api/labels":
+        rules = payload.get("rules") or []
+        if isinstance(rules, str):
+            rules = [rules]
+        if not isinstance(rules, list):
+            raise ValueError("Send label rules as a list.")
+        return {"label": mail_labels.create_label(connection, payload.get("name"), rules)}
+    if path == "/api/labels/update":
+        return {"label": mail_labels.rename_label(connection, label_ref, payload.get("name"))}
+    if path == "/api/labels/delete":
+        return {"changed": mail_labels.delete_label(connection, label_ref)}
+    if path == "/api/labels/rules":
+        return {"rule": mail_labels.add_rule(connection, label_ref, payload.get("rule"))}
+    if path == "/api/labels/rules/remove":
+        return {"changed": mail_labels.remove_rule(connection, label_ref, payload.get("rule_id"))}
+    return {
+        "conversation": mail_labels.set_conversation(
+            connection,
+            label_ref,
+            communication_id=payload.get("communication_id"),
+            action=payload.get("action"),
+        )
+    }
 
 
 def _record_cloudflare_queue_heartbeat(*, db_path: Path) -> dict[str, Any] | None:
@@ -7599,6 +8509,7 @@ def build_mail_ui_overview(
     include_details: bool = False,
     mailbox: str | None = None,
     identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+    label: str | None = None,
 ) -> dict[str, Any]:
     hidden = _mail_ui_mailbox_is_hidden(mailbox)
     with store.open_db(db_path) as connection:
@@ -7609,6 +8520,7 @@ def build_mail_ui_overview(
                 include_details=include_details,
                 hidden=hidden,
                 identity=identity,
+                label=label,
             )
             if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
             else _build_mail_ui_overview_from_connection(
@@ -8670,6 +9582,7 @@ def _make_handler(
         include_details: bool,
         mailbox: str | None = None,
         identity: str = mail_identities.ALL_MAIL_IDENTITIES,
+        label: str | None = None,
     ) -> bool:
         return (
             (source or DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE) == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -8680,6 +9593,7 @@ def _make_handler(
             and not include_details
             and not _mail_ui_mailbox_is_hidden(mailbox)
             and mail_identities.normalize_mail_identity(identity, allow_all=True) == mail_identities.ALL_MAIL_IDENTITIES
+            and not str(label or "").strip()
         )
 
     def _build_default_overview_payload(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -9096,6 +10010,41 @@ def _make_handler(
                 self._send_json({"senders": senders})
                 return
 
+            if path in {"/api/labels", "/api/labels/suggestions"}:
+                label_identity = mail_identities.normalize_mail_identity(
+                    (query.get("identity") or [mail_identities.ALL_MAIL_IDENTITIES])[0],
+                    allow_all=True,
+                )
+                label_hidden = _mail_ui_mailbox_is_hidden((query.get("mailbox") or ["correspondence"])[0])
+                try:
+                    connection = snapshot_cache.get_connection()
+                    try:
+                        if path == "/api/labels":
+                            label_payload = {
+                                "labels": _labels_payload_from_connection(
+                                    connection,
+                                    identity=label_identity,
+                                    hidden=label_hidden,
+                                )
+                            }
+                        else:
+                            label_payload = _label_suggestions_from_connection(
+                                connection,
+                                label=str((query.get("label") or [""])[0] or ""),
+                                identity=label_identity,
+                                hidden=label_hidden,
+                            )
+                    finally:
+                        connection.close()
+                except LookupError as exc:
+                    self._send_json({"error": str(exc)}, status_code=404)
+                    return
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                    return
+                self._send_json(label_payload)
+                return
+
             if path == "/api/contacts":
                 query_text = str((query.get("query") or query.get("q") or [""])[0] or "").strip()
                 try:
@@ -9243,6 +10192,7 @@ def _make_handler(
                     allow_all=True,
                 )
                 hidden_mailbox = _mail_ui_mailbox_is_hidden(mailbox)
+                label_ref = str((query.get("label") or [""])[0] or "").strip()[:80] or None
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 include_details = ((query.get("include_details") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 page_limit = int((query.get("limit") or [str(limit)])[0] or limit)
@@ -9256,6 +10206,7 @@ def _make_handler(
                     include_details=include_details,
                     mailbox=mailbox,
                     identity=identity,
+                    label=label_ref,
                 )
                 try:
                     if should_sync:
@@ -9275,6 +10226,7 @@ def _make_handler(
                                             include_details=include_details,
                                             hidden=hidden_mailbox,
                                             identity=identity,
+                                            label=label_ref,
                                         ),
                                     }
                                     if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -9316,6 +10268,7 @@ def _make_handler(
                                             include_details=include_details,
                                         hidden=hidden_mailbox,
                                         identity=identity,
+                                        label=label_ref,
                                         ),
                                     }
                                     if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -9451,7 +10404,10 @@ def _make_handler(
                 if not self._require_auth_or_respond(html_response=False):
                     return
 
-            if path in {"/api/agent-terminal", "/api/spam/senders", "/api/spam/senders/remove"}:
+            if (
+                path in {"/api/agent-terminal", "/api/spam/senders", "/api/spam/senders/remove"}
+                or path in MAIL_UI_LABEL_MUTATION_PATHS
+            ):
                 client_host = str(self.client_address[0] if self.client_address else "")
                 authorized, authorization_reason = _cmail_agent_request_authorized(
                     self.headers,
@@ -9461,7 +10417,11 @@ def _make_handler(
                     self._send_json(
                         {
                             "error": authorization_reason,
-                            "message": "The CMAIL Agent button is available from this Mac or Cody's authenticated tailnet session.",
+                            "message": (
+                                "Label changes are available from this Mac or Cody's authenticated tailnet session."
+                                if path in MAIL_UI_LABEL_MUTATION_PATHS
+                                else "The CMAIL Agent button is available from this Mac or Cody's authenticated tailnet session."
+                            ),
                         },
                         status_code=403,
                     )
@@ -9493,6 +10453,32 @@ def _make_handler(
                     self._send_json({"ok": True, "sender": sender, "changed": changed, "senders": senders})
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, status_code=400)
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                return
+
+            if path in MAIL_UI_LABEL_MUTATION_PATHS:
+                try:
+                    if not isinstance(payload, dict):
+                        raise ValueError("Expected a label request object.")
+                    label_identity = mail_identities.normalize_mail_identity(
+                        payload.get("identity") or mail_identities.ALL_MAIL_IDENTITIES,
+                        allow_all=True,
+                    )
+                    with store.open_db(db_path) as connection:
+                        result = _apply_label_mutation(connection, path, payload)
+                        result["labels"] = _labels_payload_from_connection(
+                            connection,
+                            identity=label_identity,
+                            hidden=_mail_ui_mailbox_is_hidden(payload.get("mailbox")),
+                        )
+                    snapshot_cache.invalidate()
+                    _set_default_overview_cache(None)
+                    self._send_json({"ok": True, **result})
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                except LookupError as exc:
+                    self._send_json({"error": str(exc)}, status_code=404)
                 except TimeoutError as exc:
                     self._send_json({"error": str(exc)}, status_code=503)
                 return

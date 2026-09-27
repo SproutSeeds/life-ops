@@ -611,6 +611,7 @@ def ingest_cloudflare_email_payload(
             external_cc=cc,
             external_bcc=bcc,
             external_reply_to=reply_to,
+            envelope_to=envelope_to,
             from_value=from_value,
             to_recipients=to_recipients,
             cc_recipients=cc_recipients,

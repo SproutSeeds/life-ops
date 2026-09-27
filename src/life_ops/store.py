@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS communications (
     external_cc TEXT NOT NULL DEFAULT '',
     external_bcc TEXT NOT NULL DEFAULT '',
     external_reply_to TEXT NOT NULL DEFAULT '',
+    envelope_to TEXT NOT NULL DEFAULT '',
     from_json TEXT NOT NULL DEFAULT '{}',
     to_json TEXT NOT NULL DEFAULT '[]',
     cc_json TEXT NOT NULL DEFAULT '[]',
@@ -534,6 +535,35 @@ CREATE TABLE IF NOT EXISTS mail_delivery_queue (
     last_error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS mail_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    color TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS mail_label_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label_id INTEGER NOT NULL REFERENCES mail_labels(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('address', 'domain', 'keyword')),
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(label_id, kind, value)
+);
+
+CREATE TABLE IF NOT EXISTS mail_label_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label_id INTEGER NOT NULL REFERENCES mail_labels(id) ON DELETE CASCADE,
+    anchor TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(label_id, anchor)
 );
 
 CREATE TABLE IF NOT EXISTS system_alerts (
@@ -1244,6 +1274,7 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "communications", "external_cc", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "external_bcc", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "external_reply_to", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communications", "envelope_to", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "from_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "communications", "to_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(connection, "communications", "cc_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -2829,6 +2860,7 @@ def upsert_communication_from_sync(
     external_cc: str = "",
     external_bcc: str = "",
     external_reply_to: str = "",
+    envelope_to: str = "",
     from_value: Optional[dict] = None,
     to_recipients: Optional[list[dict]] = None,
     cc_recipients: Optional[list[dict]] = None,
@@ -2925,6 +2957,7 @@ def upsert_communication_from_sync(
             """,
             values + (communication_id,),
         )
+        _record_envelope_recipient(connection, communication_id=communication_id, envelope_to=envelope_to)
         _touch_mail_contacts_for_communication(
             connection,
             communication_id=communication_id,
@@ -2993,6 +3026,7 @@ def upsert_communication_from_sync(
         ),
     )
     communication_id = int(cursor.lastrowid)
+    _record_envelope_recipient(connection, communication_id=communication_id, envelope_to=envelope_to)
     _touch_mail_contacts_for_communication(
         connection,
         communication_id=communication_id,
@@ -3013,6 +3047,13 @@ def upsert_communication_from_sync(
     )
     connection.commit()
     return communication_id
+
+
+def _record_envelope_recipient(connection: sqlite3.Connection, *, communication_id: int, envelope_to: str) -> None:
+    # Replays without an envelope keep the recipient captured at first delivery.
+    clean = str(envelope_to or "").strip()
+    if clean:
+        connection.execute("UPDATE communications SET envelope_to = ? WHERE id = ?", (clean, communication_id))
 
 
 def set_communication_status(

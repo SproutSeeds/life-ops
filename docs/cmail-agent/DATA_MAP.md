@@ -32,6 +32,11 @@ Environment overrides such as `LIFE_OPS_CMAIL_RUNTIME_DB`, `LIFE_OPS_HOME`, and 
 - Spam sender rules: `sync_state["mail_ui:hidden_contacts"]`; new exact-address
   keys use `sender:<email>`. See [CMAIL Spam](../cmail-spam.md) for routing,
   restoration and the API. Original messages and work dispositions are preserved.
+- `mail_labels`, `mail_label_rules`, `mail_label_conversations`: CMAIL label
+  definitions, rules, and conversation choices keyed by Message-ID. Labels are an
+  organizing view only. See [CMAIL Labels](../cmail-labels.md).
+- `communications.envelope_to`: the delivered-to recipient captured at ingest,
+  recorded for mail received from September 27, 2026.
 
 Use `life_ops.store.open_db(...)` for application-aware access. Use `life_ops.mail_ui._communication_detail(connection, id)` or the local API when complete message/thread context is required; these paths keep identity inference and attachment summaries consistent with the UI.
 
@@ -39,6 +44,8 @@ Use `life_ops.store.open_db(...)` for application-aware access. Use `life_ops.ma
 
 ```text
 GET /api/overview?identity=all
+GET /api/overview?identity=all&label=<label id or slug>
+GET /api/labels?identity=all
 GET /api/communications/<communicationId>
 GET /api/drafts?identity=all
 GET /api/health
@@ -49,6 +56,7 @@ GET /api/health
 ## Source modules
 
 - `src/life_ops/mail_ui.py`: CMAIL UI, API, selection validation, drafts, replies, and mail presentation.
+- `src/life_ops/mail_labels.py`: label rules, header-linked conversation matching, manual choices, and suggestions.
 - `src/life_ops/cmail_agent.py`: persistent session binding, state handoff, and Terminal launch.
 - `src/life_ops/clawdad_client.py`: authenticated local ClawDad client and native-server discovery.
 - `src/life_ops/cmail_runtime.py`: live runtime database preparation, sync, sealing, and backup behavior.

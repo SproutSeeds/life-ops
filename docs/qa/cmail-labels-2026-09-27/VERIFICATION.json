@@ -1,0 +1,94 @@
+{
+  "verified_at": "2026-09-27T08:07:30+00:00",
+  "service": {
+    "health": true,
+    "version": "0.2.1",
+    "restarted_at_local": "2026-09-27T03:05:45-05:00",
+    "tracebacks_since_restart": 0,
+    "installed_equals_bundle_all_modules": true
+  },
+  "default_overview": {
+    "message_count": 380,
+    "contact_count": 337,
+    "unchanged": true,
+    "labels_key": true
+  },
+  "clawdad_label": {
+    "rule": "clawdad@frg.earth",
+    "contact_count": 1,
+    "conversation_count": 17,
+    "message_count": 17,
+    "suggestion_count": 1,
+    "reasons": [
+      "From clawdad@frg.earth"
+    ],
+    "frg_inbox_message_count": 17,
+    "alias_recipient_messages_so_far": 0
+  },
+  "private_route": {
+    "health": true,
+    "labels": [
+      [
+        "ClawDad",
+        17
+      ]
+    ]
+  },
+  "live_page_controls": [
+    "labelSelect",
+    "labelDialog",
+    "conversationLabelDialog",
+    "data-label-conversation"
+  ],
+  "postdeploy_seal": {
+    "sealed_at": "2026-09-27T08:07:12Z",
+    "snapshot_sha256": "6e67f5bf4eb63884cb28c42ff45e4d5c8cf0b28a5468d69fc09804b583f7386a"
+  },
+  "tests": {
+    "checkout_full_suite": {
+      "ran": 655,
+      "passed": 654,
+      "failed": 1,
+      "failure": "test_calendar scheduled-run total (11 != 12); fails identically with the label changes reverted"
+    },
+    "test_mail_labels": {
+      "ran": 14,
+      "passed": 14,
+      "mutation_checks_caught": 3
+    },
+    "bundle_suites": {
+      "passed": [
+        "test_mail_labels",
+        "test_mail_ui",
+        "test_cmail_runtime",
+        "test_sync_store",
+        "test_mail_ingest (all but one)"
+      ],
+      "preexisting": [
+        "test_ingest_tolerates_malformed_message_id_header fails identically on the previous live mail_ingest.py; the fix exists only in the checkout",
+        "test_mail_spam imports attention.py, which is not part of the CMAIL bundle"
+      ]
+    },
+    "javascript_syntax": "node --check passed"
+  },
+  "browser_qa": {
+    "engine": "Chrome for Testing 1234 (headless Playwright) against a private copy of the runtime DB; provider sync, sends and Terminal launch disabled",
+    "flows": [
+      "label dropdown lists ClawDad with its contact count",
+      "label view filters to ClawDad with the panel title and count",
+      "detail chip shows the reason on hover",
+      "conversation dialog shows ClawDad checked with its reason; Escape closes",
+      "Manage labels keeps the current selection, lists rules and suggestions",
+      "creating a keyword label (xprize: 2 contacts, 8 messages)",
+      "invalid rule shows a plain error",
+      "Save as label prefills from search"
+    ],
+    "phone_390px": {
+      "horizontal_overflow_px": 0,
+      "rows_with_clipped_content": 0
+    },
+    "console": [
+      "one expected 400 from the deliberate invalid-rule request"
+    ]
+  }
+}

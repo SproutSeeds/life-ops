@@ -1,0 +1,31 @@
+{
+  "prepared_at": "2026-09-27T08:05:00+00:00",
+  "strategy": "Four audited modules in the existing production bundle; store.py and mail_ingest.py use label-only patches so unrelated checkout differences stay out of CMAIL. Install without dependencies or build isolation. Restart the existing CMAIL launchd job only. Schedulers load checkout source on each run.",
+  "install_command": "/Users/codymitchell/.lifeops/venvs/cmail/bin/python -m pip install --no-index --no-deps --no-build-isolation --force-reinstall ./packages/lifeops-cli/backend",
+  "restart_command": "launchctl kickstart -k gui/501/com.frg.lifeops.cmail",
+  "rollback": "Reverse-apply PRODUCTION.patch inside packages/lifeops-cli/backend (patch -R -p1), reinstall with the install command, and restart. The schema additions are additive and ignored by the previous code; restore life-ops-db-20260927T080328Z only if data itself must be rolled back.",
+  "files": [
+    {
+      "path": "src/life_ops/mail_ui.py",
+      "before_sha256": "5d8103c680b5480e6f1d2b12b0dae2f49d9d85cf8f069f853ceef2885dc28392",
+      "after_sha256": "fc29a356cb75fb547d87739ab33e511dcd64f40c69cc71bf49af3e18e5c47074"
+    },
+    {
+      "path": "src/life_ops/store.py",
+      "before_sha256": "b34591e2b261d94a291a445813d227af46459caced5ff321b800af0a7097a123",
+      "after_sha256": "3736d0146797904ac586324cdcf5f75c8a6ca6b8433850a95f87c07a09f2133f",
+      "overlay": "Only the audited label changes; unrelated checkout changes stay outside the CMAIL bundle"
+    },
+    {
+      "path": "src/life_ops/mail_ingest.py",
+      "before_sha256": "2097cbb73114976000f0e4e6a2bbfd55e8318b4d2bcbebc6f87211b4d2b4f408",
+      "after_sha256": "f0e29218fc0276ff14930794041b5b25b6c444cd864bb0edd63f6ca4a3b6df04",
+      "overlay": "Only the audited label changes; unrelated checkout changes stay outside the CMAIL bundle"
+    },
+    {
+      "path": "src/life_ops/mail_labels.py",
+      "before_sha256": null,
+      "after_sha256": "b54edf424588b8eaff2a3debbeb8d874f364198f6564f76ff5ffb93314c70df8"
+    }
+  ]
+}
