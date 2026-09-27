@@ -1,0 +1,65 @@
+{
+  "verified_at": "2026-09-27T16:31:00+00:00",
+  "root_cause": {
+    "error": "sqlite3.OperationalError: unable to open database file on the first query of UI read connections",
+    "mechanism": "Scheduled jobs run the checkout with uv Python and bundled SQLite 3.50.4, which deletes the -wal/-shm files when its last connection closes. CMAIL runs pyenv Python on macOS SQLite 3.51.0, whose file-level read-only (mode=ro) connections cannot recreate them: SQLITE_CANTOPEN, errno 2.",
+    "affected_requests_in_previous_log": {
+      "sync_status": 3201,
+      "message_detail": 158,
+      "other_reads": 7
+    },
+    "rate_before_fix": "60 in the first 8 hours of the labels build"
+  },
+  "evidence": {
+    "live_probe_macos_sqlite_150s": {
+      "readonly_uri": {
+        "attempts": 4829,
+        "cantopen_errno2": 379
+      },
+      "readwrite_query_only": {
+        "attempts": 5468,
+        "failures": 0
+      }
+    },
+    "deterministic_cross_library_repro": "bundled-SQLite writer closes -> WAL files removed -> macOS SQLite mode=ro read fails; mode=rw + query_only read succeeds and recreates them",
+    "live_end_to_end_60_rounds": {
+      "before_fix": {
+        "sync_status_ok": 1,
+        "message_detail_ok": 2,
+        "new_tracebacks": 118
+      },
+      "after_fix": {
+        "sync_status_ok": 60,
+        "message_detail_ok": 60,
+        "new_tracebacks": 0
+      }
+    }
+  },
+  "service": {
+    "health": true,
+    "restarted_at_local": "2026-09-27T11:28:01-05:00",
+    "installed_equals_bundle_all_modules": true,
+    "clawdad_label_after_restart": {
+      "message_count": 17,
+      "contact_count": 1,
+      "suggestion_count": 1
+    },
+    "private_route_health": true
+  },
+  "message_id_fix": {
+    "installed_code_smoke": "malformed Message-ID <[malformed-id@example.com]> ingested into a temporary DB",
+    "production_occurrences_found_in_logs": 0
+  },
+  "tests": {
+    "checkout_full_suite": {
+      "ran": 659,
+      "passed": 658,
+      "failure": "test_calendar scheduled-run total, unrelated and pre-existing"
+    },
+    "bundle_suites": {
+      "ran": 137,
+      "passed": 137
+    },
+    "tests.test_cmail_read_connections": "3 passed; the file-level check fails against the previous mode=ro code"
+  }
+}

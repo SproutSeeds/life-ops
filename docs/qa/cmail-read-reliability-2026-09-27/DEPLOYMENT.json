@@ -1,0 +1,23 @@
+{
+  "prepared_at": "2026-09-27T16:27:00+00:00",
+  "strategy": "Two modules in the existing production bundle: the live read connection fix in mail_ui.py and the checkout's malformed Message-ID ingest fix in mail_ingest.py. Both bundle files now equal the checkout. Install without dependencies or build isolation; restart only the CMAIL launchd job.",
+  "install_command": "/Users/codymitchell/.lifeops/venvs/cmail/bin/python -m pip install --no-index --no-deps --no-build-isolation --force-reinstall ./packages/lifeops-cli/backend",
+  "restart_command": "launchctl kickstart -k gui/501/com.frg.lifeops.cmail",
+  "predeploy_backup": {
+    "backup_id": "life-ops-db-20260927T162612Z",
+    "plaintext_sha256": "9a4407a3123c0ef092f92168651ec68e0c43c4cf57c499bc68a3be708df986db"
+  },
+  "rollback": "Reverse-apply PRODUCTION.patch inside packages/lifeops-cli/backend (patch -R -p1), reinstall, restart. No schema or data changes were made.",
+  "files": [
+    {
+      "path": "src/life_ops/mail_ui.py",
+      "before_sha256": "fc29a356cb75fb547d87739ab33e511dcd64f40c69cc71bf49af3e18e5c47074",
+      "after_sha256": "884fd59dbb3084d1d4c428a56e56f1410d0ea516e4b4c5b2bb95786917ae15f2"
+    },
+    {
+      "path": "src/life_ops/mail_ingest.py",
+      "before_sha256": "f0e29218fc0276ff14930794041b5b25b6c444cd864bb0edd63f6ca4a3b6df04",
+      "after_sha256": "0c368e566489a50c803f398065c85ff826090f3663d640f9cb450b6c5e0a3269"
+    }
+  ]
+}

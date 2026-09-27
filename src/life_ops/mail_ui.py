@@ -9083,7 +9083,11 @@ class _MailUiSnapshotCache:
 
     def get_connection(self) -> sqlite3.Connection:
         if not store.encrypted_db_enabled(self.db_path):
-            connection = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=30.0)
+            # Open read-write so SQLite can recreate the WAL side files: scheduled jobs on
+            # another SQLite build delete them when their last connection closes, and a
+            # file-level read-only open on macOS SQLite then fails with "unable to open
+            # database file". mode=rw never creates the database; query_only blocks writes.
+            connection = sqlite3.connect(f"file:{self.db_path}?mode=rw", uri=True, timeout=30.0)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 30000")
             connection.execute("PRAGMA foreign_keys = ON")

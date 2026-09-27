@@ -1,0 +1,50 @@
+--- a/src/life_ops/mail_ui.py
++++ b/src/life_ops/mail_ui.py
+@@ -9083,7 +9083,11 @@
+ 
+     def get_connection(self) -> sqlite3.Connection:
+         if not store.encrypted_db_enabled(self.db_path):
+-            connection = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=30.0)
++            # Open read-write so SQLite can recreate the WAL side files: scheduled jobs on
++            # another SQLite build delete them when their last connection closes, and a
++            # file-level read-only open on macOS SQLite then fails with "unable to open
++            # database file". mode=rw never creates the database; query_only blocks writes.
++            connection = sqlite3.connect(f"file:{self.db_path}?mode=rw", uri=True, timeout=30.0)
+             connection.row_factory = sqlite3.Row
+             connection.execute("PRAGMA busy_timeout = 30000")
+             connection.execute("PRAGMA foreign_keys = ON")
+--- a/src/life_ops/mail_ingest.py
++++ b/src/life_ops/mail_ingest.py
+@@ -111,6 +111,16 @@
+         except (TypeError, ValueError, IndexError):
+             pass
+     return _utc_now()
++
++
++def _raw_header_values(message: Message, name: str) -> list[str]:
++    """Return header values without triggering strict structured-header parsing."""
++    normalized_name = name.strip().lower()
++    return [
++        _strip_string(value)
++        for header_name, value in message.raw_items()
++        if _strip_string(header_name).lower() == normalized_name and _strip_string(value)
++    ]
+ 
+ 
+ def sign_mail_ingest_payload(*, body_bytes: bytes, secret: str, timestamp: str) -> str:
+@@ -526,12 +536,12 @@
+         ingest_note = "Ingested from Cloudflare Email Routing."
+     requested_direction = _strip_string(payload.get("direction")).lower()
+     direction = requested_direction if is_gmail_archive and requested_direction in {"inbound", "outbound"} else "inbound"
+-    message_id = mail_metadata.primary_message_id(message.get_all("Message-ID"))
++    message_id = mail_metadata.primary_message_id(_raw_header_values(message, "Message-ID"))
+     if not message_id:
+         message_id = f"<{external_prefix}-{hashlib.sha256(raw_bytes).hexdigest()[:24]}@life-ops>"
+     external_id = _strip_string(payload.get("external_id")) or f"{external_prefix}:{message_id}"
+-    in_reply_to = mail_metadata.primary_message_id(message.get_all("In-Reply-To"))
+-    references = mail_metadata.message_id_tokens(message.get_all("References"))
++    in_reply_to = mail_metadata.primary_message_id(_raw_header_values(message, "In-Reply-To"))
++    references = mail_metadata.message_id_tokens(_raw_header_values(message, "References"))
+     thread_key = mail_metadata.derive_thread_key(
+         message_id=message_id,
+         in_reply_to=in_reply_to,
