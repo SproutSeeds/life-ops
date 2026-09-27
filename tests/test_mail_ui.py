@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -43,12 +46,175 @@ class MailUiTests(unittest.TestCase):
         duplicated = f"{legacy_signature}\n\n{mail_ui._CMAIL_SIGNATURE_TEXT}"
         self.assertEqual("Hello there.", mail_ui._strip_trailing_cmail_signature(duplicated))
 
+    def test_strip_trailing_cmail_signature_handles_previous_full_signature(self) -> None:
+        old_full_signature = (
+            "Hello there.\n\n"
+            "Best,\n\n"
+            "Cody Mitchell\n"
+            "Fractal Research Group LLC\n"
+            "https://frg.earth\n"
+            "https://www.npmjs.com/~sproutseeds\n"
+            "https://github.com/SproutSeeds\n"
+            "cody@frg.earth"
+        )
+
+        self.assertEqual("Hello there.", mail_ui._strip_trailing_cmail_signature(old_full_signature))
+        self.assertEqual(
+            "Hello there.\n\n" + mail_ui._CMAIL_SIGNATURE_TEXT,
+            mail_ui._compose_cmail_body_text(old_full_signature),
+        )
+
+    def test_strip_trailing_cmail_signature_handles_previous_contact_details_signature(self) -> None:
+        previous_contact_details_signature = (
+            "Hello there.\n\n"
+            "Best,\n\n"
+            "Cody Mitchell\n"
+            "Fractal Research Group LLC\n"
+            "https://frg.earth\n"
+            "https://panhandlefoodtrucks.com\n"
+            "cody@frg.earth\n"
+            "Call: (448) 432-0112\n"
+            "Text: (850) 529-8452"
+        )
+
+        self.assertEqual(
+            "Hello there.",
+            mail_ui._strip_trailing_cmail_signature(previous_contact_details_signature),
+        )
+        self.assertEqual(
+            "Hello there.\n\n" + mail_ui._CMAIL_SIGNATURE_TEXT,
+            mail_ui._compose_cmail_body_text(previous_contact_details_signature),
+        )
+
+    def test_strip_trailing_cmail_signature_handles_previous_website_only_signature(self) -> None:
+        previous_website_only_signature = (
+            "Hello there.\n\n"
+            "Best,\n\n"
+            "Cody Mitchell\n"
+            "Fractal Research Group LLC\n"
+            "https://frg.earth"
+        )
+
+        self.assertEqual(
+            "Hello there.",
+            mail_ui._strip_trailing_cmail_signature(previous_website_only_signature),
+        )
+        self.assertEqual(
+            "Hello there.\n\n" + mail_ui._CMAIL_SIGNATURE_TEXT,
+            mail_ui._compose_cmail_body_text(previous_website_only_signature),
+        )
+
+    def test_strip_trailing_cmail_signature_handles_previous_business_phone_signature(self) -> None:
+        old_business_phone_signature = (
+            "Hello there.\n\n"
+            "Best,\n\n"
+            "Cody Mitchell\n"
+            "Fractal Research Group LLC\n"
+            "https://frg.earth\n"
+            "https://www.npmjs.com/~sproutseeds\n"
+            "https://github.com/SproutSeeds\n"
+            "cody@frg.earth\n"
+            "(448) 432-0112"
+        )
+
+        self.assertEqual("Hello there.", mail_ui._strip_trailing_cmail_signature(old_business_phone_signature))
+        self.assertEqual(
+            "Hello there.\n\n" + mail_ui._CMAIL_SIGNATURE_TEXT,
+            mail_ui._compose_cmail_body_text(old_business_phone_signature),
+        )
+
     def test_compose_cmail_html_body_uses_email_safe_colors(self) -> None:
         html = mail_ui._compose_cmail_html_body("Hello there.")
+        preview = mail_ui._CMAIL_SIGNATURE_PREVIEW_HTML
 
         self.assertIn("color:#111111", html)
-        self.assertIn("https://github.com/SproutSeeds", html)
+        self.assertIn('href="https://frg.earth"', html)
+        self.assertIn('href="https://frg.earth"', preview)
+        self.assertIn('href="tel:+18505298452"', html)
+        self.assertIn('href="tel:+18505298452"', preview)
+        self.assertIn("(850) 529-8452", html)
+        self.assertIn("(850) 529-8452", preview)
+        self.assertNotIn("https://panhandlefoodtrucks.com", html)
+        self.assertNotIn("https://panhandlefoodtrucks.com", preview)
+        self.assertNotIn("mailto:cody@frg.earth", html)
+        self.assertNotIn("mailto:cody@frg.earth", preview)
+        self.assertNotIn("https://www.npmjs.com/~sproutseeds", html)
+        self.assertNotIn("https://github.com/SproutSeeds", html)
+        self.assertNotIn("https://www.npmjs.com/~sproutseeds", preview)
+        self.assertNotIn("https://github.com/SproutSeeds", preview)
+        self.assertNotIn("Call:", html)
+        self.assertNotIn("Call:", preview)
+        self.assertNotIn("Text:", html)
+        self.assertNotIn("Text:", preview)
+        self.assertNotIn("sms:", html)
         self.assertNotIn("color:#edf2eb", html)
+
+    def test_bind_my_soul_signature_contains_only_public_brand_details(self) -> None:
+        text = mail_ui._compose_cmail_body_text("Thanks for reaching out.", "bind_my_soul")
+        html = mail_ui._compose_cmail_html_body("Thanks for reaching out.", "bind_my_soul")
+
+        self.assertIn("Bind My Soul Support", text)
+        self.assertIn("https://bindmysoul.com", text)
+        self.assertIn("Bind My Soul Support", html)
+        self.assertNotIn("Cody", text + html)
+        self.assertNotIn("Fractal Research", text + html)
+        self.assertNotIn("cody@frg.earth", text + html)
+        self.assertNotIn("850", text + html)
+
+    def test_codacli_signature_uses_codacli_identity(self) -> None:
+        text = mail_ui._compose_cmail_body_text("Thanks for the note.", "codacli")
+        html = mail_ui._compose_cmail_html_body("Thanks for the note.", "codacli")
+
+        self.assertIn("Cody Mitchell", text)
+        self.assertIn("CodaCLI", text)
+        self.assertIn("https://codacli.com", text)
+        self.assertIn('href="https://codacli.com"', html)
+        self.assertNotIn("Fractal Research", text + html)
+        self.assertNotIn("bindmysoul.com", text + html)
+
+    def test_deckfound_signature_uses_support_identity(self) -> None:
+        text = mail_ui._compose_cmail_body_text("Thanks for reaching out.", "deckfound")
+        html = mail_ui._compose_cmail_html_body("Thanks for reaching out.", "deckfound")
+
+        self.assertIn("DeckFound Support", text)
+        self.assertIn("https://deckfound.com", text)
+        self.assertIn("support@deckfound.com", text)
+        self.assertIn("deckfound.com/assets/favicon-192.png", html)
+        self.assertIn("mailto:support@deckfound.com", html)
+        self.assertNotIn("Cody", text + html)
+        self.assertNotIn("Fractal Research", text + html)
+        self.assertNotIn("bindmysoul.com", text + html)
+
+    def test_frg_info_signature_uses_frg_business_identity(self) -> None:
+        text = mail_ui._compose_cmail_body_text("Thanks for reaching out.", "frg_info")
+        html = mail_ui._compose_cmail_html_body("Thanks for reaching out.", "frg_info")
+
+        self.assertIn("Cody Mitchell", text)
+        self.assertIn("Fractal Research Group LLC", text)
+        self.assertIn("https://frg.earth", text)
+        self.assertIn("(850) 529-8452", text)
+        self.assertIn('href="https://frg.earth"', html)
+        self.assertNotIn("DeckFound", text + html)
+        self.assertNotIn("Bind My Soul", text + html)
+
+    def test_mail_ui_includes_codacli_identity_picker(self) -> None:
+        html = mail_ui._render_mail_ui_html()
+
+        self.assertIn('<option value="codacli">Cody / CodaCLI</option>', html)
+        self.assertIn('"address": "cody@codacli.com"', html)
+
+    def test_mail_ui_includes_deckfound_identity_picker(self) -> None:
+        html = mail_ui._render_mail_ui_html()
+
+        self.assertIn('<option value="deckfound">DeckFound Support</option>', html)
+        self.assertIn('"address": "support@deckfound.com"', html)
+
+    def test_mail_ui_includes_frg_info_identity_picker(self) -> None:
+        html = mail_ui._render_mail_ui_html()
+
+        self.assertIn('<option value="frg_info">FRG Info</option>', html)
+        self.assertIn('"address": "info@frg.earth"', html)
+        self.assertIn('"from_email": "Fractal Research Group <info@frg.earth>"', html)
 
     def test_mail_ui_includes_mobile_first_responsive_styles(self) -> None:
         self.assertIn('@media (max-width: 720px)', mail_ui._HTML)
@@ -57,16 +223,100 @@ class MailUiTests(unittest.TestCase):
         self.assertIn('min-height: calc(100dvh - 250px)', mail_ui._HTML)
         self.assertIn('overflow-x: hidden', mail_ui._HTML)
         self.assertIn('grid-template-columns: minmax(0, 380px) minmax(0, 1fr)', mail_ui._HTML)
-        self.assertIn('table-layout: fixed', mail_ui._HTML)
-        self.assertIn('.body-rich td:first-child:not(:only-child)', mail_ui._HTML)
+        self.assertIn('table-layout: auto', mail_ui._HTML)
+        self.assertNotIn('table-layout: fixed', mail_ui._HTML)
+        self.assertNotIn('.body-rich td:first-child:not(:only-child)', mail_ui._HTML)
         self.assertIn('scrollbar-width: none', mail_ui._HTML)
         self.assertIn('mobile-web-app-capable', mail_ui._HTML)
         self.assertIn('apple-mobile-web-app-capable', mail_ui._HTML)
         self.assertIn('rel="manifest" href="/manifest.webmanifest"', mail_ui._HTML)
         self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"', mail_ui._HTML)
         self.assertIn('property="og:image" content="__CMAIL_PUBLIC_URL__/static/og-image.png"', mail_ui._HTML)
+        self.assertIn('id="deliveryAlerts"', mail_ui._HTML)
+        self.assertIn("function renderDeliveryAlerts(payload)", mail_ui._HTML)
+        self.assertIn("delivery issue", mail_ui._HTML)
+        self.assertIn("initialUrlParams", mail_ui._HTML)
+        self.assertIn('initialUrlParams.get("draft")', mail_ui._HTML)
+        self.assertIn("function initialHasDraftComposerSeedParams()", mail_ui._HTML)
+        self.assertIn("if (initialHasDraftComposerSeedParams()) return null;", mail_ui._HTML)
+        self.assertIn("function initialDraftComposerSeed()", mail_ui._HTML)
+        self.assertIn('initialUrlParams.get("to")', mail_ui._HTML)
+        self.assertIn('initialUrlParams.get("subject")', mail_ui._HTML)
+        self.assertIn('initialUrlParams.get("body_text")', mail_ui._HTML)
+        self.assertIn("draftComposerSeed: initialDraftComposerSeed()", mail_ui._HTML)
+        self.assertIn("function initialActiveView()", mail_ui._HTML)
+        self.assertIn("function prepareExternalEmailLinks(root)", mail_ui._HTML)
+        self.assertIn('link.target = "_blank"', mail_ui._HTML)
+        self.assertNotIn("handleExternalEmailLinkClick", mail_ui._HTML)
+        self.assertNotIn('window.open(href, "_blank"', mail_ui._HTML)
+        self.assertIn("function renderMailboxRefreshPreservingDetail()", mail_ui._HTML)
+        self.assertIn("preserveActiveDetail: true", mail_ui._HTML)
+        self.assertGreater(
+            mail_ui.MAIL_UI_CLIENT_REFRESH_INTERVAL_MS,
+            mail_ui.MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS,
+        )
         self.assertIn("Cmail is private. Open Tailscale", mail_ui._render_mail_ui_html())
         self.assertEqual("standalone", mail_ui._render_mail_ui_manifest()["display"])
+
+    def test_mail_ui_rich_email_tables_preserve_readable_content_width(self) -> None:
+        body_display = mail_ui._body_display(
+            "Verify your contact email. Dear Publisher, please confirm this address.",
+            html_body="""
+                <table><tr>
+                  <td></td>
+                  <td><table><tr>
+                    <td></td>
+                    <td><table><tr><td>Verify your contact email</td></tr></table></td>
+                    <td></td>
+                  </tr></table></td>
+                  <td></td>
+                </tr></table>
+            """,
+        )
+
+        self.assertIn("Verify your contact email", str(body_display["primary_html"]))
+        self.assertGreaterEqual(str(body_display["primary_html"]).count("<table>"), 3)
+        self.assertIn("table-layout: auto", mail_ui._HTML)
+        self.assertIn("word-break: normal", mail_ui._HTML)
+        self.assertIn("overflow-wrap: anywhere", mail_ui._HTML)
+        self.assertNotIn("table-layout: fixed", mail_ui._HTML)
+        self.assertNotIn(".body-rich tbody,", mail_ui._HTML)
+
+    def test_address_field_values_handles_unquoted_comma_display_name(self) -> None:
+        self.assertEqual(
+            ['"Chen, Rui" <ruic20@hs.uci.edu>'],
+            mail_ui._address_field_values("Chen, Rui <ruic20@hs.uci.edu>"),
+        )
+
+    def test_address_field_values_handles_mixed_recipients_with_comma_display_name(self) -> None:
+        self.assertEqual(
+            [
+                "Alice Example <alice@example.com>",
+                '"Chen, Rui" <ruic20@hs.uci.edu>',
+            ],
+            mail_ui._address_field_values(
+                "Alice Example <alice@example.com>, Chen, Rui <ruic20@hs.uci.edu>"
+            ),
+        )
+
+    def test_address_field_values_drops_invalid_split_recipient_fragments(self) -> None:
+        self.assertNotIn(
+            "Chen",
+            mail_ui._address_field_values("Chen, Rui <ruic20@hs.uci.edu>"),
+        )
+
+    def test_mail_ui_selecting_new_correspondence_moves_to_opened_tab(self) -> None:
+        self.assertIn("function moveNewSelectionToOpenedMode()", mail_ui._HTML)
+        self.assertIn('if (state.contactSortMode !== "new") return false;', mail_ui._HTML)
+        self.assertIn('state.contactSortMode = "opened";', mail_ui._HTML)
+        select_contact_start = mail_ui._HTML.index("function selectContact(contactKey)")
+        select_contact_end = mail_ui._HTML.index("function setContactSortMode", select_contact_start)
+        select_contact_js = mail_ui._HTML[select_contact_start:select_contact_end]
+        self.assertLess(
+            select_contact_js.index("moveNewSelectionToOpenedMode();"),
+            select_contact_js.index("markContactOpened(state.selectedContactKey);"),
+        )
+        self.assertIn("renderChrome();", select_contact_js)
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -264,6 +514,123 @@ class MailUiTests(unittest.TestCase):
             store.set_sync_state(connection, "cloudflare_mail:forwarding_enabled", "0")
             store.set_sync_state(connection, "cloudflare_mail:archive_encryption_enabled", "1")
 
+    def test_cmail_agent_button_is_keyboard_accessible_and_posts_selection(self) -> None:
+        self.assertIn('id="agentTerminalButton"', mail_ui._HTML)
+        self.assertIn('type="button"', mail_ui._HTML)
+        self.assertIn("cursor: pointer;", mail_ui._HTML)
+        self.assertIn("function openCmailAgentTerminal()", mail_ui._HTML)
+        self.assertIn('postJson("/api/agent-terminal", cmailAgentSelectionPayload())', mail_ui._HTML)
+        self.assertIn('label.textContent = "Opening…";', mail_ui._HTML)
+        self.assertIn('label.textContent = "Opened";', mail_ui._HTML)
+        launcher_start = mail_ui._HTML.index("async function openCmailAgentTerminal()")
+        launcher_end = mail_ui._HTML.index("function normalizedContacts", launcher_start)
+        self.assertNotIn("/v1/dispatch", mail_ui._HTML[launcher_start:launcher_end])
+
+    def test_cmail_agent_selection_uses_server_side_pointer_fields_only(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            selection = mail_ui._cmail_agent_selection_from_payload(
+                connection,
+                {
+                    "view": "inbox",
+                    "identity": "all",
+                    "communication_id": self.latest_communication_id,
+                    "body": "untrusted browser content",
+                    "thread_key": "untrusted-thread",
+                },
+            )
+
+        self.assertEqual(self.latest_communication_id, selection["communicationId"])
+        self.assertEqual("<thread@example.com>", selection["threadKey"])
+        self.assertEqual("<msg-002@example.com>", selection["messageId"])
+        self.assertEqual("alice@example.com", selection["contactKey"])
+        self.assertNotIn("body", selection)
+
+    def test_cmail_agent_launch_authorization_accepts_local_and_verified_tailnet(self) -> None:
+        local_ok, local_mode = mail_ui._cmail_agent_request_authorized(
+            {"Host": "127.0.0.1:4311", "Origin": "http://127.0.0.1:4311"},
+            client_host="127.0.0.1",
+        )
+        wrong_origin_ok, wrong_origin_reason = mail_ui._cmail_agent_request_authorized(
+            {"Host": "127.0.0.1:4311", "Origin": "https://example.com"},
+            client_host="127.0.0.1",
+        )
+        with mock.patch(
+            "life_ops.mail_ui._cmail_agent_allowed_users",
+            return_value={"cody@example.com"},
+        ):
+            tailnet_ok, tailnet_mode = mail_ui._cmail_agent_request_authorized(
+                {
+                    "Host": "cmail.tail649edd.ts.net",
+                    "Origin": "https://cmail.tail649edd.ts.net",
+                    "Tailscale-User-Login": "cody@example.com",
+                },
+                client_host="127.0.0.1",
+            )
+            missing_identity_ok, missing_identity_reason = mail_ui._cmail_agent_request_authorized(
+                {
+                    "Host": "cmail.tail649edd.ts.net",
+                    "Origin": "https://cmail.tail649edd.ts.net",
+                },
+                client_host="127.0.0.1",
+            )
+
+        self.assertTrue(local_ok)
+        self.assertEqual("local", local_mode)
+        self.assertFalse(wrong_origin_ok)
+        self.assertEqual("agent_terminal_requires_same_origin", wrong_origin_reason)
+        self.assertTrue(tailnet_ok)
+        self.assertEqual("tailnet", tailnet_mode)
+        self.assertFalse(missing_identity_ok)
+        self.assertEqual("agent_terminal_requires_tailnet_identity", missing_identity_reason)
+
+    def test_cmail_agent_endpoint_launches_with_validated_message_pointer(self) -> None:
+        handler = mail_ui._make_handler(
+            db_path=self.db_path,
+            limit=20,
+            enable_background_remote_sync=False,
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with mock.patch(
+                "life_ops.mail_ui.cmail_agent.open_terminal",
+                return_value={
+                    "ok": True,
+                    "sessionId": "cmail-session",
+                    "launchMode": "resume",
+                },
+            ) as open_terminal:
+                request = urllib.request.Request(
+                    f"{base_url}/api/agent-terminal",
+                    data=json.dumps(
+                        {
+                            "view": "inbox",
+                            "identity": "all",
+                            "communication_id": self.latest_communication_id,
+                            "body": "must not pass through",
+                        }
+                    ).encode("utf-8"),
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": base_url,
+                    },
+                )
+                with urllib.request.urlopen(request) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+            self.assertTrue(payload["ok"])
+            selection = open_terminal.call_args.args[0]
+            self.assertEqual(self.latest_communication_id, selection["communicationId"])
+            self.assertEqual("<thread@example.com>", selection["threadKey"])
+            self.assertNotIn("body", selection)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def tearDown(self) -> None:
         if self.original_master_key is None:
             os.environ.pop(vault_crypto.MASTER_KEY_NAME, None)
@@ -293,6 +660,8 @@ class MailUiTests(unittest.TestCase):
         self.assertEqual("healthy", payload["cloudflare_sync"]["status"])
         self.assertEqual("2099-01-01T00:00:00Z", payload["cloudflare_sync"]["last_success_at"])
         self.assertEqual(2, payload["cloudflare_queue"]["pending_count"])
+        self.assertEqual(1, payload["resend_queue"]["active_alert_count"])
+        self.assertEqual("Outbound queue retrying", payload["resend_queue"]["active_alerts"][0]["title"])
         self.assertIn("message-id:<msg-002@example.com>", payload["viewed_message_keys"])
         with store.open_db(self.db_path) as connection:
             self.assertTrue(store.get_sync_state(connection, store.MAIL_UI_VIEWED_MESSAGES_SEEDED_SYNC_KEY))
@@ -331,6 +700,23 @@ class MailUiTests(unittest.TestCase):
         self.assertNotIn("message-id:<msg-999@example.com>", next_payload["viewed_message_keys"])
         self.assertNotIn(self.manual_communication_id, [message["id"] for message in payload["messages"]])
 
+    def test_sync_status_surfaces_resend_delivery_alerts(self) -> None:
+        handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/sync-status") as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertIn("resend_queue", payload)
+        self.assertEqual(1, payload["resend_queue"]["active_alert_count"])
+        self.assertEqual("Outbound queue retrying", payload["resend_queue"]["active_alerts"][0]["title"])
+
     def test_build_correspondence_overview_combines_inbound_and_outbound_by_counterparty(self) -> None:
         payload = mail_ui.build_mail_ui_overview(
             db_path=self.db_path,
@@ -360,6 +746,141 @@ class MailUiTests(unittest.TestCase):
         )
         self.assertNotIn(self.draft_communication_id, [message["id"] for message in payload["messages"]])
         self.assertNotIn(self.manual_communication_id, [message["id"] for message in payload["messages"]])
+
+    def test_correspondence_query_uses_dedicated_index(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            indexes = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA index_list(communications)").fetchall()
+            }
+            plan = connection.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT communications.id
+                FROM communications
+                WHERE communications.channel = 'email'
+                  AND communications.status != 'deleted'
+                  AND communications.source IN (?, ?, ?, ?)
+                  AND communications.direction IN ('inbound', 'outbound')
+                ORDER BY communications.happened_at DESC, communications.id DESC
+                """,
+                mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCES,
+            ).fetchall()
+            orphan_plan = connection.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT communications.id
+                FROM communications
+                WHERE communications.channel = 'email'
+                  AND communications.source = ?
+                  AND communications.direction = 'outbound'
+                  AND communications.status IN ('queued', 'retrying', 'sending')
+                ORDER BY communications.id
+                """,
+                (mail_ui.DEFAULT_MAIL_UI_OUTBOUND_SOURCE,),
+            ).fetchall()
+
+        self.assertIn("idx_communications_mail_ui_correspondence", indexes)
+        self.assertIn("idx_communications_mail_ui_source_state", indexes)
+        self.assertTrue(
+            any("idx_communications_mail_ui_" in str(row["detail"]) for row in plan),
+            plan,
+        )
+        self.assertTrue(
+            any("idx_communications_mail_ui_source_state" in str(row["detail"]) for row in orphan_plan),
+            orphan_plan,
+        )
+
+    def test_build_correspondence_overview_includes_resend_received_support_mail(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            support_message_id = store.upsert_communication_from_sync(
+                connection,
+                source="resend_inbound",
+                external_id="resend-receiving:support-1",
+                subject="Character binding issue",
+                channel="email",
+                happened_at=datetime(2026, 8, 18, 8, 30),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="bind_my_soul",
+                external_from="Player One <player@example.com>",
+                external_to="support@bindmysoul.com",
+                message_id="<support-1@example.com>",
+                thread_key="<support-1@example.com>",
+                body_text="My characters are not binding.",
+            )
+
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            identity="bind_my_soul",
+            limit=10,
+        )
+
+        self.assertEqual(1, payload["message_count"])
+        self.assertEqual([support_message_id], [message["id"] for message in payload["messages"]])
+        self.assertEqual("resend_inbound", payload["messages"][0]["source"])
+        self.assertEqual("bind_my_soul", payload["messages"][0]["mail_identity"])
+
+    def test_build_correspondence_overview_filters_deckfound_identity(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            deckfound_message_id = store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="deckfound-support-1",
+                subject="DeckFound install question",
+                channel="email",
+                happened_at=datetime(2026, 8, 23, 16, 53),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="deckfound",
+                external_from="Customer <customer@example.com>",
+                external_to="support@deckfound.com",
+                message_id="<deckfound-support-1@example.com>",
+                thread_key="<deckfound-support-1@example.com>",
+                body_text="Can you help with installation?",
+            )
+
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            identity="deckfound",
+            limit=10,
+        )
+
+        self.assertEqual([deckfound_message_id], [message["id"] for message in payload["messages"]])
+        self.assertEqual("deckfound", payload["identity"])
+        self.assertEqual("DeckFound Support", payload["messages"][0]["mail_identity_label"])
+
+    def test_build_correspondence_overview_includes_codacli_gmail_archive(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            inbound_id = store.upsert_communication_from_sync(
+                connection,
+                source="gmail_archive",
+                external_id="gmail:cody@codacli.com:archive-in-1",
+                subject="Historical CodaCLI message",
+                channel="email",
+                happened_at=datetime(2026, 1, 5, 8, 30),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="codacli",
+                external_from="Customer <customer@example.com>",
+                external_to="cody@codacli.com",
+                message_id="<archive-in-1@example.com>",
+                thread_key="<archive-in-1@example.com>",
+                body_text="Archived before the Workspace cancellation.",
+            )
+
+        payload = mail_ui.build_mail_ui_overview(
+            db_path=self.db_path,
+            source=mail_ui.DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE,
+            identity="codacli",
+            limit=10,
+        )
+
+        self.assertEqual([inbound_id], [message["id"] for message in payload["messages"]])
+        self.assertEqual("gmail_archive", payload["messages"][0]["source"])
+        self.assertEqual("codacli", payload["messages"][0]["mail_identity"])
 
     def test_correspondence_mailbox_version_counts_beyond_visible_page(self) -> None:
         payload = mail_ui.build_mail_ui_overview(
@@ -393,7 +914,17 @@ class MailUiTests(unittest.TestCase):
             if contact["contact_key"] == "alice@example.com"
         )
 
-        self.assertGreater(payload["message_count"], 1)
+        self.assertEqual(2, payload["message_count"])
+        self.assertEqual(
+            1,
+            len(
+                [
+                    message
+                    for message in payload["messages"]
+                    if message["contact_key"] == "alice@example.com"
+                ]
+            ),
+        )
         self.assertEqual("2026-04-22T13:00:00Z", alice_contact["opened_at"])
         self.assertEqual("2026-04-22T13:00:00Z", alice_contact["touched_at"])
         self.assertEqual(1, payload["mailbox_version"]["opened_contact_count"])
@@ -548,6 +1079,29 @@ class MailUiTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_http_root_does_not_wait_for_mailbox_overview(self) -> None:
+        handler = mail_ui._make_handler(
+            db_path=self.db_path,
+            limit=20,
+            enable_background_remote_sync=False,
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with mock.patch(
+                "life_ops.mail_ui._build_correspondence_overview_from_connection",
+                side_effect=AssertionError("root must not build mailbox overview"),
+            ):
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2) as response:
+                    body = response.read().decode("utf-8")
+            self.assertEqual(200, response.status)
+            self.assertIn("CMAIL", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_build_correspondence_overview_suppresses_orphaned_resend_queue_artifacts(self) -> None:
         with store.open_db(self.db_path) as connection:
             orphaned_id = store.upsert_communication_from_sync(
@@ -659,6 +1213,7 @@ class MailUiTests(unittest.TestCase):
         self.assertTrue(body_display["has_quote"])
         self.assertEqual("Thanks for the note.", body_display["primary_text"])
         self.assertIn('href="https://frg.earth"', str(body_display["quoted_html"]))
+        self.assertIn('target="_blank" rel="noreferrer noopener"', str(body_display["quoted_html"]))
         self.assertIn("frg-bimi-iris-floating.png", str(body_display["quoted_html"]))
         self.assertNotIn("<script", str(body_display["quoted_html"]))
         self.assertNotIn("On Wed, Apr 1, 2026 at 12:45 PM Cody &lt;cody@frg.earth&gt; wrote:", str(body_display["quoted_html"]))
@@ -679,6 +1234,7 @@ class MailUiTests(unittest.TestCase):
         self.assertFalse(body_display["has_quote"])
         self.assertIn("Payment Receipt Confirmation", str(body_display["primary_html"]))
         self.assertIn('href="https://example.com/receipt"', str(body_display["primary_html"]))
+        self.assertIn('target="_blank" rel="noreferrer noopener"', str(body_display["primary_html"]))
         self.assertNotIn("securecheckout-fl.cdc.nicusa.com", str(body_display["primary_html"]))
         self.assertNotIn("<script", str(body_display["primary_html"]))
         self.assertNotIn("<style", str(body_display["primary_html"]))
@@ -713,6 +1269,7 @@ class MailUiTests(unittest.TestCase):
 
     def test_http_endpoints_expose_threads_drafts_and_image_previews(self) -> None:
         handler = mail_ui._make_handler(db_path=self.db_path, limit=20)
+        handler._prime_overview_cache()  # type: ignore[attr-defined]
         server = HTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -725,6 +1282,20 @@ class MailUiTests(unittest.TestCase):
                 with urllib.request.urlopen(f"{base_url}/") as response:
                     html = response.read().decode("utf-8")
                 self.assertIn("CMAIL", html)
+                self.assertNotIn('const SERVER_BOOTSTRAP_OVERVIEW = {};', html)
+                self.assertIn("Structured mail test", html)
+                self.assertLess(len(html.encode("utf-8")), 1_500_000)
+                node_binary = shutil.which("node")
+                if node_binary:
+                    inline_scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+                    syntax_check = subprocess.run(
+                        [node_binary, "--check", "-"],
+                        input="\n".join(inline_scripts),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, syntax_check.returncode, syntax_check.stderr)
                 self.assertIn('rel="icon" href="/static/favicon.svg"', html)
                 self.assertIn('rel="manifest" href="/manifest.webmanifest"', html)
                 self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"', html)
@@ -739,7 +1310,8 @@ class MailUiTests(unittest.TestCase):
                 self.assertIn('id="correspondenceSearch"', html)
                 self.assertIn('placeholder="search name, email, or body"', html)
                 self.assertNotIn('placeholder="search name or email"', html)
-                self.assertIn('aria-label="Hide correspondence"', html)
+                self.assertIn("disabled aria-disabled='true'", html)
+                self.assertIn('aria-label="Move sender to Spam"', html)
                 self.assertIn('class="hide-icon"', html)
                 self.assertIn('class="trash-icon"', html)
                 self.assertIn('data-clear-selection', html)
@@ -764,6 +1336,8 @@ class MailUiTests(unittest.TestCase):
                 self.assertIn('No new correspondence.', html)
                 self.assertIn('No opened correspondence yet.', html)
                 self.assertIn("message?.search_text", html)
+                self.assertIn(".slice(0, 8)", html)
+                self.assertNotIn("__MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT__", html)
                 self.assertIn("/api/messages/read", html)
                 self.assertIn("/api/contacts/open", html)
                 self.assertIn("viewed_message_keys", html)
@@ -781,6 +1355,7 @@ class MailUiTests(unittest.TestCase):
                 self.assertNotIn("all sources", html)
                 self.assertNotIn("quick drafts", html)
                 self.assertNotIn("__MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__", html)
+                self.assertNotIn("__MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS__", html)
 
                 with urllib.request.urlopen(f"{base_url}/static/favicon.svg") as response:
                     favicon_bytes = response.read()
@@ -979,16 +1554,27 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual("Updated draft to Terence Tao", saved_payload["draft"]["subject"])
                 self.assertEqual("tao@example.com", saved_payload["draft"]["to"])
                 self.assertIn("https://frg.earth", saved_payload["draft"]["body_text"])
-                self.assertIn("https://www.npmjs.com/~sproutseeds", saved_payload["draft"]["body_text"])
-                self.assertIn("https://github.com/SproutSeeds", saved_payload["draft"]["body_text"])
+                self.assertIn("(850) 529-8452", saved_payload["draft"]["body_text"])
+                self.assertNotIn("https://panhandlefoodtrucks.com", saved_payload["draft"]["body_text"])
+                self.assertNotIn("cody@frg.earth", saved_payload["draft"]["body_text"])
+                self.assertNotIn("Call:", saved_payload["draft"]["body_text"])
+                self.assertNotIn("Text:", saved_payload["draft"]["body_text"])
+                self.assertNotIn("https://www.npmjs.com/~sproutseeds", saved_payload["draft"]["body_text"])
+                self.assertNotIn("https://github.com/SproutSeeds", saved_payload["draft"]["body_text"])
                 with store.open_db(self.db_path) as connection:
                     saved_row = store.get_communication_by_id(connection, self.draft_communication_id)
                     tao_contacts = store.list_mail_contacts(connection, query="tao@example.com", limit=20)
                 self.assertIsNotNone(saved_row)
                 self.assertIn("frg-bimi-iris-floating.png", str(saved_row["html_body"]))
                 self.assertIn("https://frg.earth", str(saved_row["html_body"]))
-                self.assertIn("https://www.npmjs.com/~sproutseeds", str(saved_row["html_body"]))
-                self.assertIn("https://github.com/SproutSeeds", str(saved_row["html_body"]))
+                self.assertIn("tel:+18505298452", str(saved_row["html_body"]))
+                self.assertIn("(850) 529-8452", str(saved_row["html_body"]))
+                self.assertNotIn("https://panhandlefoodtrucks.com", str(saved_row["html_body"]))
+                self.assertNotIn("mailto:cody@frg.earth", str(saved_row["html_body"]))
+                self.assertNotIn("Call:", str(saved_row["html_body"]))
+                self.assertNotIn("Text:", str(saved_row["html_body"]))
+                self.assertNotIn("https://www.npmjs.com/~sproutseeds", str(saved_row["html_body"]))
+                self.assertNotIn("https://github.com/SproutSeeds", str(saved_row["html_body"]))
                 self.assertEqual("tao@example.com", str(tao_contacts[0]["email"]))
 
                 with mock.patch(
@@ -1014,11 +1600,22 @@ class MailUiTests(unittest.TestCase):
                 self.assertEqual("queued", send_payload["draft_status"])
                 resend_kwargs = resend_send_mock.call_args.kwargs
                 self.assertIn("https://frg.earth", resend_kwargs["text"])
-                self.assertIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["text"])
-                self.assertIn("https://github.com/SproutSeeds", resend_kwargs["text"])
+                self.assertIn("(850) 529-8452", resend_kwargs["text"])
+                self.assertNotIn("https://panhandlefoodtrucks.com", resend_kwargs["text"])
+                self.assertNotIn("cody@frg.earth", resend_kwargs["text"])
+                self.assertNotIn("Call:", resend_kwargs["text"])
+                self.assertNotIn("Text:", resend_kwargs["text"])
+                self.assertNotIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["text"])
+                self.assertNotIn("https://github.com/SproutSeeds", resend_kwargs["text"])
                 self.assertIn("frg-bimi-iris-floating.png", resend_kwargs["html"])
-                self.assertIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["html"])
-                self.assertIn("https://github.com/SproutSeeds", resend_kwargs["html"])
+                self.assertIn("tel:+18505298452", resend_kwargs["html"])
+                self.assertIn("(850) 529-8452", resend_kwargs["html"])
+                self.assertNotIn("https://panhandlefoodtrucks.com", resend_kwargs["html"])
+                self.assertNotIn("mailto:cody@frg.earth", resend_kwargs["html"])
+                self.assertNotIn("Call:", resend_kwargs["html"])
+                self.assertNotIn("Text:", resend_kwargs["html"])
+                self.assertNotIn("https://www.npmjs.com/~sproutseeds", resend_kwargs["html"])
+                self.assertNotIn("https://github.com/SproutSeeds", resend_kwargs["html"])
                 self.assertIn("color:#111111", resend_kwargs["html"])
                 self.assertNotIn("color:#edf2eb", resend_kwargs["html"])
                 self.assertFalse(resend_kwargs["apply_signature"])
@@ -1136,6 +1733,164 @@ class MailUiTests(unittest.TestCase):
             sent_draft_row = store.get_communication_by_id(connection, int(saved["id"]))
         self.assertEqual("deleted", str(sent_draft_row["status"]))
         self.assertTrue(str(sent_draft_row["deleted_at"] or ""))
+
+    def test_bind_my_soul_reply_identity_is_locked_through_send(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            source_id = store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="support-inbound-1",
+                subject="Character archive question",
+                channel="email",
+                happened_at=datetime(2026, 8, 12, 5, 0),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="bind_my_soul",
+                external_from="Player One <player@example.com>",
+                external_to="support@bindmysoul.com",
+                message_id="<support-inbound-1@example.com>",
+                thread_key="<support-inbound-1@example.com>",
+                body_text="Can you help?",
+            )
+
+        scaffold = mail_ui.get_cmail_draft_scaffold(
+            db_path=self.db_path,
+            communication_id=source_id,
+            mode="reply",
+        )
+        self.assertEqual("bind_my_soul", scaffold["mail_identity"])
+        self.assertTrue(scaffold["identity_locked"])
+
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                **scaffold,
+                "mail_identity": "frg",
+                "body_text": "Absolutely.",
+            },
+        )
+        self.assertEqual("bind_my_soul", saved["mail_identity"])
+        self.assertTrue(saved["identity_locked"])
+        self.assertIn("Bind My Soul Support", saved["body_text"])
+        self.assertNotIn("Cody", saved["body_text"])
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 3001},
+        ) as resend_send:
+            mail_ui.send_cmail_draft(db_path=self.db_path, draft_id=int(saved["id"]))
+
+        kwargs = resend_send.call_args.kwargs
+        self.assertEqual("Bind My Soul Support <support@bindmysoul.com>", kwargs["from_email"])
+        self.assertEqual("support@bindmysoul.com", kwargs["reply_to"])
+        self.assertEqual("bind_my_soul", kwargs["mail_identity"])
+        self.assertIsNone(kwargs["config_path"])
+        self.assertNotIn("Cody", kwargs["text"] + kwargs["html"])
+
+    def test_deckfound_reply_identity_is_locked_through_send(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            source_id = store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="deckfound-inbound-1",
+                subject="DeckFound install question",
+                channel="email",
+                happened_at=datetime(2026, 8, 23, 16, 53),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="deckfound",
+                external_from="Customer <customer@example.com>",
+                external_to="support@deckfound.com",
+                message_id="<deckfound-inbound-1@example.com>",
+                thread_key="<deckfound-inbound-1@example.com>",
+                body_text="Can you help?",
+            )
+
+        scaffold = mail_ui.get_cmail_draft_scaffold(
+            db_path=self.db_path,
+            communication_id=source_id,
+            mode="reply",
+        )
+        self.assertEqual("deckfound", scaffold["mail_identity"])
+        self.assertTrue(scaffold["identity_locked"])
+
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                **scaffold,
+                "mail_identity": "frg",
+                "body_text": "Absolutely.",
+            },
+        )
+        self.assertEqual("deckfound", saved["mail_identity"])
+        self.assertTrue(saved["identity_locked"])
+        self.assertIn("DeckFound Support", saved["body_text"])
+        self.assertNotIn("Cody", saved["body_text"])
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 3002},
+        ) as resend_send:
+            mail_ui.send_cmail_draft(db_path=self.db_path, draft_id=int(saved["id"]))
+
+        kwargs = resend_send.call_args.kwargs
+        self.assertEqual("DeckFound Support <support@deckfound.com>", kwargs["from_email"])
+        self.assertEqual("support@deckfound.com", kwargs["reply_to"])
+        self.assertEqual("deckfound", kwargs["mail_identity"])
+        self.assertIsNone(kwargs["config_path"])
+        self.assertNotIn("Cody", kwargs["text"] + kwargs["html"])
+
+    def test_frg_info_reply_identity_is_locked_through_send(self) -> None:
+        with store.open_db(self.db_path) as connection:
+            source_id = store.upsert_communication_from_sync(
+                connection,
+                source="cloudflare_email",
+                external_id="frg-info-inbound-1",
+                subject="General FRG inquiry",
+                channel="email",
+                happened_at=datetime(2026, 8, 24, 0, 15),
+                follow_up_at=None,
+                direction="inbound",
+                mail_identity="frg_info",
+                external_from="Prospective Client <client@example.com>",
+                external_to="info@frg.earth",
+                message_id="<frg-info-inbound-1@example.com>",
+                thread_key="<frg-info-inbound-1@example.com>",
+                body_text="Can you tell me more about FRG?",
+            )
+
+        scaffold = mail_ui.get_cmail_draft_scaffold(
+            db_path=self.db_path,
+            communication_id=source_id,
+            mode="reply",
+        )
+        self.assertEqual("frg_info", scaffold["mail_identity"])
+        self.assertTrue(scaffold["identity_locked"])
+
+        saved = mail_ui.save_cmail_draft(
+            db_path=self.db_path,
+            payload={
+                **scaffold,
+                "mail_identity": "frg",
+                "body_text": "Absolutely.",
+            },
+        )
+        self.assertEqual("frg_info", saved["mail_identity"])
+        self.assertTrue(saved["identity_locked"])
+        self.assertIn("Fractal Research Group LLC", saved["body_text"])
+
+        with mock.patch(
+            "life_ops.mail_ui.resend_send_email",
+            return_value={"status": "queued", "communication_id": 3003},
+        ) as resend_send:
+            mail_ui.send_cmail_draft(db_path=self.db_path, draft_id=int(saved["id"]))
+
+        kwargs = resend_send.call_args.kwargs
+        self.assertEqual("Fractal Research Group <info@frg.earth>", kwargs["from_email"])
+        self.assertEqual("info@frg.earth", kwargs["reply_to"])
+        self.assertEqual("frg_info", kwargs["mail_identity"])
+        self.assertIsNone(kwargs["config_path"])
+        self.assertIn("Cody Mitchell", kwargs["text"] + kwargs["html"])
 
     def test_send_cmail_draft_forwards_scheduled_at_to_delivery_queue(self) -> None:
         saved = mail_ui.save_cmail_draft(

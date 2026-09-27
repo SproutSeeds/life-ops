@@ -1,0 +1,56 @@
+{
+  "verified_at": "2026-09-23T23:45:18.760019+00:00",
+  "local_health": {
+    "ok": true,
+    "seconds": 0.01
+  },
+  "private_health": {
+    "ok": true,
+    "seconds": 0.02
+  },
+  "senders": {
+    "count": 0,
+    "seconds": 0.04
+  },
+  "spam": {
+    "mailbox": "hidden",
+    "message_count": 0,
+    "contact_count": 0,
+    "seconds": 0.47
+  },
+  "inbox": {
+    "mailbox": "correspondence",
+    "message_count": 367,
+    "contact_count": 324,
+    "seconds": 0.46
+  },
+  "rule_state_restored": true,
+  "production_canary": {
+    "method": "Private production browser: add and remove reserved example.invalid sender",
+    "removed": true,
+    "real_senders_changed": false,
+    "real_messages_reclassified": false
+  },
+  "browser_qa": {
+    "synthetic_existing_and_future_routing": true,
+    "restore": true,
+    "reload_persistence": true,
+    "back_and_escape_focus": true,
+    "phone_width_preview": 390,
+    "physical_phone_test": false
+  },
+  "backup_manifest": "/Users/codymitchell/.lifeops/data/backups/life-ops-db-20260923T233159Z.backup.json",
+  "tests": {
+    "python": 188,
+    "cli": 20,
+    "total": 208,
+    "javascript_syntax": "passed",
+    "diff_check": "passed"
+  },
+  "workspace_hygiene": {
+    "status": "dirty_with_scratch",
+    "unclassified_count": 0,
+    "scratch_count": 1,
+    "safe_to_expand": true
+  }
+}

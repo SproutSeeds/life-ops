@@ -1,0 +1,1508 @@
+{
+  "state": "intentionally_dirty_classified",
+  "repair_scope": [
+    "src/life_ops/mail_spam.py",
+    "src/life_ops/mail_ui.py",
+    "src/life_ops/store.py",
+    "src/life_ops/calendar.py",
+    "src/life_ops/communication_sweep.py",
+    "src/life_ops/attention.py",
+    "tests/test_mail_spam.py",
+    "tests/test_mail_ui.py",
+    "docs/cmail-spam.md",
+    "docs/cmail-agent/DATA_MAP.md",
+    "docs/qa/cmail-spam-2026-09-23/",
+    "src/life_ops/critical_bills.py",
+    "src/life_ops/job_search_follow_up.py"
+  ],
+  "repair_dirty_entries": [
+    {
+      "status": " M",
+      "path": "src/life_ops/calendar.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/mail_ui.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/store.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_mail_ui.py"
+    },
+    {
+      "status": "??",
+      "path": "docs/cmail-agent/DATA_MAP.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/cmail-spam.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/DEPLOYMENT.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/PREDEPLOY_STATE.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/PRODUCTION.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/VERIFICATION.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/WORKSPACE_BUCKETS.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-spam-2026-09-23/serve_fixture.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/attention.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/communication_sweep.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/critical_bills.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/job_search_follow_up.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/mail_spam.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_mail_spam.py"
+    }
+  ],
+  "repair_next_action": "Production runtime deployed from the seven audited modules represented in PRODUCTION.patch; retain this scoped evidence and checkpoint with existing overlapping source work. No broad staging or source push was performed.",
+  "unrelated_preserved": [
+    {
+      "status": " M",
+      "path": "README.md"
+    },
+    {
+      "status": " M",
+      "path": "docs/agent-usage.md"
+    },
+    {
+      "status": " M",
+      "path": "docs/calendar.md"
+    },
+    {
+      "status": " M",
+      "path": "ops/com.sproutseeds.lifeops-noon-day-sheet-print.plist.example"
+    },
+    {
+      "status": " M",
+      "path": "package-lock.json"
+    },
+    {
+      "status": " M",
+      "path": "packages/lifeops-cli/bin/cmail-service"
+    },
+    {
+      "status": " M",
+      "path": "packages/lifeops-cli/src/index.js"
+    },
+    {
+      "status": " M",
+      "path": "packages/lifeops-cli/test/cli.test.js"
+    },
+    {
+      "status": " M",
+      "path": "pyproject.toml"
+    },
+    {
+      "status": " M",
+      "path": "scripts/lifeops_day_sheet_db.sh"
+    },
+    {
+      "status": " M",
+      "path": "scripts/noon_day_sheet_print.sh"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/classification.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/cli.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/cmail_runtime.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/credentials.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/google_sync.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/mail_ingest.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/resend_integration.py"
+    },
+    {
+      "status": " M",
+      "path": "src/life_ops/vault_crypto.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_calendar.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_classification.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_cmail_runtime.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_credentials.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_mail_ingest.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_resend_integration.py"
+    },
+    {
+      "status": " M",
+      "path": "tests/test_sync_store.py"
+    },
+    {
+      "status": " M",
+      "path": "uv.lock"
+    },
+    {
+      "status": "??",
+      "path": ".agents/plugins/marketplace.json"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-delegate/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-incident-triage/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-release/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-session-doctor/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-supervisor/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".agents/skills/clawdad-watchtower-review/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": ".codex/config.toml"
+    },
+    {
+      "status": "??",
+      "path": ".codex/hooks.json"
+    },
+    {
+      "status": "??",
+      "path": ".codex/hooks/clawdad-hook.mjs"
+    },
+    {
+      "status": "??",
+      "path": "AGENTS.md"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/__init__.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/__main__.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/agenda.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/apple_calendar.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/backups.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/calendar.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/calendar_publish.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/classification.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/cli.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/cloudflare_email.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/cmail_runtime.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/communication_sweep.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/credentials.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/document_ingest.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/emma_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/fastmail_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/google_sync.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/life_ui.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/mail_ingest.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/mail_metadata.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/mail_ui.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/mail_vault.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/orp_sweep.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/outreach_validation.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/profile_context.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/profile_memory.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/resend_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/__init__.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/browser.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/platforms/__init__.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/platforms/facebook.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/platforms/linkedin.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/social/post.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/store.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/tracing.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/vault_crypto.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/x_content.py"
+    },
+    {
+      "status": "??",
+      "path": "build/lib/life_ops/x_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "docs/actions-inventory-2026-08-09.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/attention-overhaul-2026-09-05.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/attention-system.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/VERIFICATION.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/action-status.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/deployment.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/hygiene.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/launchd.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/preexisting.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/repeated-trigger.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/resend-idempotency.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/biology-outreach/verification-2026-09-23/tests.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/cloud-supervised-actions-prd.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/cmail-agent/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/cmail-agent/RUNBOOK.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/lifeops-storage-map.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-api.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-1300-read-docs.manifest.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-1300-read-docs.savings.manifest.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-1300-read-docs.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-1800-clawdad-conversations.manifest.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-1800-clawdad-conversations.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-afternoon-evening-review.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-afternoon-evening-validation.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-linkml-source.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-open-source-hour.manifest.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-open-source-hour.posts-api.manifest.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/2026-09-23-open-source-hour.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/schedule-proposal.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/CALENDAR.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/POSTS.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/POSTS_FOR_REVIEW.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/POSTS_FOR_REVIEW.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/QA.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/SCHEDULING_RECEIPT.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/SOURCES.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/SOURCES.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/VALIDATION.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/build_packet.py"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-24-0830-nemo-contributor-support.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-24-1300-dumpy.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-24-1800-clawdad-projects.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-25-0830-psi-verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-25-1300-myeloma-measurement.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-25-1800-clawdad-dictation.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-26-0830-mathlib.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-26-1300-biosentinel.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-26-1800-clawdad-read-aloud.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-27-0830-formal-conjectures.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-27-1300-retinal-longevity.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-27-1800-clawdad-images.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-28-0830-camera-platform-review.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-28-1300-roomwave.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-28-1800-clawdad-remote-assist.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-29-0830-grok-structured-output.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-29-1300-food.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-29-1800-clawdad-queue.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-30-0830-linkml-tests.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-30-1300-career.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/manifests/2026-09-30-1800-clawdad-quick-prompts.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-24-0830-nemo-contributor-support.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-24-1300-dumpy.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-24-1800-clawdad-projects.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-25-0830-psi-verification.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-25-1300-myeloma-measurement.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-25-1800-clawdad-dictation.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-26-0830-mathlib.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-26-1300-biosentinel.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-26-1800-clawdad-read-aloud.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-27-0830-formal-conjectures.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-27-1300-retinal-longevity.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-27-1800-clawdad-images.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-28-0830-camera-platform-review.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-28-1300-roomwave.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-28-1800-clawdad-remote-assist.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-29-0830-grok-structured-output.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-29-1300-food.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-29-1800-clawdad-queue.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-30-0830-linkml-tests.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-30-1300-career.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/linkedin-publishing/week-2026-09-24/posts/2026-09-30-1800-clawdad-quick-prompts.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/local-codex-actions-prd.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/REPORT.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/actions-final.jpg"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/lifeops-tests.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/workflow-evidence.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/workflow-reconciliation.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/actions-audit-2026-09-06/worktree-inventory.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/attention-2026-09-05/live-home.png"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/attention-2026-09-05/verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/attention-2026-09-05/worktree-inventory.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/REPORT.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/launch-files/cmail-watchdog"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/launch-files/com.frg.lifeops.cmail.availability.plist"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/launch-files/com.frg.lifeops.cmail.plist"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/launch-files/com.frg.lifeops.cmail.watchdog.plist"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/recovery-tests.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/cmail-reliability-2026-09-10/worktree-buckets.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/app-setup-status.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/browser-form-regression.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/hygiene-summary.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/live-connection-status.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/preexisting-worktree.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-api-2026-09-22/sha256.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-scheduler-2026-09-23/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/linkedin-scheduler-2026-09-23/verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/monitor-reliability-2026-09-23/LIVE_NOTICES.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/monitor-reliability-2026-09-23/README.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/monitor-reliability-2026-09-23/VERIFICATION.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/monitor-reliability-2026-09-23/WORKSPACE_BUCKETS.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/qa/storage-audit-2026-09-09.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/rhythms.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/scheduled-runs.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/storage-maintenance.md"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/VERIFICATION.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/ai-advancement-radar-hygiene.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/contract-work-search-hygiene.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-00.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-01.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-02.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-03.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-04.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-05.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-06.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-07.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-08.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-09.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deploy-10.patch"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/deployment.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/gmail-scheduler.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/life-ops-hygiene.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/lifeops-model-inventory.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/lifeops-model-migration-status.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/lifeops-tests.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/live-api-models.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/model-probe/probe-events.jsonl"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/model-probe/probe-prompt.txt"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/model-probe/probe-schema.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/model-probe/probe.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/model-probe/verification.json"
+    },
+    {
+      "status": "??",
+      "path": "docs/verification/2026-09-23-astra-max-actions/preexisting.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/automations.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/codex-local-retention-policy.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-actions-coordinator.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-amazon-alexa-response-watch.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-codex-historic-state-archive.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-codex-local-retention.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-communication-sweep.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-critical-bills-readiness.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-github-needed-actions.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-job-search-follow-up.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-life-ui.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-linkedin-publisher.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/com.sproutseeds.lifeops-rhythms.plist.example"
+    },
+    {
+      "status": "??",
+      "path": "ops/critical-bills.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/follow-up-watches.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/schemas/cmail-primary-inbox-sweep-output.schema.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/schemas/communication-loop-sweep-output.schema.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/schemas/communication-sweep-output.schema.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/schemas/critical-bills-readiness-output.schema.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/schemas/github-needed-actions-output.schema.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/storage-maintenance-policy.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/tailnet-app/cmail.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/tailnet-app/lifeops-rhythms.json"
+    },
+    {
+      "status": "??",
+      "path": "ops/tailnet-app/lifeops-ui.json"
+    },
+    {
+      "status": "??",
+      "path": "orp/hygiene-policy.json"
+    },
+    {
+      "status": "??",
+      "path": "orp/worktree-buckets-2026-06-21-plaid.md"
+    },
+    {
+      "status": "??",
+      "path": "packages/lifeops-cli/bin/cmail-service-guard.py"
+    },
+    {
+      "status": "??",
+      "path": "packages/lifeops-cli/bin/cmail-supervise"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/README.md"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/bin/rhythms.js"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/package.json"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/src/cli.js"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/src/index.js"
+    },
+    {
+      "status": "??",
+      "path": "packages/rhythms/test/rhythms.test.js"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/.codex-plugin/plugin.json"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/hooks/hooks.json"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-delegate/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-incident-triage/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-release/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-session-doctor/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-supervisor/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "plugins/clawdad-codex-integration/skills/clawdad-watchtower-review/SKILL.md"
+    },
+    {
+      "status": "??",
+      "path": "scripts/actions_coordinator.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/amazon_alexa_response_watch.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/attention_coordinator.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/biology_outreach.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/codex_archive_recall.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/codex_attention_hook.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/codex_historic_state_archive.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/codex_local_retention.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/communication_sweep.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/critical_bills_readiness.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/github_needed_actions.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_actions_coordinator.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_attention.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_biology_outreach.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_codex_historic_state_archive.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_codex_local_retention.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_critical_bills_readiness.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_github_needed_actions.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_job_search_follow_up.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_linkedin_publisher.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/install_storage_maintenance.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/job_search_follow_up.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/linkedin_publisher.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/open_github_action_codex.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/rhythms_service.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/storage_guard.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/storage_maintenance.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/supervise-life-ui-service.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/supervise-rhythms-service.sh"
+    },
+    {
+      "status": "??",
+      "path": "scripts/verify_codex_retention_ledger.py"
+    },
+    {
+      "status": "??",
+      "path": "scripts/verify_codex_retention_manifest.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/action_model.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/action_threads.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/actions.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/ai_advancement_radar.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/biology_outreach.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/calendar_publish.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/clawdad_client.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/cmail_agent.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/codex_historic_state.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/codex_local_retention.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/communication_watch.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/follow_up_watch.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/frg_booking_availability.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/github_needed_actions.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/life_ui.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/linkedin_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/linkedin_publisher.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/linkedin_scheduler.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/mail_identities.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/plaid_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/storage_maintenance.py"
+    },
+    {
+      "status": "??",
+      "path": "src/life_ops/storage_safety.py"
+    },
+    {
+      "status": "??",
+      "path": "static/attention.css"
+    },
+    {
+      "status": "??",
+      "path": "static/attention.html"
+    },
+    {
+      "status": "??",
+      "path": "static/attention.js"
+    },
+    {
+      "status": "??",
+      "path": "static/lifeops-apple-touch-icon.png"
+    },
+    {
+      "status": "??",
+      "path": "static/lifeops-icon-192.png"
+    },
+    {
+      "status": "??",
+      "path": "static/lifeops-icon-512.png"
+    },
+    {
+      "status": "??",
+      "path": "static/lifeops-icon.svg"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_actions.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_actions_audit.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_ai_advancement_radar.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_attention.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_attention_notifications.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_biology_outreach.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_calendar_publish.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_clawdad_client.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_cmail_agent.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_cmail_service_guard.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_codex_historic_state.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_codex_local_retention.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_communication_sweep.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_communication_watch.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_critical_bills.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_frg_booking_availability.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_github_needed_actions.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_google_sync.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_job_search_follow_up.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_linkedin_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_linkedin_publisher.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_linkedin_scheduler.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_plaid_integration.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_storage_maintenance.py"
+    }
+  ],
+  "unrelated_next_action": "Owners should checkpoint their existing source, tests, operations and canonical artifacts; preserve all unrelated paths.",
+  "scratch": {
+    "path": "build/",
+    "disposition": "pre-existing packaging output",
+    "next_action": "Owner to review at next packaging checkpoint; preserved during this change."
+  },
+  "production_bundle": "packages/lifeops-cli/backend is ignored generated deployment material; only the seven named entries in DEPLOYMENT.json were overlaid.",
+  "outside_checkout": [
+    "Existing CMAIL virtual environment rebuilt from focused bundle",
+    "Existing CMAIL and Life UI launchd services restarted",
+    "Encrypted CMAIL backup life-ops-db-20260923T233159Z",
+    "Reserved example.invalid sender canary created and removed through production UI"
+  ]
+}

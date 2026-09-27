@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import tempfile
+from contextlib import nullcontext
 from datetime import datetime
 from datetime import timezone
 from email import policy
@@ -25,6 +26,7 @@ from life_ops import classification
 from life_ops import credentials
 from life_ops.document_ingest import CODE_SUFFIXES, extract_text_from_saved_attachment
 from life_ops import mail_metadata
+from life_ops import mail_identities
 from life_ops import mail_vault
 from life_ops import store
 
@@ -109,6 +111,16 @@ def _message_datetime(message: Message) -> datetime:
         except (TypeError, ValueError, IndexError):
             pass
     return _utc_now()
+
+
+def _raw_header_values(message: Message, name: str) -> list[str]:
+    """Return header values without triggering strict structured-header parsing."""
+    normalized_name = name.strip().lower()
+    return [
+        _strip_string(value)
+        for header_name, value in message.raw_items()
+        if _strip_string(header_name).lower() == normalized_name and _strip_string(value)
+    ]
 
 
 def sign_mail_ingest_payload(*, body_bytes: bytes, secret: str, timestamp: str) -> str:
@@ -342,16 +354,18 @@ def _extract_attachment_text_from_payload(
         temp_path.unlink(missing_ok=True)
 
 
-def _save_cloudflare_mail_artifacts(
+def _save_mail_artifacts(
     *,
     connection,
     communication_id: int,
     external_id: str,
     raw_bytes: bytes,
     attachment_parts: list[dict[str, Any]],
+    source: str = "cloudflare_email",
+    vault_namespace: str = "cloudflare_email",
 ) -> dict[str, Any]:
     message_hash = hashlib.sha256(raw_bytes).hexdigest()
-    relative_dir = Path("cloudflare_email") / f"communication-{communication_id}" / message_hash[:12]
+    relative_dir = Path(vault_namespace) / f"communication-{communication_id}" / message_hash[:12]
     raw_relative_path, raw_sha256 = _write_mail_vault_file(
         relative_dir=relative_dir,
         filename="message.eml",
@@ -406,7 +420,7 @@ def _save_cloudflare_mail_artifacts(
             connection,
             external_key=f"{external_id}:attachment:{int(attachment.get('index', 0) or 0)}:{sha256}",
             communication_id=communication_id,
-            source="cloudflare_email",
+            source=source,
             external_message_id=external_id,
             external_attachment_id=str(attachment.get("content_id", "")),
             part_id=str(int(attachment.get("index", 0) or 0)),
@@ -477,6 +491,8 @@ def ingest_cloudflare_email_payload(
     payload: dict[str, Any],
     *,
     db_path: Optional[Path] = None,
+    connection: Any = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     raw_base64 = _strip_string(payload.get("raw_base64"))
     if not raw_base64:
@@ -497,12 +513,35 @@ def ingest_cloudflare_email_payload(
     body_text, snippet, html_body, attachments = _extract_message_content(message)
     attachment_parts = _extract_message_parts(message)
     happened_at = _message_datetime(message)
-    message_id = mail_metadata.primary_message_id(message.get_all("Message-ID"))
+    provider = _strip_string(payload.get("provider")).lower()
+    is_resend_receiving = provider in {"resend", "resend-receiving", "resend_receiving"}
+    is_gmail_archive = provider in {"gmail-archive", "gmail_archive"}
+    if is_gmail_archive:
+        source = "gmail_archive"
+        external_prefix = "gmail-archive"
+        vault_namespace = "gmail_archive"
+        gmail_labels = sorted({_strip_string(value) for value in payload.get("gmail_labels", []) if _strip_string(value)})
+        ingest_note = "Archived from Google Workspace Gmail."
+        if gmail_labels:
+            ingest_note += f" Original labels: {', '.join(gmail_labels)}."
+    elif is_resend_receiving:
+        source = "resend_inbound"
+        external_prefix = "resend-receiving"
+        vault_namespace = "resend_inbound"
+        ingest_note = "Ingested from Resend Receiving."
+    else:
+        source = "cloudflare_email"
+        external_prefix = "cloudflare"
+        vault_namespace = "cloudflare_email"
+        ingest_note = "Ingested from Cloudflare Email Routing."
+    requested_direction = _strip_string(payload.get("direction")).lower()
+    direction = requested_direction if is_gmail_archive and requested_direction in {"inbound", "outbound"} else "inbound"
+    message_id = mail_metadata.primary_message_id(_raw_header_values(message, "Message-ID"))
     if not message_id:
-        message_id = f"<cf-{hashlib.sha256(raw_bytes).hexdigest()[:24]}@life-ops>"
-    external_id = f"cloudflare:{message_id}"
-    in_reply_to = mail_metadata.primary_message_id(message.get_all("In-Reply-To"))
-    references = mail_metadata.message_id_tokens(message.get_all("References"))
+        message_id = f"<{external_prefix}-{hashlib.sha256(raw_bytes).hexdigest()[:24]}@life-ops>"
+    external_id = _strip_string(payload.get("external_id")) or f"{external_prefix}:{message_id}"
+    in_reply_to = mail_metadata.primary_message_id(_raw_header_values(message, "In-Reply-To"))
+    references = mail_metadata.message_id_tokens(_raw_header_values(message, "References"))
     thread_key = mail_metadata.derive_thread_key(
         message_id=message_id,
         in_reply_to=in_reply_to,
@@ -519,6 +558,18 @@ def ingest_cloudflare_email_payload(
     bcc_recipients = mail_metadata.parse_address_values(bcc)
     reply_to_recipients = mail_metadata.parse_address_values(reply_to)
     header_snapshot = mail_metadata.headers_snapshot(message, forensic=_forensic_headers_enabled())
+    mail_identity = mail_identities.infer_mail_identity(
+        direction=direction,
+        external_from=sender,
+        external_to=to,
+        external_cc=cc,
+        external_bcc=bcc,
+        external_reply_to=reply_to,
+        envelope_to=envelope_to,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+        bcc_recipients=bcc_recipients,
+    )
 
     message_classification = classification.classify_message(
         subject=subject,
@@ -529,26 +580,32 @@ def ingest_cloudflare_email_payload(
         body_text=body_text,
         attachments=attachments,
         triage={},
-        user_email=envelope_to,
+        user_email=_strip_string(payload.get("user_email")) or envelope_to,
     )
-    status = _strip_string(message_classification.get("status")) or "reference"
+    status = "reference" if is_gmail_archive else (_strip_string(message_classification.get("status")) or "reference")
     follow_up_at = happened_at if status == "open" else None
     raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
-    with store.open_db(db_path or store.default_db_path()) as connection:
+    connection_context = (
+        store.open_db(db_path or store.default_db_path())
+        if connection is None
+        else nullcontext(connection)
+    )
+    with connection_context as db_connection:
         communication_id = store.upsert_communication_from_sync(
-            connection,
-            source="cloudflare_email",
+            db_connection,
+            source=source,
             external_id=external_id,
             subject=subject,
             channel="email",
             happened_at=happened_at,
             follow_up_at=follow_up_at,
-            direction="inbound",
+            direction=direction,
+            mail_identity=mail_identity,
             person=person,
-            notes="Ingested from Cloudflare Email Routing.",
+            notes=ingest_note,
             status=status,
-            external_thread_id=external_thread_id,
+            external_thread_id=_strip_string(payload.get("external_thread_id")) or external_thread_id,
             external_from=sender,
             external_to=to,
             external_cc=cc,
@@ -578,14 +635,16 @@ def ingest_cloudflare_email_payload(
             classifier_version=_strip_string(message_classification.get("classifier_version")),
             classification=message_classification,
         )
-        artifact_summary = _save_cloudflare_mail_artifacts(
-            connection=connection,
+        artifact_summary = _save_mail_artifacts(
+            connection=db_connection,
             communication_id=communication_id,
             external_id=external_id,
             raw_bytes=raw_bytes,
             attachment_parts=attachment_parts,
+            source=source,
+            vault_namespace=vault_namespace,
         )
-        connection.execute(
+        db_connection.execute(
             "UPDATE communications SET raw_relative_path = ?, raw_sha256 = ? WHERE id = ?",
             (
                 str(artifact_summary["raw_relative_path"]),
@@ -593,15 +652,18 @@ def ingest_cloudflare_email_payload(
                 communication_id,
             ),
         )
-        connection.commit()
+        if commit:
+            db_connection.commit()
 
     return {
         "communication_id": communication_id,
-        "source": "cloudflare_email",
+        "source": source,
         "external_id": external_id,
         "subject": subject,
         "sender": sender,
         "envelope_to": envelope_to or None,
+        "direction": direction,
+        "mail_identity": mail_identity,
         "message_id": message_id,
         "thread_key": thread_key,
         "status": status,

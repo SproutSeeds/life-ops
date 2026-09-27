@@ -50,6 +50,22 @@ CALENDAR_ENTRY_TYPES = ("task", "event", "note", "memory", "habit", "milestone",
 CALENDAR_ENTRY_STATUSES = ("planned", "in_progress", "done", "missed", "deferred", "canceled", "archived")
 CALENDAR_ENTRY_PRIORITIES = ("urgent", "high", "normal", "low")
 CALENDAR_RECURRENCE_FREQUENCIES = ("", "none", "daily", "weekly", "monthly", "yearly")
+COMMUNICATION_LOOP_STATUSES = ("needs_me", "waiting_on_them", "scheduled", "blocked", "full_circle", "reference", "dismissed")
+COMMUNICATION_LOOP_ACTIVE_STATUSES = ("needs_me", "waiting_on_them", "scheduled", "blocked")
+COMMUNICATION_LOOP_PRIORITIES = ("urgent", "high", "normal", "low")
+AUTOMATION_OCCURRENCE_STATUSES = ("pending", "running", "completed", "degraded", "failed", "missed")
+ACTION_LIFECYCLE_STATES = ("active", "paused", "archived")
+ACTION_OUTCOME_STATES = ("waiting", "needs_review", "resolved_supported", "resolved_blocked", "follow_up_needed")
+ACTION_NOTE_INTENTS = (
+    "note",
+    "payment_reported",
+    "handled_reported",
+    "snoozed",
+    "dismissed",
+    "archived",
+    "reopened",
+)
+ACTION_NOTE_STATUSES = ("pending", "applied", "acknowledged")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -85,6 +101,7 @@ CREATE TABLE IF NOT EXISTS communications (
     subject TEXT NOT NULL,
     channel TEXT NOT NULL,
     direction TEXT NOT NULL DEFAULT 'inbound',
+    mail_identity TEXT NOT NULL DEFAULT '',
     person TEXT NOT NULL DEFAULT '',
     organization_id INTEGER REFERENCES organizations(id),
     happened_at TEXT NOT NULL,
@@ -123,6 +140,41 @@ CREATE TABLE IF NOT EXISTS communications (
     classifier_version TEXT NOT NULL DEFAULT '',
     classification_json TEXT NOT NULL DEFAULT '{}',
     deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS communication_loops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mailbox TEXT NOT NULL DEFAULT 'cmail',
+    loop_key TEXT NOT NULL,
+    group_slug TEXT NOT NULL DEFAULT 'loose-ends',
+    group_title TEXT NOT NULL DEFAULT 'Loose Ends',
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'needs_me',
+    priority TEXT NOT NULL DEFAULT 'normal',
+    owner TEXT NOT NULL DEFAULT '',
+    counterpart TEXT NOT NULL DEFAULT '',
+    next_action TEXT NOT NULL DEFAULT '',
+    closure_condition TEXT NOT NULL DEFAULT '',
+    waiting_on TEXT NOT NULL DEFAULT '',
+    due_date TEXT NOT NULL DEFAULT '',
+    why_now TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    source_thread_keys_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TEXT,
+    UNIQUE(mailbox, loop_key)
+);
+
+CREATE TABLE IF NOT EXISTS communication_loop_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    loop_id INTEGER NOT NULL REFERENCES communication_loops(id) ON DELETE CASCADE,
+    communication_id INTEGER NOT NULL REFERENCES communications(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'evidence',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(loop_id, communication_id)
 );
 
 CREATE TABLE IF NOT EXISTS profile_context_items (
@@ -309,9 +361,145 @@ CREATE TABLE IF NOT EXISTS calendar_day_snapshots (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS calendar_publish_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    timezone TEXT NOT NULL DEFAULT 'America/Chicago',
+    token_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calendar_publish_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL REFERENCES calendar_publish_channels(id) ON DELETE CASCADE,
+    calendar_entry_id INTEGER NOT NULL REFERENCES calendar_entries(id) ON DELETE CASCADE,
+    public_title TEXT NOT NULL DEFAULT '',
+    public_description TEXT NOT NULL DEFAULT '',
+    public_location TEXT NOT NULL DEFAULT '',
+    public_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'published',
+    sequence INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(channel_id, calendar_entry_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS plaid_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    client_id TEXT NOT NULL DEFAULT '',
+    secret_envelope_json TEXT NOT NULL DEFAULT '',
+    environment TEXT NOT NULL DEFAULT 'sandbox',
+    client_name TEXT NOT NULL DEFAULT 'LifeOps',
+    products_json TEXT NOT NULL DEFAULT '["transactions"]',
+    country_codes_json TEXT NOT NULL DEFAULT '["US"]',
+    language TEXT NOT NULL DEFAULT 'en',
+    days_requested INTEGER NOT NULL DEFAULT 730,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS plaid_items (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL UNIQUE,
+    access_token_envelope_json TEXT NOT NULL DEFAULT '',
+    institution_id TEXT NOT NULL DEFAULT '',
+    institution_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    cursor TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS bank_accounts (
+    id TEXT PRIMARY KEY,
+    plaid_item_id TEXT NOT NULL REFERENCES plaid_items(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL DEFAULT '',
+    official_name TEXT NOT NULL DEFAULT '',
+    account_type TEXT NOT NULL DEFAULT '',
+    subtype TEXT NOT NULL DEFAULT '',
+    mask TEXT NOT NULL DEFAULT '',
+    current_balance REAL,
+    available_balance REAL,
+    currency_code TEXT NOT NULL DEFAULT 'USD',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS bank_transactions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES bank_accounts(id) ON DELETE CASCADE,
+    plaid_transaction_id TEXT UNIQUE,
+    amount REAL NOT NULL,
+    date TEXT NOT NULL,
+    authorized_date TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    merchant_name TEXT NOT NULL DEFAULT '',
+    category_id TEXT NOT NULL DEFAULT '',
+    plaid_category TEXT NOT NULL DEFAULT '',
+    pending INTEGER NOT NULL DEFAULT 0,
+    iso_currency_code TEXT NOT NULL DEFAULT 'USD',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS critical_bill_obligations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    obligation_key TEXT NOT NULL UNIQUE,
+    profile_key TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    vendor TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'other_essential',
+    amount REAL,
+    currency_code TEXT NOT NULL DEFAULT 'USD',
+    due_date TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'expected',
+    confidence REAL NOT NULL DEFAULT 0,
+    document_type TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT '',
+    source_mailbox TEXT NOT NULL DEFAULT '',
+    source_message_id TEXT NOT NULL DEFAULT '',
+    source_thread_id TEXT NOT NULL DEFAULT '',
+    source_happened_at TEXT NOT NULL DEFAULT '',
+    account_hint TEXT NOT NULL DEFAULT '',
+    matched_transaction_id TEXT REFERENCES bank_transactions(id) ON DELETE SET NULL,
+    matched_transaction_state TEXT NOT NULL DEFAULT '',
+    day_sheet_entry_id INTEGER REFERENCES calendar_entries(id) ON DELETE SET NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS critical_bill_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    obligation_id INTEGER NOT NULL REFERENCES critical_bill_obligations(id) ON DELETE CASCADE,
+    evidence_key TEXT NOT NULL UNIQUE,
+    evidence_kind TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT '',
+    source_mailbox TEXT NOT NULL DEFAULT '',
+    source_message_id TEXT NOT NULL DEFAULT '',
+    source_thread_id TEXT NOT NULL DEFAULT '',
+    happened_at TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -382,6 +570,254 @@ CREATE TABLE IF NOT EXISTS trace_events (
     payload_json TEXT NOT NULL DEFAULT '{}',
     happened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS automation_occurrences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    occurrence_key TEXT NOT NULL,
+    local_date TEXT NOT NULL,
+    slot_key TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL DEFAULT 'scheduled',
+    scheduled_for TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    apply_requested INTEGER NOT NULL DEFAULT 0,
+    trace_run_id TEXT NOT NULL DEFAULT '',
+    report_path TEXT NOT NULL DEFAULT '',
+    error_text TEXT NOT NULL DEFAULT '',
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE(action_id, occurrence_key)
+);
+
+CREATE TABLE IF NOT EXISTS action_lifecycles (
+    action_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'active',
+    outcome_state TEXT NOT NULL DEFAULT 'waiting',
+    outcome_summary TEXT NOT NULL DEFAULT '',
+    resolution_note TEXT NOT NULL DEFAULT '',
+    last_evidence_key TEXT NOT NULL DEFAULT '',
+    alert_entry_id INTEGER REFERENCES calendar_entries(id) ON DELETE SET NULL,
+    paused_at TEXT,
+    archived_at TEXT,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS action_lifecycle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    from_state TEXT NOT NULL DEFAULT '',
+    to_state TEXT NOT NULL,
+    outcome_state TEXT NOT NULL DEFAULT '',
+    evidence_key TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    happened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS action_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT 'Cody',
+    body TEXT NOT NULL,
+    intent TEXT NOT NULL DEFAULT 'note',
+    subject_key TEXT NOT NULL DEFAULT '',
+    subject_label TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    effect_summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    acknowledged_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS github_action_items (
+    item_key TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    repository TEXT NOT NULL DEFAULT '',
+    item_kind TEXT NOT NULL DEFAULT 'github_item',
+    item_number INTEGER,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'open',
+    priority TEXT NOT NULL DEFAULT 'high',
+    category TEXT NOT NULL DEFAULT 'needed_action',
+    reason TEXT NOT NULL DEFAULT '',
+    next_action TEXT NOT NULL DEFAULT '',
+    source_kinds_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    live_facts_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL DEFAULT '',
+    snoozed_until TEXT,
+    handled_reported_at TEXT,
+    resolved_at TEXT,
+    archived_at TEXT,
+    day_sheet_entry_id INTEGER REFERENCES calendar_entries(id) ON DELETE SET NULL,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS job_search_action_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_key TEXT NOT NULL UNIQUE,
+    action_id TEXT NOT NULL,
+    company TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
+    item_kind TEXT NOT NULL DEFAULT 'follow_up',
+    title TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    priority TEXT NOT NULL DEFAULT 'high',
+    sender TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    received_at TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    next_action TEXT NOT NULL DEFAULT '',
+    deadline_at TEXT NOT NULL DEFAULT '',
+    wake_at TEXT NOT NULL DEFAULT '',
+    disposition_note TEXT NOT NULL DEFAULT '',
+    source_communication_ids_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    live_facts_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL DEFAULT '',
+    calendar_entry_id INTEGER REFERENCES calendar_entries(id) ON DELETE SET NULL,
+    completed_at TEXT,
+    archived_at TEXT,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS job_search_action_item_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    happened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS action_codex_threads (
+    thread_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    workspace TEXT NOT NULL DEFAULT '',
+    thread_kind TEXT NOT NULL DEFAULT 'item',
+    lifecycle_state TEXT NOT NULL DEFAULT 'active',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    source_item_key TEXT NOT NULL DEFAULT '',
+    open_count INTEGER NOT NULL DEFAULT 0,
+    last_opened_at TEXT NOT NULL DEFAULT '',
+    unavailable_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archived_at TEXT,
+    restored_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS action_codex_thread_items (
+    action_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    thread_id TEXT NOT NULL REFERENCES action_codex_threads(thread_id) ON DELETE CASCADE,
+    is_preferred INTEGER NOT NULL DEFAULT 0,
+    assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (action_id, item_key, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS action_codex_thread_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    item_key TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    happened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS action_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    evidence_key TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    mailbox TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL DEFAULT '',
+    sender_name TEXT NOT NULL DEFAULT '',
+    happened_at TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    headline TEXT NOT NULL DEFAULT '',
+    answer TEXT NOT NULL DEFAULT '',
+    outcome_state TEXT NOT NULL DEFAULT 'needs_review',
+    outcome_code TEXT NOT NULL DEFAULT '',
+    terminal INTEGER NOT NULL DEFAULT 0,
+    case_status TEXT NOT NULL DEFAULT '',
+    key_points_json TEXT NOT NULL DEFAULT '[]',
+    impact TEXT NOT NULL DEFAULT '',
+    recommended_next_step TEXT NOT NULL DEFAULT '',
+    response_text TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(action_id, evidence_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_lifecycle_events_action
+ON action_lifecycle_events(action_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_action_notes_action
+ON action_notes(action_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_action_notes_pending
+ON action_notes(action_id, status, created_at ASC, id ASC);
+
+CREATE INDEX IF NOT EXISTS idx_github_action_items_state
+ON github_action_items(action_id, state, priority, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_github_action_items_last_seen
+ON github_action_items(action_id, last_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_job_search_action_items_state
+ON job_search_action_items(action_id, state, priority, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_job_search_action_items_wake
+ON job_search_action_items(action_id, wake_at, state);
+
+CREATE INDEX IF NOT EXISTS idx_job_search_action_item_events_item
+ON job_search_action_item_events(action_id, item_key, happened_at DESC, id DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_action_codex_threads_default
+ON action_codex_threads(action_id)
+WHERE is_default = 1 AND lifecycle_state = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_action_codex_threads_action
+ON action_codex_threads(action_id, lifecycle_state, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_action_codex_thread_items_item
+ON action_codex_thread_items(action_id, item_key, is_preferred DESC, updated_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_action_codex_thread_items_preferred
+ON action_codex_thread_items(action_id, item_key)
+WHERE is_preferred = 1;
+
+CREATE INDEX IF NOT EXISTS idx_action_codex_thread_events_thread
+ON action_codex_thread_events(action_id, thread_id, happened_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_action_evidence_action
+ON action_evidence(action_id, happened_at DESC, id DESC);
 """
 
 DAY_TO_INDEX = {
@@ -803,6 +1239,7 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "communications", "external_thread_id", "TEXT")
     _ensure_column(connection, "communications", "external_from", "TEXT")
     _ensure_column(connection, "communications", "direction", "TEXT NOT NULL DEFAULT 'inbound'")
+    _ensure_column(connection, "communications", "mail_identity", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "external_to", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "external_cc", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "external_bcc", "TEXT NOT NULL DEFAULT ''")
@@ -831,6 +1268,33 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "communications", "classifier_version", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "communications", "classification_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "communications", "deleted_at", "TEXT")
+
+    _ensure_column(connection, "communication_loops", "mailbox", "TEXT NOT NULL DEFAULT 'cmail'")
+    _ensure_column(connection, "communication_loops", "loop_key", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "group_slug", "TEXT NOT NULL DEFAULT 'loose-ends'")
+    _ensure_column(connection, "communication_loops", "group_title", "TEXT NOT NULL DEFAULT 'Loose Ends'")
+    _ensure_column(connection, "communication_loops", "title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "status", "TEXT NOT NULL DEFAULT 'needs_me'")
+    _ensure_column(connection, "communication_loops", "priority", "TEXT NOT NULL DEFAULT 'normal'")
+    _ensure_column(connection, "communication_loops", "owner", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "counterpart", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "next_action", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "closure_condition", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "waiting_on", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "due_date", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "why_now", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "summary", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "communication_loops", "confidence", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(connection, "communication_loops", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "communication_loops", "source_thread_keys_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "communication_loops", "created_at", "TEXT")
+    _ensure_column(connection, "communication_loops", "updated_at", "TEXT")
+    _ensure_column(connection, "communication_loops", "closed_at", "TEXT")
+
+    _ensure_column(connection, "communication_loop_messages", "loop_id", "INTEGER")
+    _ensure_column(connection, "communication_loop_messages", "communication_id", "INTEGER")
+    _ensure_column(connection, "communication_loop_messages", "role", "TEXT NOT NULL DEFAULT 'evidence'")
+    _ensure_column(connection, "communication_loop_messages", "created_at", "TEXT")
 
     _ensure_column(connection, "profile_context_items", "external_key", "TEXT")
     _ensure_column(connection, "profile_context_items", "subject_key", "TEXT NOT NULL DEFAULT 'self'")
@@ -940,6 +1404,77 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "calendar_day_snapshots", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "calendar_day_snapshots", "created_at", "TEXT")
 
+    _ensure_column(connection, "calendar_publish_channels", "slug", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_channels", "title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_channels", "description", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_channels", "timezone", "TEXT NOT NULL DEFAULT 'America/Chicago'")
+    _ensure_column(connection, "calendar_publish_channels", "token_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_channels", "status", "TEXT NOT NULL DEFAULT 'active'")
+    _ensure_column(connection, "calendar_publish_channels", "created_at", "TEXT")
+    _ensure_column(connection, "calendar_publish_channels", "updated_at", "TEXT")
+    _ensure_column(connection, "calendar_publish_channels", "revoked_at", "TEXT")
+
+    _ensure_column(connection, "calendar_publish_items", "channel_id", "INTEGER")
+    _ensure_column(connection, "calendar_publish_items", "calendar_entry_id", "INTEGER")
+    _ensure_column(connection, "calendar_publish_items", "public_title", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_items", "public_description", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_items", "public_location", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_items", "public_url", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "calendar_publish_items", "status", "TEXT NOT NULL DEFAULT 'published'")
+    _ensure_column(connection, "calendar_publish_items", "sequence", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "calendar_publish_items", "created_at", "TEXT")
+    _ensure_column(connection, "calendar_publish_items", "updated_at", "TEXT")
+
+    _ensure_column(connection, "plaid_config", "client_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_config", "secret_envelope_json", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_config", "environment", "TEXT NOT NULL DEFAULT 'sandbox'")
+    _ensure_column(connection, "plaid_config", "client_name", "TEXT NOT NULL DEFAULT 'LifeOps'")
+    _ensure_column(connection, "plaid_config", "products_json", "TEXT NOT NULL DEFAULT '[\"transactions\"]'")
+    _ensure_column(connection, "plaid_config", "country_codes_json", "TEXT NOT NULL DEFAULT '[\"US\"]'")
+    _ensure_column(connection, "plaid_config", "language", "TEXT NOT NULL DEFAULT 'en'")
+    _ensure_column(connection, "plaid_config", "days_requested", "INTEGER NOT NULL DEFAULT 730")
+    _ensure_column(connection, "plaid_config", "updated_at", "TEXT")
+
+    _ensure_column(connection, "plaid_items", "item_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_items", "access_token_envelope_json", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_items", "institution_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_items", "institution_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_items", "status", "TEXT NOT NULL DEFAULT 'active'")
+    _ensure_column(connection, "plaid_items", "cursor", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "plaid_items", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "plaid_items", "created_at", "TEXT")
+    _ensure_column(connection, "plaid_items", "updated_at", "TEXT")
+    _ensure_column(connection, "plaid_items", "last_synced_at", "TEXT NOT NULL DEFAULT ''")
+
+    _ensure_column(connection, "bank_accounts", "plaid_item_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "account_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "official_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "account_type", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "subtype", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "mask", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_accounts", "current_balance", "REAL")
+    _ensure_column(connection, "bank_accounts", "available_balance", "REAL")
+    _ensure_column(connection, "bank_accounts", "currency_code", "TEXT NOT NULL DEFAULT 'USD'")
+    _ensure_column(connection, "bank_accounts", "raw_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "bank_accounts", "created_at", "TEXT")
+    _ensure_column(connection, "bank_accounts", "updated_at", "TEXT")
+
+    _ensure_column(connection, "bank_transactions", "account_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "plaid_transaction_id", "TEXT")
+    _ensure_column(connection, "bank_transactions", "amount", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(connection, "bank_transactions", "date", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "authorized_date", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "merchant_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "category_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "plaid_category", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "bank_transactions", "pending", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "bank_transactions", "iso_currency_code", "TEXT NOT NULL DEFAULT 'USD'")
+    _ensure_column(connection, "bank_transactions", "raw_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "bank_transactions", "created_at", "TEXT")
+    _ensure_column(connection, "bank_transactions", "updated_at", "TEXT")
+
     _ensure_column(connection, "system_alerts", "alert_key", "TEXT")
     _ensure_column(connection, "system_alerts", "source", "TEXT")
     _ensure_column(connection, "system_alerts", "severity", "TEXT NOT NULL DEFAULT 'error'")
@@ -969,6 +1504,37 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_communications_mail_ui_correspondence
+        ON communications(channel, source, direction, happened_at DESC, id DESC)
+        WHERE status != 'deleted'
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communications_mail_ui_source_state
+        ON communications(channel, source, direction, status, happened_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_communication_loops_mailbox_key
+        ON communication_loops(mailbox, loop_key)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communication_loops_status_priority
+        ON communication_loops(mailbox, status, priority, updated_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communication_loop_messages_loop
+        ON communication_loop_messages(loop_id, communication_id)
+        """
+    )
+    connection.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_trace_runs_type_started_at
         ON trace_runs(trace_type, started_at DESC)
         """
@@ -977,6 +1543,18 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_trace_events_run_id
         ON trace_events(run_id, id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_automation_occurrences_action_date
+        ON automation_occurrences(action_id, local_date DESC, scheduled_for DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_automation_occurrences_status
+        ON automation_occurrences(status, scheduled_for)
         """
     )
     connection.execute(
@@ -1113,6 +1691,30 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_publish_channels_slug
+        ON calendar_publish_channels(slug)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_publish_channels_status
+        ON calendar_publish_channels(status, updated_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_publish_items_channel_entry
+        ON calendar_publish_items(channel_id, calendar_entry_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_publish_items_entry
+        ON calendar_publish_items(calendar_entry_id, status, id)
+        """
+    )
+    connection.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_system_alerts_key
         ON system_alerts(alert_key)
         """
@@ -1121,6 +1723,85 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_system_alerts_status_source
         ON system_alerts(status, source, last_seen_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_plaid_items_item_id
+        ON plaid_items(item_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_plaid_items_status_updated
+        ON plaid_items(status, updated_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_accounts_account_id
+        ON bank_accounts(account_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_bank_accounts_plaid_item
+        ON bank_accounts(plaid_item_id, updated_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_transactions_plaid_id
+        ON bank_transactions(plaid_transaction_id)
+        WHERE plaid_transaction_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_date
+        ON bank_transactions(date DESC, created_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_account
+        ON bank_transactions(account_id, date DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_merchant
+        ON bank_transactions(merchant_name, name, date DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_bill_obligations_key
+        ON critical_bill_obligations(obligation_key)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_critical_bill_obligations_state_due
+        ON critical_bill_obligations(state, due_date, updated_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_critical_bill_obligations_profile_due
+        ON critical_bill_obligations(profile_key, due_date DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_bill_evidence_key
+        ON critical_bill_evidence(evidence_key)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_critical_bill_evidence_obligation
+        ON critical_bill_evidence(obligation_id, happened_at DESC, id DESC)
         """
     )
     connection.commit()
@@ -2137,6 +2818,7 @@ def upsert_communication_from_sync(
     happened_at: datetime,
     follow_up_at: Optional[datetime],
     direction: str = "inbound",
+    mail_identity: str = "",
     person: str = "",
     organization_name: Optional[str] = None,
     notes: str = "",
@@ -2189,6 +2871,7 @@ def upsert_communication_from_sync(
         subject,
         channel,
         direction,
+        mail_identity,
         person,
         organization_id,
         _iso_minute(happened_at),
@@ -2231,7 +2914,7 @@ def upsert_communication_from_sync(
         connection.execute(
             """
             UPDATE communications
-            SET subject = ?, channel = ?, direction = ?, person = ?, organization_id = ?, happened_at = ?,
+            SET subject = ?, channel = ?, direction = ?, mail_identity = ?, person = ?, organization_id = ?, happened_at = ?,
                 follow_up_at = ?, status = ?, notes = ?, external_thread_id = ?, external_from = ?, external_to = ?,
                 external_cc = ?, external_bcc = ?, external_reply_to = ?, from_json = ?, to_json = ?, cc_json = ?,
                 bcc_json = ?, reply_to_json = ?, message_id = ?, in_reply_to = ?, references_json = ?, headers_json = ?,
@@ -2266,15 +2949,15 @@ def upsert_communication_from_sync(
     cursor = connection.execute(
         """
         INSERT INTO communications (
-            subject, channel, direction, person, organization_id, happened_at, follow_up_at, status, notes,
+            subject, channel, direction, mail_identity, person, organization_id, happened_at, follow_up_at, status, notes,
             source, external_id, external_thread_id, external_from, external_to, external_cc, external_bcc,
             external_reply_to, from_json, to_json, cc_json, bcc_json, reply_to_json, message_id, in_reply_to,
             references_json, headers_json, thread_key, snippet, body_text, html_body, attachments_json,
             raw_relative_path, raw_sha256, category, categories_json, priority_level, priority_score,
             retention_bucket, classifier_version, classification_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        values[:9]
+        values[:10]
         + (
             source,
             external_id,
@@ -2364,6 +3047,408 @@ def set_communications_status(
     )
     connection.commit()
     return int(cursor.rowcount)
+
+
+def update_communication_review(
+    connection: sqlite3.Connection,
+    *,
+    communication_id: int,
+    status: str,
+    category: str,
+    categories: Optional[list[str]] = None,
+    priority_level: str = "",
+    priority_score: int = 0,
+    retention_bucket: str = "",
+    classifier_version: str = "",
+    classification: Optional[dict] = None,
+) -> bool:
+    clean_status = str(status or "open").strip() or "open"
+    follow_up_expression = "follow_up_at"
+    if clean_status != "open":
+        follow_up_expression = "NULL"
+    deleted_at = _utc_now_string() if clean_status == "deleted" else None
+    cursor = connection.execute(
+        f"""
+        UPDATE communications
+        SET status = ?,
+            deleted_at = ?,
+            follow_up_at = {follow_up_expression},
+            category = ?,
+            categories_json = ?,
+            priority_level = ?,
+            priority_score = ?,
+            retention_bucket = ?,
+            classifier_version = ?,
+            classification_json = ?
+        WHERE id = ?
+        """,
+        (
+            clean_status,
+            deleted_at,
+            str(category or ""),
+            _json_text(categories, []),
+            str(priority_level or ""),
+            int(priority_score or 0),
+            str(retention_bucket or ""),
+            str(classifier_version or ""),
+            _json_text(classification, {}),
+            int(communication_id),
+        ),
+    )
+    connection.commit()
+    return int(cursor.rowcount) > 0
+
+
+def _normalize_communication_loop_status(value: str) -> str:
+    status = str(value or "needs_me").strip().lower()
+    if status in {"open", "todo", "needs_action", "needs-me"}:
+        return "needs_me"
+    if status in {"waiting", "waiting_on_other", "waiting-on-them"}:
+        return "waiting_on_them"
+    if status in {"done", "closed", "complete", "completed", "full-circle"}:
+        return "full_circle"
+    if status not in COMMUNICATION_LOOP_STATUSES:
+        return "needs_me"
+    return status
+
+
+def _normalize_communication_loop_priority(value: str) -> str:
+    priority = str(value or "normal").strip().lower()
+    return priority if priority in COMMUNICATION_LOOP_PRIORITIES else "normal"
+
+
+def _slug_text(value: str, *, fallback: str = "loose-ends", limit: int = 80) -> str:
+    cleaned: list[str] = []
+    previous_dash = False
+    for char in str(value or "").strip().lower():
+        if char.isalnum():
+            cleaned.append(char)
+            previous_dash = False
+        elif not previous_dash:
+            cleaned.append("-")
+            previous_dash = True
+    slug = "".join(cleaned).strip("-")
+    if not slug:
+        slug = fallback
+    return slug[:limit].strip("-") or fallback
+
+
+def _communication_loop_record(
+    row: sqlite3.Row,
+    *,
+    communication_ids: Optional[list[int]] = None,
+) -> dict:
+    return {
+        "id": int(row["id"]),
+        "mailbox": str(row["mailbox"] or "cmail"),
+        "loop_key": str(row["loop_key"] or ""),
+        "group_slug": str(row["group_slug"] or "loose-ends"),
+        "group_title": str(row["group_title"] or "Loose Ends"),
+        "title": str(row["title"] or ""),
+        "status": _normalize_communication_loop_status(str(row["status"] or "")),
+        "priority": _normalize_communication_loop_priority(str(row["priority"] or "")),
+        "owner": str(row["owner"] or ""),
+        "counterpart": str(row["counterpart"] or ""),
+        "next_action": str(row["next_action"] or ""),
+        "closure_condition": str(row["closure_condition"] or ""),
+        "waiting_on": str(row["waiting_on"] or ""),
+        "due_date": str(row["due_date"] or ""),
+        "why_now": str(row["why_now"] or ""),
+        "summary": str(row["summary"] or ""),
+        "confidence": float(row["confidence"] or 0),
+        "evidence": _json_value(str(row["evidence_json"] or "[]"), []),
+        "source_thread_keys": _json_value(str(row["source_thread_keys_json"] or "[]"), []),
+        "communication_ids": communication_ids or [],
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "closed_at": str(row["closed_at"] or ""),
+        "kind": "communication_loop",
+    }
+
+
+def upsert_communication_loop(
+    connection: sqlite3.Connection,
+    *,
+    mailbox: str = "cmail",
+    loop_key: str = "",
+    group_slug: str = "",
+    group_title: str = "",
+    title: str,
+    status: str = "needs_me",
+    priority: str = "normal",
+    owner: str = "",
+    counterpart: str = "",
+    next_action: str = "",
+    closure_condition: str = "",
+    waiting_on: str = "",
+    due_date: str = "",
+    why_now: str = "",
+    summary: str = "",
+    confidence: float = 0,
+    evidence: Optional[list] = None,
+    source_thread_keys: Optional[list[str]] = None,
+    communication_ids: Optional[list[int]] = None,
+) -> int:
+    clean_mailbox = _slug_text(mailbox or "cmail", fallback="cmail", limit=32)
+    clean_title = " ".join(str(title or "").split()).strip()
+    if not clean_title:
+        raise ValueError("communication loop title is required")
+    clean_group_title = " ".join(str(group_title or "").split()).strip() or "Loose Ends"
+    clean_group_slug = _slug_text(group_slug or clean_group_title, fallback="loose-ends", limit=80)
+    clean_loop_key = _slug_text(loop_key or f"{clean_group_slug}-{clean_title}", fallback=clean_group_slug, limit=120)
+    clean_status = _normalize_communication_loop_status(status)
+    clean_priority = _normalize_communication_loop_priority(priority)
+    try:
+        clean_confidence = max(0.0, min(1.0, float(confidence or 0)))
+    except (TypeError, ValueError):
+        clean_confidence = 0.0
+    closed_at = _utc_now_string() if clean_status in {"full_circle", "dismissed"} else None
+    thread_keys = [
+        str(item).strip()
+        for item in (source_thread_keys or [])
+        if str(item).strip()
+    ]
+    evidence_items = evidence if isinstance(evidence, list) else []
+
+    cursor = connection.execute(
+        """
+        INSERT INTO communication_loops (
+            mailbox, loop_key, group_slug, group_title, title, status, priority, owner, counterpart,
+            next_action, closure_condition, waiting_on, due_date, why_now, summary, confidence,
+            evidence_json, source_thread_keys_json, updated_at, closed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(mailbox, loop_key) DO UPDATE SET
+            group_slug = excluded.group_slug,
+            group_title = excluded.group_title,
+            title = excluded.title,
+            status = CASE WHEN communication_loops.status = 'dismissed'
+                          THEN communication_loops.status ELSE excluded.status END,
+            priority = excluded.priority,
+            owner = excluded.owner,
+            counterpart = excluded.counterpart,
+            next_action = excluded.next_action,
+            closure_condition = excluded.closure_condition,
+            waiting_on = excluded.waiting_on,
+            due_date = excluded.due_date,
+            why_now = excluded.why_now,
+            summary = excluded.summary,
+            confidence = excluded.confidence,
+            evidence_json = excluded.evidence_json,
+            source_thread_keys_json = excluded.source_thread_keys_json,
+            updated_at = excluded.updated_at,
+            closed_at = CASE WHEN communication_loops.status = 'dismissed'
+                             THEN communication_loops.closed_at ELSE excluded.closed_at END
+        """,
+        (
+            clean_mailbox,
+            clean_loop_key,
+            clean_group_slug,
+            clean_group_title,
+            clean_title,
+            clean_status,
+            clean_priority,
+            str(owner or ""),
+            str(counterpart or ""),
+            str(next_action or ""),
+            str(closure_condition or ""),
+            str(waiting_on or ""),
+            str(due_date or ""),
+            str(why_now or ""),
+            str(summary or ""),
+            clean_confidence,
+            _json_text(evidence_items, []),
+            _json_text(thread_keys, []),
+            _utc_now_string(),
+            closed_at,
+        ),
+    )
+    row = connection.execute(
+        "SELECT id FROM communication_loops WHERE mailbox = ? AND loop_key = ?",
+        (clean_mailbox, clean_loop_key),
+    ).fetchone()
+    loop_id = int(row["id"])
+
+    ids: list[int] = []
+    for value in communication_ids or []:
+        try:
+            communication_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if communication_id > 0:
+            ids.append(communication_id)
+    ids = sorted(set(ids))
+    if communication_ids is not None:
+        connection.execute("DELETE FROM communication_loop_messages WHERE loop_id = ?", (loop_id,))
+    if ids:
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO communication_loop_messages (loop_id, communication_id, role)
+            VALUES (?, ?, 'evidence')
+            """,
+            [(loop_id, communication_id) for communication_id in ids],
+        )
+    connection.commit()
+    return loop_id
+
+
+def get_communication_loop(connection: sqlite3.Connection, loop_id: int) -> Optional[dict]:
+    row = connection.execute(
+        "SELECT * FROM communication_loops WHERE id = ?",
+        (int(loop_id),),
+    ).fetchone()
+    if not row:
+        return None
+    message_rows = connection.execute(
+        """
+        SELECT communication_id
+        FROM communication_loop_messages
+        WHERE loop_id = ?
+        ORDER BY communication_id
+        """,
+        (int(loop_id),),
+    ).fetchall()
+    return _communication_loop_record(
+        row,
+        communication_ids=[int(message_row["communication_id"]) for message_row in message_rows],
+    )
+
+
+def set_communication_loop_status(connection: sqlite3.Connection, loop_id: int, status: str) -> Optional[dict]:
+    clean_status = _normalize_communication_loop_status(status)
+    closed_at = _utc_now_string() if clean_status in {"full_circle", "dismissed"} else None
+    cursor = connection.execute(
+        """
+        UPDATE communication_loops
+        SET status = ?, updated_at = ?, closed_at = ?
+        WHERE id = ?
+        """,
+        (clean_status, _utc_now_string(), closed_at, int(loop_id)),
+    )
+    connection.commit()
+    if int(cursor.rowcount) <= 0:
+        return None
+    return get_communication_loop(connection, loop_id)
+
+
+def list_communication_loops(
+    connection: sqlite3.Connection,
+    *,
+    mailbox: str = "cmail",
+    statuses: Optional[list[str]] = None,
+    include_messages: bool = True,
+    limit: Optional[int] = 100,
+) -> list[dict]:
+    clean_mailbox = _slug_text(mailbox or "cmail", fallback="cmail", limit=32)
+    clauses = ["mailbox = ?"]
+    params: list[Any] = [clean_mailbox]
+    if statuses:
+        clean_statuses = [_normalize_communication_loop_status(status) for status in statuses]
+        placeholders = ", ".join("?" for _ in clean_statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(clean_statuses)
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM communication_loops
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+            CASE status WHEN 'needs_me' THEN 0 WHEN 'blocked' THEN 1 WHEN 'scheduled' THEN 2
+                        WHEN 'waiting_on_them' THEN 3 WHEN 'full_circle' THEN 4 ELSE 5 END,
+            updated_at DESC,
+            id DESC
+        {limit_clause}
+        """,
+        params,
+    ).fetchall()
+    message_ids: dict[int, list[int]] = {}
+    if include_messages and rows:
+        loop_ids = [int(row["id"]) for row in rows]
+        placeholders = ", ".join("?" for _ in loop_ids)
+        for message_row in connection.execute(
+            f"""
+            SELECT loop_id, communication_id
+            FROM communication_loop_messages
+            WHERE loop_id IN ({placeholders})
+            ORDER BY loop_id, communication_id
+            """,
+            loop_ids,
+        ).fetchall():
+            message_ids.setdefault(int(message_row["loop_id"]), []).append(int(message_row["communication_id"]))
+    return [
+        _communication_loop_record(row, communication_ids=message_ids.get(int(row["id"]), []))
+        for row in rows
+    ]
+
+
+def build_communication_loop_groups(
+    connection: sqlite3.Connection,
+    *,
+    mailbox: str = "cmail",
+    limit: Optional[int] = 100,
+) -> dict:
+    loops = list_communication_loops(connection, mailbox=mailbox, include_messages=True, limit=limit)
+    groups_by_slug: dict[str, dict] = {}
+    active_statuses = set(COMMUNICATION_LOOP_ACTIVE_STATUSES)
+    for loop in loops:
+        slug = str(loop.get("group_slug") or "loose-ends")
+        group = groups_by_slug.setdefault(
+            slug,
+            {
+                "slug": slug,
+                "title": str(loop.get("group_title") or "Loose Ends"),
+                "active": [],
+                "waiting": [],
+                "completed": [],
+                "dismissed": [],
+                "reference": [],
+                "items": [],
+            },
+        )
+        status = str(loop.get("status") or "")
+        if status == "waiting_on_them":
+            group["waiting"].append(loop)
+        elif status == "full_circle":
+            group["completed"].append(loop)
+        elif status == "dismissed":
+            group["dismissed"].append(loop)
+        elif status == "reference":
+            group["reference"].append(loop)
+        elif status in active_statuses:
+            group["active"].append(loop)
+        else:
+            group["active"].append(loop)
+        if status in active_statuses:
+            group["items"].append(loop)
+
+    groups = sorted(
+        groups_by_slug.values(),
+        key=lambda item: (
+            0 if item["active"] else 1 if item["waiting"] else 2,
+            str(item["title"]).lower(),
+        ),
+    )
+    active_count = sum(len(group["active"]) for group in groups)
+    waiting_count = sum(len(group["waiting"]) for group in groups)
+    completed_count = sum(len(group["completed"]) for group in groups)
+    reference_count = sum(len(group["reference"]) for group in groups)
+    return {
+        "mailbox": _slug_text(mailbox or "cmail", fallback="cmail", limit=32),
+        "groups": groups,
+        "items": loops,
+        "summary": {
+            "active": active_count,
+            "waiting": waiting_count,
+            "completed": completed_count,
+            "dismissed": sum(len(group["dismissed"]) for group in groups),
+            "reference": reference_count,
+            "total": len(loops),
+        },
+    }
 
 
 def purge_deleted_communications(
@@ -3970,6 +5055,455 @@ def update_x_media_asset(
     connection.commit()
 
 
+def _action_note_record(row: sqlite3.Row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "action_id": str(row["action_id"]),
+        "author": str(row["author"] or "Cody"),
+        "body": str(row["body"] or ""),
+        "intent": str(row["intent"] or "note"),
+        "subject_key": str(row["subject_key"] or ""),
+        "subject_label": str(row["subject_label"] or ""),
+        "status": str(row["status"] or "pending"),
+        "effect_summary": str(row["effect_summary"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "acknowledged_at": str(row["acknowledged_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def add_action_note(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    body: str,
+    author: str = "Cody",
+    intent: str = "note",
+    subject_key: str = "",
+    subject_label: str = "",
+    status: str = "pending",
+    effect_summary: str = "",
+    now: Optional[str] = None,
+    commit: bool = True,
+) -> dict:
+    clean_action_id = str(action_id or "").strip()
+    clean_body = str(body or "").strip()
+    clean_intent = str(intent or "note").strip().lower()
+    clean_status = str(status or "pending").strip().lower()
+    if not clean_action_id:
+        raise ValueError("action id is required")
+    if not clean_body:
+        raise ValueError("Action note is required")
+    if len(clean_body) > 2000:
+        raise ValueError("Action note must be 2000 characters or fewer")
+    if clean_intent not in ACTION_NOTE_INTENTS:
+        raise ValueError(f"invalid Action note intent: {clean_intent}")
+    if clean_status not in ACTION_NOTE_STATUSES:
+        raise ValueError(f"invalid Action note status: {clean_status}")
+    happened_at = str(now or _utc_now_string())
+    cursor = connection.execute(
+        """
+        INSERT INTO action_notes (
+            action_id, author, body, intent, subject_key, subject_label,
+            status, effect_summary, created_at, acknowledged_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            clean_action_id,
+            str(author or "Cody").strip() or "Cody",
+            clean_body,
+            clean_intent,
+            str(subject_key or "").strip(),
+            str(subject_label or "").strip(),
+            clean_status,
+            str(effect_summary or "").strip(),
+            happened_at,
+            happened_at if clean_status in {"applied", "acknowledged"} else None,
+            happened_at,
+        ),
+    )
+    if commit:
+        connection.commit()
+    row = connection.execute("SELECT * FROM action_notes WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+    if row is None:
+        raise RuntimeError("unable to save Action note")
+    return _action_note_record(row)
+
+
+def list_action_notes(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    statuses: Optional[list[str] | tuple[str, ...]] = None,
+    limit: int = 50,
+) -> list[dict]:
+    params: list[object] = [str(action_id or "").strip()]
+    status_clause = ""
+    if statuses:
+        clean_statuses = [str(value or "").strip().lower() for value in statuses]
+        invalid = [value for value in clean_statuses if value not in ACTION_NOTE_STATUSES]
+        if invalid:
+            raise ValueError(f"invalid Action note status: {invalid[0]}")
+        placeholders = ", ".join("?" for _ in clean_statuses)
+        status_clause = f" AND status IN ({placeholders})"
+        params.extend(clean_statuses)
+    params.append(max(1, int(limit)))
+    rows = connection.execute(
+        f"""
+        SELECT * FROM action_notes
+        WHERE action_id = ?{status_clause}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_action_note_record(row) for row in rows]
+
+
+def set_action_note_status(
+    connection: sqlite3.Connection,
+    *,
+    note_id: int,
+    status: str,
+    effect_summary: Optional[str] = None,
+    now: Optional[str] = None,
+    commit: bool = True,
+) -> dict:
+    clean_status = str(status or "").strip().lower()
+    if clean_status not in ACTION_NOTE_STATUSES:
+        raise ValueError(f"invalid Action note status: {clean_status}")
+    happened_at = str(now or _utc_now_string())
+    existing = connection.execute("SELECT * FROM action_notes WHERE id = ?", (int(note_id),)).fetchone()
+    if existing is None:
+        raise ValueError(f"Action note not found: {note_id}")
+    next_effect = str(effect_summary or "") if effect_summary is not None else str(existing["effect_summary"] or "")
+    acknowledged_at = happened_at if clean_status in {"applied", "acknowledged"} else None
+    connection.execute(
+        """
+        UPDATE action_notes
+        SET status = ?, effect_summary = ?, acknowledged_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (clean_status, next_effect, acknowledged_at, happened_at, int(note_id)),
+    )
+    if commit:
+        connection.commit()
+    row = connection.execute("SELECT * FROM action_notes WHERE id = ?", (int(note_id),)).fetchone()
+    if row is None:
+        raise RuntimeError(f"unable to update Action note: {note_id}")
+    return _action_note_record(row)
+
+
+def _action_lifecycle_record(row: sqlite3.Row) -> dict:
+    return {
+        "action_id": str(row["action_id"]),
+        "state": str(row["state"]),
+        "outcome_state": str(row["outcome_state"] or "waiting"),
+        "outcome_summary": str(row["outcome_summary"] or ""),
+        "resolution_note": str(row["resolution_note"] or ""),
+        "last_evidence_key": str(row["last_evidence_key"] or ""),
+        "alert_entry_id": int(row["alert_entry_id"]) if row["alert_entry_id"] is not None else None,
+        "paused_at": str(row["paused_at"] or ""),
+        "archived_at": str(row["archived_at"] or ""),
+        "resolved_at": str(row["resolved_at"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def get_action_lifecycle(connection: sqlite3.Connection, action_id: str) -> Optional[dict]:
+    row = connection.execute(
+        "SELECT * FROM action_lifecycles WHERE action_id = ?",
+        (str(action_id or "").strip(),),
+    ).fetchone()
+    return _action_lifecycle_record(row) if row is not None else None
+
+
+def list_action_lifecycles(connection: sqlite3.Connection) -> dict[str, dict]:
+    rows = connection.execute("SELECT * FROM action_lifecycles ORDER BY action_id").fetchall()
+    return {str(row["action_id"]): _action_lifecycle_record(row) for row in rows}
+
+
+def set_action_lifecycle(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    state: str,
+    outcome_state: Optional[str] = None,
+    outcome_summary: Optional[str] = None,
+    resolution_note: Optional[str] = None,
+    evidence_key: Optional[str] = None,
+    alert_entry_id: Optional[int] = None,
+    reason: str = "",
+    now: Optional[str] = None,
+) -> dict:
+    clean_action_id = str(action_id or "").strip()
+    clean_state = str(state or "").strip().lower()
+    if not clean_action_id:
+        raise ValueError("action id is required")
+    if clean_state not in ACTION_LIFECYCLE_STATES:
+        raise ValueError(f"invalid Action lifecycle state: {clean_state}")
+    if outcome_state is not None and str(outcome_state).strip() not in ACTION_OUTCOME_STATES:
+        raise ValueError(f"invalid Action outcome state: {outcome_state}")
+
+    existing = get_action_lifecycle(connection, clean_action_id)
+    previous_state = str((existing or {}).get("state") or "active")
+    previous_outcome = str((existing or {}).get("outcome_state") or "waiting")
+    next_outcome = str(outcome_state).strip() if outcome_state is not None else previous_outcome
+    next_summary = (
+        str(outcome_summary or "")
+        if outcome_summary is not None
+        else str((existing or {}).get("outcome_summary") or "")
+    )
+    next_resolution_note = (
+        str(resolution_note or "")
+        if resolution_note is not None
+        else str((existing or {}).get("resolution_note") or "")
+    )
+    next_evidence_key = (
+        str(evidence_key or "")
+        if evidence_key is not None
+        else str((existing or {}).get("last_evidence_key") or "")
+    )
+    next_alert_entry_id = (
+        int(alert_entry_id)
+        if alert_entry_id is not None
+        else (existing or {}).get("alert_entry_id")
+    )
+    happened_at = str(now or _utc_now_string())
+    paused_at = str((existing or {}).get("paused_at") or "") or None
+    archived_at = str((existing or {}).get("archived_at") or "") or None
+    resolved_at = str((existing or {}).get("resolved_at") or "") or None
+    if clean_state == "active":
+        paused_at = None
+        archived_at = None
+    elif clean_state == "paused":
+        paused_at = paused_at if previous_state == "paused" and paused_at else happened_at
+        archived_at = None
+    elif clean_state == "archived":
+        paused_at = paused_at or happened_at
+        archived_at = archived_at if previous_state == "archived" and archived_at else happened_at
+    if next_outcome.startswith("resolved_") and not resolved_at:
+        resolved_at = happened_at
+
+    connection.execute(
+        """
+        INSERT INTO action_lifecycles (
+            action_id, state, outcome_state, outcome_summary, resolution_note,
+            last_evidence_key, alert_entry_id, paused_at, archived_at, resolved_at,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(action_id) DO UPDATE SET
+            state = excluded.state,
+            outcome_state = excluded.outcome_state,
+            outcome_summary = excluded.outcome_summary,
+            resolution_note = excluded.resolution_note,
+            last_evidence_key = excluded.last_evidence_key,
+            alert_entry_id = excluded.alert_entry_id,
+            paused_at = excluded.paused_at,
+            archived_at = excluded.archived_at,
+            resolved_at = excluded.resolved_at,
+            updated_at = excluded.updated_at
+        """,
+        (
+            clean_action_id,
+            clean_state,
+            next_outcome,
+            next_summary,
+            next_resolution_note,
+            next_evidence_key,
+            next_alert_entry_id,
+            paused_at,
+            archived_at,
+            resolved_at,
+            happened_at,
+            happened_at,
+        ),
+    )
+    if previous_state != clean_state or previous_outcome != next_outcome or str(reason or "").strip():
+        connection.execute(
+            """
+            INSERT INTO action_lifecycle_events (
+                action_id, from_state, to_state, outcome_state, evidence_key, reason, happened_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_action_id,
+                previous_state,
+                clean_state,
+                next_outcome,
+                next_evidence_key,
+                str(reason or "").strip(),
+                happened_at,
+            ),
+        )
+    connection.commit()
+    lifecycle = get_action_lifecycle(connection, clean_action_id)
+    if lifecycle is None:
+        raise RuntimeError(f"unable to save Action lifecycle: {clean_action_id}")
+    return lifecycle
+
+
+def list_action_lifecycle_events(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    limit: int = 50,
+) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT * FROM action_lifecycle_events
+        WHERE action_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (str(action_id or "").strip(), max(1, int(limit))),
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "action_id": str(row["action_id"]),
+            "from_state": str(row["from_state"] or ""),
+            "to_state": str(row["to_state"] or ""),
+            "outcome_state": str(row["outcome_state"] or ""),
+            "evidence_key": str(row["evidence_key"] or ""),
+            "reason": str(row["reason"] or ""),
+            "happened_at": str(row["happened_at"] or ""),
+        }
+        for row in rows
+    ]
+
+
+def _action_evidence_record(row: sqlite3.Row, *, include_response_text: bool) -> dict:
+    record = {
+        "id": int(row["id"]),
+        "action_id": str(row["action_id"]),
+        "evidence_key": str(row["evidence_key"]),
+        "source": str(row["source"] or ""),
+        "mailbox": str(row["mailbox"] or ""),
+        "message_id": str(row["message_id"] or ""),
+        "thread_id": str(row["thread_id"] or ""),
+        "subject": str(row["subject"] or ""),
+        "sender": str(row["sender"] or ""),
+        "sender_name": str(row["sender_name"] or ""),
+        "happened_at": str(row["happened_at"] or ""),
+        "source_url": str(row["source_url"] or ""),
+        "headline": str(row["headline"] or ""),
+        "answer": str(row["answer"] or ""),
+        "outcome_state": str(row["outcome_state"] or "needs_review"),
+        "outcome_code": str(row["outcome_code"] or ""),
+        "terminal": bool(row["terminal"]),
+        "case_status": str(row["case_status"] or ""),
+        "key_points": _json_value(str(row["key_points_json"] or "[]"), []),
+        "impact": str(row["impact"] or ""),
+        "recommended_next_step": str(row["recommended_next_step"] or ""),
+        "metadata": _json_value(str(row["metadata_json"] or "{}"), {}),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+    if include_response_text:
+        record["response_text"] = str(row["response_text"] or "")
+    return record
+
+
+def upsert_action_evidence(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    evidence: dict,
+) -> dict:
+    clean_action_id = str(action_id or "").strip()
+    evidence_key = str(evidence.get("evidence_key") or evidence.get("key") or "").strip()
+    outcome_state = str(evidence.get("outcome_state") or "needs_review").strip()
+    if not clean_action_id or not evidence_key:
+        raise ValueError("action id and evidence key are required")
+    if outcome_state not in ACTION_OUTCOME_STATES:
+        raise ValueError(f"invalid Action evidence outcome: {outcome_state}")
+    connection.execute(
+        """
+        INSERT INTO action_evidence (
+            action_id, evidence_key, source, mailbox, message_id, thread_id,
+            subject, sender, sender_name, happened_at, source_url, headline,
+            answer, outcome_state, outcome_code, terminal, case_status,
+            key_points_json, impact, recommended_next_step, response_text,
+            metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(action_id, evidence_key) DO UPDATE SET
+            source = excluded.source,
+            mailbox = excluded.mailbox,
+            message_id = excluded.message_id,
+            thread_id = excluded.thread_id,
+            subject = excluded.subject,
+            sender = excluded.sender,
+            sender_name = excluded.sender_name,
+            happened_at = excluded.happened_at,
+            source_url = excluded.source_url,
+            headline = excluded.headline,
+            answer = excluded.answer,
+            outcome_state = excluded.outcome_state,
+            outcome_code = excluded.outcome_code,
+            terminal = excluded.terminal,
+            case_status = excluded.case_status,
+            key_points_json = excluded.key_points_json,
+            impact = excluded.impact,
+            recommended_next_step = excluded.recommended_next_step,
+            response_text = excluded.response_text,
+            metadata_json = excluded.metadata_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            clean_action_id,
+            evidence_key,
+            str(evidence.get("source") or ""),
+            str(evidence.get("mailbox") or ""),
+            str(evidence.get("message_id") or ""),
+            str(evidence.get("thread_id") or ""),
+            str(evidence.get("subject") or ""),
+            str(evidence.get("sender") or ""),
+            str(evidence.get("sender_name") or ""),
+            str(evidence.get("happened_at") or ""),
+            str(evidence.get("source_url") or ""),
+            str(evidence.get("headline") or ""),
+            str(evidence.get("answer") or ""),
+            outcome_state,
+            str(evidence.get("outcome_code") or ""),
+            1 if evidence.get("terminal") else 0,
+            str(evidence.get("case_status") or ""),
+            _json_text(evidence.get("key_points"), []),
+            str(evidence.get("impact") or ""),
+            str(evidence.get("recommended_next_step") or ""),
+            str(evidence.get("response_text") or ""),
+            _json_text(evidence.get("metadata"), {}),
+        ),
+    )
+    connection.commit()
+    row = connection.execute(
+        "SELECT * FROM action_evidence WHERE action_id = ? AND evidence_key = ?",
+        (clean_action_id, evidence_key),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"unable to save Action evidence: {clean_action_id}/{evidence_key}")
+    return _action_evidence_record(row, include_response_text=True)
+
+
+def get_latest_action_evidence(
+    connection: sqlite3.Connection,
+    *,
+    action_id: str,
+    include_response_text: bool = False,
+) -> Optional[dict]:
+    row = connection.execute(
+        """
+        SELECT * FROM action_evidence
+        WHERE action_id = ?
+        ORDER BY happened_at DESC, id DESC
+        LIMIT 1
+        """,
+        (str(action_id or "").strip(),),
+    ).fetchone()
+    return _action_evidence_record(row, include_response_text=include_response_text) if row is not None else None
+
+
 def set_sync_state(connection: sqlite3.Connection, key: str, value: str) -> None:
     connection.execute(
         """
@@ -4041,6 +5575,8 @@ def mark_hidden_mail_contact(
     normalized_key = str(contact_key or "").strip().lower()
     if not normalized_key:
         return
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     hidden_contacts = get_hidden_mail_contacts(connection)
     hidden_contacts[normalized_key] = str(hidden_at or _utc_now_string())
     set_hidden_mail_contacts(connection, hidden_contacts)
@@ -4050,6 +5586,8 @@ def clear_hidden_mail_contact(connection: sqlite3.Connection, *, contact_key: st
     normalized_key = str(contact_key or "").strip().lower()
     if not normalized_key:
         return False
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     hidden_contacts = get_hidden_mail_contacts(connection)
     if normalized_key not in hidden_contacts:
         return False

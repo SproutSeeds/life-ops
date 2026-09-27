@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 from importlib import metadata as importlib_metadata
 import json
 import mimetypes
@@ -25,15 +26,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from life_ops import cmail_agent
+from life_ops import clawdad_client
 from life_ops import credentials
-from life_ops.calendar import build_calendar_day, build_calendar_range, rollover_calendar_day, save_calendar_day
 from life_ops.document_ingest import extract_text_from_saved_attachment
 from life_ops import mail_metadata
+from life_ops import mail_identities
+from life_ops import mail_spam
 from life_ops import mail_vault
+from life_ops.frg_booking_availability import build_frg_booking_availability_payload
 from life_ops.resend_integration import (
     DEFAULT_RESEND_BATCH_DAILY_CAP,
     DEFAULT_RESEND_BATCH_MAX_PER_HOUR,
     DEFAULT_RESEND_BATCH_MIN_GAP_MINUTES,
+    resend_queue_status_from_connection,
     resend_send_email,
 )
 from life_ops import store
@@ -43,7 +49,14 @@ DEFAULT_MAIL_UI_HOST = "127.0.0.1"
 DEFAULT_MAIL_UI_PORT = 4311
 DEFAULT_MAIL_UI_LIMIT = 80
 DEFAULT_MAIL_UI_SOURCE = "cloudflare_email"
+DEFAULT_MAIL_UI_INBOUND_SOURCES = (DEFAULT_MAIL_UI_SOURCE, "resend_inbound")
 DEFAULT_MAIL_UI_OUTBOUND_SOURCE = "resend_email"
+DEFAULT_MAIL_UI_ARCHIVE_SOURCE = "gmail_archive"
+DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCES = (
+    *DEFAULT_MAIL_UI_INBOUND_SOURCES,
+    DEFAULT_MAIL_UI_OUTBOUND_SOURCE,
+    DEFAULT_MAIL_UI_ARCHIVE_SOURCE,
+)
 DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE = "correspondence"
 DEFAULT_MAIL_UI_CONTACT_LIMIT = 200
 DEFAULT_MAIL_UI_FAVICON_PATH = "/static/favicon.svg"
@@ -54,6 +67,7 @@ CMAIL_TAILNET_ACCESS_MESSAGE = "Cmail is private. Open Tailscale and make sure y
 CMAIL_APP_SECRET_NAME = "LIFE_OPS_CMAIL_APP_SECRET"
 CMAIL_AUTH_REQUIRED_ENV = "LIFE_OPS_CMAIL_AUTH_REQUIRED"
 CMAIL_AUTH_DISABLED_ENV = "LIFE_OPS_CMAIL_AUTH_DISABLED"
+CMAIL_AGENT_ALLOWED_USERS_ENV = "LIFE_OPS_CMAIL_AGENT_ALLOWED_USERS"
 CMAIL_SESSION_COOKIE_NAME = "cmail_session"
 CMAIL_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 FRG_BOOKING_WEBHOOK_SECRET_NAME = "FRG_BOOKING_WEBHOOK_SECRET"
@@ -69,7 +83,10 @@ FRG_FORGE_WEBHOOK_SOURCE_TABLE = "stripe_checkout_sessions"
 FRG_FORGE_CONFIRMATION_MODE_ENV = "FRG_FORGE_CONFIRMATION_MODE"
 FRG_FORGE_AUTO_SEND_CONFIRMATION_ENV = "FRG_FORGE_AUTO_SEND_CONFIRMATION"
 MAIL_UI_BACKGROUND_SYNC_INTERVAL_SECONDS = 2.0
-MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 2000
+MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS = 2000
+MAIL_UI_CLIENT_REFRESH_INTERVAL_MS = 15000
+MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT = 8
+MAIL_UI_SUMMARY_SEARCH_MAX_CHARS = 2000
 MAIL_UI_SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 MAIL_UI_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 3.0
 MAX_DRAFT_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -85,6 +102,50 @@ _CMAIL_SIGNATURE_TEXT = (
     "Cody Mitchell\n"
     "Fractal Research Group LLC\n"
     "https://frg.earth\n"
+    "(850) 529-8452"
+)
+_CMAIL_PREVIOUS_SIGNATURE_TEXT_WEBSITE_ONLY = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group LLC\n"
+    "https://frg.earth"
+)
+_CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_PANHANDLE_EMAIL_AND_PHONES = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group LLC\n"
+    "https://frg.earth\n"
+    "https://panhandlefoodtrucks.com\n"
+    "cody@frg.earth\n"
+    "Call: (448) 432-0112\n"
+    "Text: (850) 529-8452"
+)
+_CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_DEVELOPER_LINKS_AND_PHONES = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group LLC\n"
+    "https://frg.earth\n"
+    "https://www.npmjs.com/~sproutseeds\n"
+    "https://github.com/SproutSeeds\n"
+    "cody@frg.earth\n"
+    "Call: (448) 432-0112\n"
+    "Text: (850) 529-8452"
+)
+_CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_BUSINESS_PHONE = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group LLC\n"
+    "https://frg.earth\n"
+    "https://www.npmjs.com/~sproutseeds\n"
+    "https://github.com/SproutSeeds\n"
+    "cody@frg.earth\n"
+    "(448) 432-0112"
+)
+_CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_LINKS = (
+    "Best,\n\n"
+    "Cody Mitchell\n"
+    "Fractal Research Group LLC\n"
+    "https://frg.earth\n"
     "https://www.npmjs.com/~sproutseeds\n"
     "https://github.com/SproutSeeds\n"
     "cody@frg.earth"
@@ -95,6 +156,14 @@ _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE = "Best,\nCody Mitchell\nFractal Research
 _CMAIL_LEGACY_SIGNATURE_TEXT = "Best,\nCody Mitchell\nFractal Research Group\ncody@frg.earth"
 _CMAIL_KNOWN_SIGNATURE_TEXTS = (
     _CMAIL_SIGNATURE_TEXT,
+    mail_identities.mail_identity(mail_identities.CODACLI_MAIL_IDENTITY).signature_text,
+    mail_identities.mail_identity(mail_identities.BIND_MY_SOUL_MAIL_IDENTITY).signature_text,
+    mail_identities.mail_identity(mail_identities.DECKFOUND_MAIL_IDENTITY).signature_text,
+    _CMAIL_PREVIOUS_SIGNATURE_TEXT_WEBSITE_ONLY,
+    _CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_PANHANDLE_EMAIL_AND_PHONES,
+    _CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_DEVELOPER_LINKS_AND_PHONES,
+    _CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_BUSINESS_PHONE,
+    _CMAIL_PREVIOUS_SIGNATURE_TEXT_WITH_LINKS,
     _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE_SPACED,
     _CMAIL_LEGACY_SIGNATURE_TEXT_SPACED,
     _CMAIL_LEGACY_SIGNATURE_TEXT_WITH_SITE,
@@ -118,9 +187,7 @@ _CMAIL_SIGNATURE_EMAIL_HTML = """
         <div style="font-weight:700;">Cody Mitchell</div>
         <div>Fractal Research Group</div>
         <div><a href="https://frg.earth" style="color:#1155cc; text-decoration:none;">frg.earth</a></div>
-        <div><a href="https://www.npmjs.com/~sproutseeds" style="color:#1155cc; text-decoration:none;">npmjs.com/~sproutseeds</a></div>
-        <div><a href="https://github.com/SproutSeeds" style="color:#1155cc; text-decoration:none;">github.com/SproutSeeds</a></div>
-        <div><a href="mailto:cody@frg.earth" style="color:#111111; text-decoration:none;">cody@frg.earth</a></div>
+        <div><a href="tel:+18505298452" style="color:#111111; text-decoration:none;">(850) 529-8452</a></div>
       </td>
     </tr>
   </table>
@@ -145,9 +212,7 @@ _CMAIL_SIGNATURE_PREVIEW_HTML = """
         <div style="font-weight:700;">Cody Mitchell</div>
         <div>Fractal Research Group</div>
         <div><a href="https://frg.earth" style="color:#b8ff4d; text-decoration:none;">frg.earth</a></div>
-        <div><a href="https://www.npmjs.com/~sproutseeds" style="color:#b8ff4d; text-decoration:none;">npmjs.com/~sproutseeds</a></div>
-        <div><a href="https://github.com/SproutSeeds" style="color:#b8ff4d; text-decoration:none;">github.com/SproutSeeds</a></div>
-        <div><a href="mailto:cody@frg.earth" style="color:#edf2eb; text-decoration:none;">cody@frg.earth</a></div>
+        <div><a href="tel:+18505298452" style="color:#edf2eb; text-decoration:none;">(850) 529-8452</a></div>
       </td>
     </tr>
   </table>
@@ -157,6 +222,91 @@ _CMAIL_SIGNATURE_PREVIEW_HTML = """
 
 def _truthy_env_value(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cmail_agent_allowed_users() -> set[str]:
+    configured = str(os.environ.get(CMAIL_AGENT_ALLOWED_USERS_ENV) or "").strip()
+    if configured:
+        return {part.strip().lower() for part in configured.split(",") if part.strip()}
+    server_config = clawdad_client.server_config()
+    allowed = server_config.get("allowedUsers")
+    if isinstance(allowed, list):
+        users = {str(user).strip().lower() for user in allowed if str(user).strip()}
+        if users:
+            return users
+    return {"codyshanemitchell@gmail.com"}
+
+
+def _cmail_request_host(value: str) -> tuple[str, int | None]:
+    try:
+        parsed = urlparse(f"//{str(value or '').strip()}")
+        return str(parsed.hostname or "").lower(), parsed.port
+    except ValueError:
+        return "", None
+
+
+def _cmail_origin_parts(value: str) -> tuple[str, str, int | None]:
+    try:
+        parsed = urlparse(str(value or "").strip())
+        return str(parsed.scheme or "").lower(), str(parsed.hostname or "").lower(), parsed.port
+    except ValueError:
+        return "", "", None
+
+
+def _cmail_effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return None
+
+
+def _cmail_agent_request_authorized(
+    headers: Any,
+    *,
+    client_host: str,
+) -> tuple[bool, str]:
+    try:
+        client_is_loopback = ipaddress.ip_address(str(client_host or "")).is_loopback
+    except ValueError:
+        client_is_loopback = False
+    if not client_is_loopback:
+        return False, "agent_terminal_requires_local_cmail_service"
+
+    host_name, host_port = _cmail_request_host(str(headers.get("Host") or ""))
+    origin = str(headers.get("Origin") or "").strip()
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if host_name in local_hosts:
+        if origin:
+            origin_scheme, origin_host, origin_port = _cmail_origin_parts(origin)
+            if origin_host not in local_hosts:
+                return False, "agent_terminal_requires_same_origin"
+            if host_port is not None and _cmail_effective_port(origin_scheme, origin_port) != host_port:
+                return False, "agent_terminal_requires_same_origin"
+        return True, "local"
+
+    public_scheme, public_host, public_port = _cmail_origin_parts(CMAIL_PUBLIC_URL)
+    if host_name != public_host:
+        return False, "agent_terminal_host_not_allowed"
+    public_effective_port = _cmail_effective_port(public_scheme, public_port)
+    host_effective_port = host_port if host_port is not None else public_effective_port
+    if host_effective_port != public_effective_port:
+        return False, "agent_terminal_host_not_allowed"
+    if origin:
+        origin_scheme, origin_host, origin_port = _cmail_origin_parts(origin)
+        if (
+            origin_scheme != public_scheme
+            or origin_host != public_host
+            or _cmail_effective_port(origin_scheme, origin_port) != public_effective_port
+        ):
+            return False, "agent_terminal_requires_same_origin"
+
+    tailscale_login = str(headers.get("Tailscale-User-Login") or "").strip().lower()
+    if tailscale_login not in _cmail_agent_allowed_users():
+        return False, "agent_terminal_requires_tailnet_identity"
+    return True, "tailnet"
 
 
 def _frg_confirmation_mode(*, mode_env_name: str, auto_send_env_name: str) -> str:
@@ -419,6 +569,32 @@ _HTML = """<!doctype html>
     .brand-lockup {
       display: flex;
       align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .identity-picker {
+      min-width: 190px;
+      min-height: 42px;
+      padding: 0 38px 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--text);
+      background: rgba(23, 29, 24, 0.88);
+      font: 700 13px/1 var(--sans);
+      cursor: pointer;
+    }
+    .mail-identity-chip {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-top: 5px;
+      padding: 4px 8px;
+      border: 1px solid rgba(184, 255, 77, 0.26);
+      border-radius: 999px;
+      color: var(--accent);
+      font: 700 10px/1 var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
     }
     .eyebrow {
       color: var(--accent);
@@ -475,6 +651,76 @@ _HTML = """<!doctype html>
     .tab-button.active {
       background: var(--accent-soft);
       color: var(--accent);
+    }
+    .agent-terminal-control {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .agent-terminal-button {
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 8px 12px;
+      border-color: rgba(184, 255, 77, 0.28);
+      background: rgba(184, 255, 77, 0.07);
+      color: var(--accent);
+      font: 750 11px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+    }
+    .agent-terminal-button:hover {
+      border-color: rgba(184, 255, 77, 0.52);
+      background: rgba(184, 255, 77, 0.13);
+    }
+    .agent-terminal-button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .agent-terminal-button[disabled] {
+      cursor: progress;
+      opacity: 0.72;
+    }
+    .agent-terminal-button.opened {
+      background: rgba(184, 255, 77, 0.18);
+      color: #e9ffd0;
+    }
+    .agent-terminal-button.error {
+      border-color: rgba(255, 137, 118, 0.52);
+      background: rgba(255, 137, 118, 0.1);
+      color: #ffad9f;
+    }
+    .agent-terminal-icon {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+    }
+    .agent-terminal-feedback {
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      z-index: 40;
+      width: max-content;
+      max-width: min(340px, calc(100vw - 24px));
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(13, 18, 15, 0.98);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .agent-terminal-feedback:empty {
+      display: none;
+    }
+    .agent-terminal-feedback.error {
+      border-color: rgba(255, 137, 118, 0.35);
+      color: #ffb5a9;
     }
     .toolbar {
       display: flex;
@@ -837,6 +1083,29 @@ _HTML = """<!doctype html>
     .confirm-layer.hidden {
       display: none;
     }
+    .spam-dialog {
+      width: min(540px, calc(100vw - 32px));
+      max-height: calc(100dvh - 40px);
+      overflow-y: auto;
+      box-sizing: border-box;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 24px;
+      background: #111813;
+      color: var(--text);
+    }
+    .spam-dialog::backdrop { background: rgba(0,0,0,.65); }
+    .spam-dialog header, .spam-rule { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .spam-dialog h2 { margin: 0; }
+    .spam-dialog p, .spam-rule small { color: var(--muted); line-height: 1.5; }
+    .spam-dialog form { display: grid; gap: 10px; margin: 20px 0; }
+    .spam-dialog input { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 10px; background: #080e0a; color: var(--text); border: 1px solid var(--line); }
+    .spam-rule { padding: 12px 0; border-top: 1px solid var(--line); }
+    .spam-rule span { min-width: 0; overflow-wrap: anywhere; }
+    .spam-rule small { display: block; }
+    .spam-dialog button, [data-spam-sender], [data-restore-sender] { cursor: pointer; }
+    .spam-dialog button:disabled { cursor: wait; }
+    .spam-feedback { min-height: 1.5em; overflow-wrap: anywhere; }
     .confirm-card {
       width: min(420px, calc(100vw - 48px));
       border-radius: 20px;
@@ -1077,15 +1346,14 @@ _HTML = """<!doctype html>
       gap: 12px;
       min-width: 0;
       max-width: 100%;
-      overflow-wrap: anywhere;
-      word-break: break-word;
+      overflow-wrap: break-word;
+      word-break: normal;
     }
     .body-rich *,
     .quote-rich * {
+      box-sizing: border-box;
       min-width: 0;
       max-width: 100%;
-      overflow-wrap: anywhere;
-      word-break: break-word;
     }
     .body-rich p,
     .body-rich div,
@@ -1109,7 +1377,7 @@ _HTML = """<!doctype html>
     .quote-rich table {
       width: 100%;
       max-width: 100%;
-      table-layout: fixed;
+      table-layout: auto;
       border-collapse: collapse;
     }
     .body-rich td,
@@ -1118,8 +1386,8 @@ _HTML = """<!doctype html>
     .quote-rich th {
       vertical-align: top;
       padding: 4px 8px 4px 0;
-      overflow-wrap: anywhere;
-      word-break: break-word;
+      overflow-wrap: break-word;
+      word-break: normal;
     }
     .body-rich pre,
     .body-rich code,
@@ -1139,6 +1407,8 @@ _HTML = """<!doctype html>
     .quote-rich a {
       color: var(--accent);
       text-decoration: none;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .body-rich a:hover,
     .quote-rich a:hover {
@@ -1506,7 +1776,9 @@ _HTML = """<!doctype html>
       }
       .brand-lockup {
         width: 100%;
+        justify-content: space-between;
       }
+      .identity-picker { min-width: 0; flex: 1 1 180px; font-size: 16px; }
       .hero-title {
         gap: 10px;
         font-size: clamp(40px, 13vw, 56px);
@@ -1617,47 +1889,11 @@ _HTML = """<!doctype html>
       .quote-rich {
         font-size: 15px;
       }
-      .body-rich table,
-      .quote-rich table {
-        display: block;
-        width: 100%;
-        overflow: hidden;
-      }
-      .body-rich tbody,
-      .body-rich thead,
-      .body-rich tr,
-      .body-rich td,
-      .body-rich th,
-      .quote-rich tbody,
-      .quote-rich thead,
-      .quote-rich tr,
-      .quote-rich td,
-      .quote-rich th {
-        display: block;
-        width: 100%;
-      }
-      .body-rich tr,
-      .quote-rich tr {
-        padding: 10px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      }
-      .body-rich tr:last-child,
-      .quote-rich tr:last-child {
-        border-bottom: 0;
-      }
       .body-rich td,
       .body-rich th,
       .quote-rich td,
       .quote-rich th {
-        padding: 0;
-      }
-      .body-rich td:first-child:not(:only-child),
-      .quote-rich td:first-child:not(:only-child) {
-        color: var(--muted);
-        font: 700 11px/1.35 var(--mono);
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        margin-bottom: 4px;
+        padding: 3px 6px 3px 0;
       }
       .attachments,
       .message-list {
@@ -1722,23 +1958,41 @@ _HTML = """<!doctype html>
     <div class="topbar">
       <div class="brand-lockup">
         <h1 class="hero-title">CMAIL</h1>
+        <select class="identity-picker" id="identitySelect" aria-label="Inbox identity">
+          <option value="all">All inboxes</option>
+          <option value="frg">Cody / FRG</option>
+          <option value="frg_info">FRG Info</option>
+          <option value="codacli">Cody / CodaCLI</option>
+          <option value="bind_my_soul">Bind My Soul Support</option>
+          <option value="deckfound">DeckFound Support</option>
+        </select>
       </div>
       <div class="topbar-actions">
         <div class="tabbar" role="tablist" aria-label="Mail views">
           <button class="tab-button active" type="button" id="tabInbox" role="tab" aria-selected="true">Correspondence</button>
           <button class="tab-button" type="button" id="tabDrafts" role="tab" aria-selected="false">Drafts</button>
-          <button class="tab-button" type="button" id="tabHidden" role="tab" aria-selected="false">Hidden</button>
-          <a class="tab-button" href="/calendar">Calendar</a>
+          <button class="tab-button" type="button" id="tabHidden" role="tab" aria-selected="false">Spam</button>
+        </div>
+        <div class="agent-terminal-control">
+          <button class="agent-terminal-button" type="button" id="agentTerminalButton" aria-label="Open CMAIL Agent in Terminal">
+            <svg class="agent-terminal-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M2.25 3.25h11.5v9.5H2.25zM4.5 6l2 2-2 2M8 10h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="agentTerminalLabel">Agent</span>
+          </button>
+          <span class="agent-terminal-feedback" id="agentTerminalFeedback" role="status" aria-live="polite"></span>
         </div>
         <span class="badge status-pill" id="syncBadge">syncing…</span>
       </div>
     </div>
+    <section class="alerts" id="deliveryAlerts" aria-live="polite"></section>
     <section class="main">
       <section class="panel">
         <div class="panel-head">
           <h2 id="panelTitle">correspondence</h2>
           <div class="panel-actions">
             <button class="secondary hidden" type="button" id="newDraftButton">new draft</button>
+            <button class="secondary hidden" type="button" id="spamSendersButton">Manage senders</button>
             <span class="badge" id="threadCount">0 contacts</span>
           </div>
         </div>
@@ -1758,13 +2012,28 @@ _HTML = """<!doctype html>
     </section>
   </div>
   <div class="confirm-layer hidden" id="confirmLayer" aria-hidden="true"></div>
+  <dialog class="spam-dialog" id="spamDialog" aria-labelledby="spamTitle">
+    <header><h2 id="spamTitle">Spam senders</h2><button class="secondary" id="closeSpamDialog" type="button">Back</button></header>
+    <p>Keep correspondence with these exact email addresses out of sight. Existing and future mail goes to Spam across your CMAIL inboxes and stays out of mail reminders. Messages are kept until you restore the sender.</p>
+    <form id="spamSenderForm">
+      <label for="spamSenderInput">Sender email address</label>
+      <input type="email" id="spamSenderInput" placeholder="sender@example.com" required autocomplete="off" spellcheck="false">
+      <button class="primary" type="submit" id="addSpamSender">Move sender to Spam</button>
+    </form>
+    <div class="spam-feedback" id="spamFeedback" role="status" aria-live="polite"></div>
+    <div id="spamSenderList"></div>
+  </dialog>
   <script>
-    const OVERVIEW_CACHE_STORAGE_KEY = "lifeops.mail.overviewCache";
+    // Version this cache whenever the overview wire shape changes. Older CMAIL
+    // builds stored multi-megabyte mailbox payloads here, which made a fixed
+    // server response feel slow again on the next browser refresh.
+    const OVERVIEW_CACHE_STORAGE_KEY = "lifeops.mail.overviewCache.v3";
     const DRAFTS_CACHE_STORAGE_KEY = "lifeops.mail.draftsCache";
     const CONTACTS_CACHE_STORAGE_KEY = "lifeops.mail.contactsCache";
     const SELECTED_CONTACT_STORAGE_KEY = "lifeops.mail.selectedContact";
     const SELECTED_MESSAGE_STORAGE_KEY = "lifeops.mail.selectedMessage";
     const ACTIVE_VIEW_STORAGE_KEY = "lifeops.mail.activeView";
+    const SELECTED_IDENTITY_STORAGE_KEY = "lifeops.mail.selectedIdentity";
     const CORRESPONDENCE_QUERY_STORAGE_KEY = "lifeops.mail.correspondenceQuery";
     const CONTACT_SORT_MODE_STORAGE_KEY = "lifeops.mail.contactSortMode";
     const CONTACT_SORT_MODE_VERSION_STORAGE_KEY = "lifeops.mail.contactSortModeVersion";
@@ -1777,10 +2046,12 @@ _HTML = """<!doctype html>
     const PENDING_DELETE_MESSAGES_STORAGE_KEY = "lifeops.mail.pendingDeletedMessages";
     const DELETE_QUEUE_STORAGE_KEY = "lifeops.mail.deleteQueue";
     const DRAFT_SAVE_QUEUE_STORAGE_KEY = "lifeops.mail.draftSaveQueue";
+    const initialUrlParams = new URLSearchParams(window.location.search || "");
     const SERVER_BOOTSTRAP_OVERVIEW = __INITIAL_OVERVIEW_JSON__;
     const CMAIL_SIGNATURE_TEXT = __CMAIL_SIGNATURE_TEXT_JSON__;
     const CMAIL_KNOWN_SIGNATURE_TEXTS = __CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__;
     const CMAIL_SIGNATURE_PREVIEW_HTML = __CMAIL_SIGNATURE_PREVIEW_HTML_JSON__;
+    const CMAIL_IDENTITIES = __CMAIL_IDENTITIES_JSON__;
     const TAILNET_ACCESS_MESSAGE = __CMAIL_TAILNET_ACCESS_MESSAGE_JSON__;
     const CORRESPONDENCE_SOURCE = "correspondence";
 
@@ -1874,10 +2145,18 @@ _HTML = """<!doctype html>
         .join("");
     }
 
-    function composeDraftPreviewHtml(bodyText) {
+    function identityForKey(value) {
+      const clean = String(value || "").trim();
+      return CMAIL_IDENTITIES.find((identity) => identity.key === clean)
+        || CMAIL_IDENTITIES.find((identity) => identity.key === "frg")
+        || CMAIL_IDENTITIES[0];
+    }
+
+    function composeDraftPreviewHtml(bodyText, identityKey = "frg") {
       const unsigned = normalizeDraftPreviewBody(bodyText);
       const bodyMarkup = paragraphHtml(unsigned);
-      return bodyMarkup ? `${bodyMarkup}${CMAIL_SIGNATURE_PREVIEW_HTML}` : CMAIL_SIGNATURE_PREVIEW_HTML;
+      const signature = identityForKey(identityKey)?.signature_preview_html || CMAIL_SIGNATURE_PREVIEW_HTML;
+      return bodyMarkup ? `${bodyMarkup}${signature}` : signature;
     }
 
     function persistPendingDeleteState() {
@@ -1912,6 +2191,7 @@ _HTML = """<!doctype html>
     }
 
     function persistOverviewCache(payload) {
+      if (state.selectedIdentity !== "all") return;
       try {
         const minimalPayload = {
           mailbox: payload?.mailbox || "correspondence",
@@ -1923,6 +2203,7 @@ _HTML = """<!doctype html>
           viewed_message_keys: payload?.viewed_message_keys || [],
           cloudflare_queue: payload?.cloudflare_queue || {},
           cloudflare_sync: payload?.cloudflare_sync || {},
+          resend_queue: payload?.resend_queue || {},
           mailbox_version: payload?.mailbox_version || {},
         };
         window.localStorage.setItem(OVERVIEW_CACHE_STORAGE_KEY, JSON.stringify(minimalPayload));
@@ -1931,8 +2212,12 @@ _HTML = """<!doctype html>
       }
     }
 
-    function loadCachedDrafts() {
-      const payload = loadStoredJson(DRAFTS_CACHE_STORAGE_KEY);
+    function draftCacheStorageKey(identityKey = "all") {
+      return `${DRAFTS_CACHE_STORAGE_KEY}.${String(identityKey || "all")}`;
+    }
+
+    function loadCachedDrafts(identityKey = "all") {
+      const payload = loadStoredJson(draftCacheStorageKey(identityKey));
       if (!Array.isArray(payload)) return [];
       return payload
         .map((draft) => (draft && typeof draft === "object" ? draft : null))
@@ -1949,7 +2234,7 @@ _HTML = """<!doctype html>
 
     function persistDraftsCache(drafts) {
       try {
-        window.localStorage.setItem(DRAFTS_CACHE_STORAGE_KEY, JSON.stringify(drafts || []));
+        window.localStorage.setItem(draftCacheStorageKey(state.selectedIdentity), JSON.stringify(drafts || []));
       } catch (_error) {
         // Ignore local storage failures; in-memory drafts still work for the current session.
       }
@@ -2043,8 +2328,44 @@ _HTML = """<!doctype html>
 
     function normalizeActiveView(value) {
       const clean = String(value || "").trim().toLowerCase();
+      if (clean === "spam") return "hidden";
       if (clean === "drafts" || clean === "hidden") return clean;
       return "inbox";
+    }
+
+    function initialHasDraftComposerSeedParams() {
+      return ["to", "cc", "bcc", "subject", "body_text", "body"]
+        .some((key) => String(initialUrlParams.get(key) || "").trim());
+    }
+
+    function initialSelectedDraftId() {
+      const urlDraftId = Number(initialUrlParams.get("draft") || "") || null;
+      if (urlDraftId) return urlDraftId;
+      if (initialHasDraftComposerSeedParams()) return null;
+      return Number(loadStoredText(SELECTED_DRAFT_STORAGE_KEY) || "") || null;
+    }
+
+    function initialSelectedMessageId() {
+      return Number(initialUrlParams.get("message") || initialUrlParams.get("message_id") || "") || null;
+    }
+
+    function initialDraftComposerSeed() {
+      if (initialSelectedDraftId()) return null;
+      const seed = {
+        to: String(initialUrlParams.get("to") || "").trim(),
+        cc: String(initialUrlParams.get("cc") || "").trim(),
+        bcc: String(initialUrlParams.get("bcc") || "").trim(),
+        subject: String(initialUrlParams.get("subject") || "").trim(),
+        body_text: String(initialUrlParams.get("body_text") || initialUrlParams.get("body") || "").trim(),
+      };
+      return Object.values(seed).some((value) => value) ? seed : null;
+    }
+
+    function initialActiveView() {
+      if (initialSelectedDraftId()) return "drafts";
+      if (initialDraftComposerSeed()) return "drafts";
+      if (initialSelectedMessageId()) return "inbox";
+      return normalizeActiveView(initialUrlParams.get("view") || loadStoredText(ACTIVE_VIEW_STORAGE_KEY));
     }
 
     function normalizeContactSortMode(value) {
@@ -2148,17 +2469,25 @@ _HTML = """<!doctype html>
         });
     }
 
+    const storedSelectedIdentity = loadStoredText(SELECTED_IDENTITY_STORAGE_KEY);
+    const initialSelectedIdentity = CMAIL_IDENTITIES.some((identity) => identity.key === storedSelectedIdentity)
+      ? storedSelectedIdentity
+      : "all";
+
     const state = {
-      activeView: normalizeActiveView(loadStoredText(ACTIVE_VIEW_STORAGE_KEY)),
+      activeView: initialActiveView(),
+      selectedIdentity: initialSelectedIdentity,
       correspondenceQuery: loadStoredText(CORRESPONDENCE_QUERY_STORAGE_KEY)?.slice(0, 200) || "",
       contactSortMode: loadContactSortMode(),
       selectedContactKey: loadStoredText(SELECTED_CONTACT_STORAGE_KEY),
       selectedThreadKey: null,
-      selectedId: Number(loadStoredText(SELECTED_MESSAGE_STORAGE_KEY) || "") || null,
-      selectedDraftId: Number(loadStoredText(SELECTED_DRAFT_STORAGE_KEY) || "") || null,
+      selectedId: initialSelectedMessageId() || Number(loadStoredText(SELECTED_MESSAGE_STORAGE_KEY) || "") || null,
+      selectedDraftId: initialSelectedDraftId(),
+      deepLinkMessageId: initialSelectedMessageId(),
+      deepLinkApplied: false,
       overview: null,
       detail: null,
-      drafts: loadCachedDrafts(),
+      drafts: loadCachedDrafts(initialSelectedIdentity),
       contacts: loadCachedContacts(),
       listSignature: "",
       mailboxVersionSignature: "",
@@ -2180,7 +2509,7 @@ _HTML = """<!doctype html>
       draftSaveInFlight: false,
       draftSaveFlushInFlight: false,
       contactLookupInFlight: null,
-      draftComposerSeed: null,
+      draftComposerSeed: initialDraftComposerSeed(),
     };
 
     function reconcilePendingDeleteState() {
@@ -2224,6 +2553,15 @@ _HTML = """<!doctype html>
         .replaceAll('"', "&quot;");
     }
 
+    function prepareExternalEmailLinks(root) {
+      if (!root) return;
+      for (const link of root.querySelectorAll("a[href]")) {
+        link.target = "_blank";
+        link.rel = "noreferrer noopener";
+        link.dataset.openOutsideCmail = "true";
+      }
+    }
+
     async function fetchJson(path) {
       let response;
       try {
@@ -2249,6 +2587,80 @@ _HTML = """<!doctype html>
       }
       if (!response.ok) throw new Error(await response.text());
       return await response.json();
+    }
+
+    let agentTerminalResetTimer = null;
+
+    function cmailAgentSelectionPayload() {
+      const payload = {
+        view: state.activeView,
+        identity: state.selectedIdentity,
+      };
+      if (state.activeView === "drafts" && Number(state.selectedDraftId || 0) > 0) {
+        payload.draft_id = Number(state.selectedDraftId);
+      } else if (Number(state.selectedId || 0) > 0) {
+        payload.communication_id = Number(state.selectedId);
+      }
+      return payload;
+    }
+
+    function cmailAgentErrorMessage(error) {
+      const raw = String(error?.message || error || "").trim();
+      if (!raw) return "CMAIL could not open the agent. Try again.";
+      try {
+        const parsed = JSON.parse(raw);
+        return String(parsed?.message || parsed?.error || raw);
+      } catch (_parseError) {
+        return raw;
+      }
+    }
+
+    function resetAgentTerminalButton() {
+      const button = $("agentTerminalButton");
+      const label = $("agentTerminalLabel");
+      const feedback = $("agentTerminalFeedback");
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+      button.setAttribute("aria-label", "Open CMAIL Agent in Terminal");
+      button.classList.remove("opened", "error");
+      label.textContent = "Agent";
+      feedback.textContent = "";
+      feedback.classList.remove("error");
+      agentTerminalResetTimer = null;
+    }
+
+    async function openCmailAgentTerminal() {
+      const button = $("agentTerminalButton");
+      const label = $("agentTerminalLabel");
+      const feedback = $("agentTerminalFeedback");
+      if (button.disabled) return;
+      if (agentTerminalResetTimer) {
+        window.clearTimeout(agentTerminalResetTimer);
+        agentTerminalResetTimer = null;
+      }
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.setAttribute("aria-label", "Opening CMAIL Agent in Terminal");
+      button.classList.remove("opened", "error");
+      label.textContent = "Opening…";
+      feedback.textContent = "";
+      feedback.classList.remove("error");
+      try {
+        await postJson("/api/agent-terminal", cmailAgentSelectionPayload());
+        label.textContent = "Opened";
+        button.classList.add("opened");
+        button.setAttribute("aria-label", "CMAIL Agent opened in Terminal");
+        feedback.textContent = "CMAIL Agent opened in Terminal.";
+        agentTerminalResetTimer = window.setTimeout(resetAgentTerminalButton, 2800);
+      } catch (error) {
+        button.disabled = false;
+        button.setAttribute("aria-busy", "false");
+        button.setAttribute("aria-label", "Retry opening CMAIL Agent in Terminal");
+        button.classList.add("error");
+        label.textContent = "Retry";
+        feedback.classList.add("error");
+        feedback.textContent = cmailAgentErrorMessage(error);
+      }
     }
 
     function normalizedContacts(payload) {
@@ -2323,6 +2735,36 @@ _HTML = """<!doctype html>
           state.pendingDetailLoads.delete(key);
         }
       }
+    }
+
+    function applyDeepLinkedMessageFromOverview() {
+      if (!state.deepLinkMessageId || state.deepLinkApplied) return false;
+      const messageId = Number(state.deepLinkMessageId || 0);
+      const message = (state.overview?.messages || []).find((entry) => Number(entry?.id || 0) === messageId);
+      if (!message) return false;
+      state.activeView = "inbox";
+      state.selectedContactKey = String(message.contact_key || "") || state.selectedContactKey;
+      state.selectedThreadKey = threadGroupKey(message);
+      state.selectedId = Number(message.id || messageId);
+      state.deepLinkApplied = true;
+      persistSelectionState();
+      return true;
+    }
+
+    async function loadDeepLinkedMessageDetail() {
+      if (!state.deepLinkMessageId || state.deepLinkApplied) return;
+      const messageId = Number(state.deepLinkMessageId || 0);
+      if (!messageId) return;
+      state.deepLinkApplied = true;
+      const message = await getDetail(messageId);
+      if (!message) return;
+      state.activeView = "inbox";
+      state.selectedId = Number(message.id || messageId);
+      state.selectedContactKey = String(message.contact_key || "") || state.selectedContactKey;
+      state.selectedThreadKey = threadGroupKey(message);
+      persistSelectionState();
+      renderDetail(message);
+      renderContactList(state.overview || {});
     }
 
     function messageIsUnread(message) {
@@ -2577,7 +3019,10 @@ _HTML = """<!doctype html>
     }
 
     async function prefetchVisibleDetails() {
-      const messages = state.overview?.messages || [];
+      // Warm only the newest few messages. Prefetching every opened contact
+      // kept the browser busy downloading historical bodies long after the
+      // inbox itself had rendered.
+      const messages = (state.overview?.messages || []).slice(0, __MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT__);
       for (const message of messages) {
         const key = String(message.id);
         if (state.detailCache.has(key) || state.pendingDetailLoads.has(key)) {
@@ -2663,11 +3108,24 @@ _HTML = """<!doctype html>
     function renderSyncBadge(payload) {
       const sync = payload.cloudflare_sync || {};
       const cloudflare = payload.cloudflare_queue || {};
+      const resend = payload.resend_queue || {};
       const badge = $("syncBadge");
       const exactLastSync = exactSyncTimestamp(sync.last_sync_at || sync.last_success_at);
       const exactLastSuccess = exactSyncTimestamp(sync.last_success_at);
       const lastSyncLabel = exactLastSync || "waiting for first sync";
       const lastSuccessLabel = exactLastSuccess || lastSyncLabel;
+      const deliveryIssue = Number(resend.active_alert_count || 0) > 0
+        || (Array.isArray(resend.items) && resend.items.some((item) => (
+          ["queued", "retrying", "failed", "sending"].includes(String(item?.status || ""))
+          && String(item?.last_error || "").trim()
+        )));
+      if (deliveryIssue) {
+        const outboundLastSuccess = exactSyncTimestamp(resend.last_success_at);
+        badge.textContent = outboundLastSuccess
+          ? `delivery issue · outbound last sent ${outboundLastSuccess}`
+          : "delivery issue";
+        return;
+      }
       if (cloudflare.pending_count) {
         badge.textContent = `syncing… last ok ${lastSuccessLabel}`;
         return;
@@ -2677,6 +3135,50 @@ _HTML = """<!doctype html>
         return;
       }
       badge.textContent = `last sync ${lastSyncLabel}`;
+    }
+
+    function deliveryAlertRows(payload) {
+      const resend = payload?.resend_queue || {};
+      const alerts = Array.isArray(resend.active_alerts) ? resend.active_alerts : [];
+      const items = Array.isArray(resend.items) ? resend.items : [];
+      const rows = [];
+      for (const alert of alerts) {
+        rows.push({
+          title: String(alert?.title || "Outbound email delivery issue"),
+          message: String(alert?.message || "CMAIL has an outbound delivery item that needs attention."),
+        });
+      }
+      for (const item of items) {
+        const status = String(item?.status || "");
+        const lastError = String(item?.last_error || "").trim();
+        if (!lastError || !["queued", "retrying", "failed", "sending"].includes(status)) continue;
+        const target = String(item?.external_to || "").trim();
+        const subject = String(item?.subject || "").trim();
+        rows.push({
+          title: `Outbound email ${status}`,
+          message: `${subject || "Untitled email"}${target ? ` to ${target}` : ""}: ${lastError}`,
+        });
+      }
+      const seen = new Set();
+      return rows.filter((row) => {
+        const key = `${row.title}|${row.message}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 4);
+    }
+
+    function renderDeliveryAlerts(payload) {
+      const container = $("deliveryAlerts");
+      if (!container) return;
+      const rows = deliveryAlertRows(payload);
+      container.classList.toggle("visible", rows.length > 0);
+      container.innerHTML = rows.map((row) => `
+        <div class="alert">
+          <div class="title">${escapeHtml(row.title)}</div>
+          <div class="message">${escapeHtml(row.message)}</div>
+        </div>
+      `).join("");
     }
 
     function renderChrome() {
@@ -2689,10 +3191,11 @@ _HTML = """<!doctype html>
       $("tabDrafts").setAttribute("aria-selected", draftsActive ? "true" : "false");
       $("tabHidden").classList.toggle("active", hiddenActive);
       $("tabHidden").setAttribute("aria-selected", hiddenActive ? "true" : "false");
-      $("panelTitle").textContent = hiddenActive ? "hidden" : draftsActive ? "drafts" : "correspondence";
+      $("panelTitle").textContent = hiddenActive ? "spam" : draftsActive ? "drafts" : "correspondence";
       $("newDraftButton").classList.toggle("hidden", !draftsActive);
+      $("spamSendersButton").classList.toggle("hidden", !hiddenActive);
       $("correspondenceSearchWrap").classList.toggle("hidden", draftsActive);
-      $("correspondenceSearch").placeholder = hiddenActive ? "search hidden mail" : "search name, email, or body";
+      $("correspondenceSearch").placeholder = hiddenActive ? "search spam" : "search name, email, or body";
       $("correspondenceSearch").value = state.correspondenceQuery || "";
       const sortAllButton = $("sortAllButton");
       const sortNewButton = $("sortNewButton");
@@ -2709,6 +3212,7 @@ _HTML = """<!doctype html>
           button.setAttribute("aria-selected", active ? "true" : "false");
         }
       }
+      renderDeliveryAlerts(state.overview || {});
     }
 
     function mailboxVersionSignature(payload) {
@@ -2733,15 +3237,17 @@ _HTML = """<!doctype html>
           ...state.overview,
           cloudflare_sync: payload?.cloudflare_sync || state.overview.cloudflare_sync || {},
           cloudflare_queue: payload?.cloudflare_queue || state.overview.cloudflare_queue || {},
+          resend_queue: payload?.resend_queue || state.overview.resend_queue || {},
           mailbox_version: payload?.mailbox_version || state.overview.mailbox_version || {},
         };
       }
       renderSyncBadge(state.overview);
+      renderDeliveryAlerts(state.overview);
     }
 
     async function loadSyncStatus() {
       const mailbox = state.activeView === "hidden" ? "hidden" : "correspondence";
-      const payload = await fetchJson(`/api/sync-status?source=${encodeURIComponent(CORRESPONDENCE_SOURCE)}&mailbox=${encodeURIComponent(mailbox)}&sync=1`);
+      const payload = await fetchJson(`/api/sync-status?source=${encodeURIComponent(CORRESPONDENCE_SOURCE)}&mailbox=${encodeURIComponent(mailbox)}&identity=${encodeURIComponent(state.selectedIdentity)}&sync=1`);
       const nextSignature = mailboxVersionSignature(payload);
       const mailboxChanged = nextSignature !== state.mailboxVersionSignature;
       mergeSyncState(payload);
@@ -2869,7 +3375,7 @@ _HTML = """<!doctype html>
             : "No opened correspondence yet.";
         } else {
           emptyCopy = hiddenActive
-            ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence.")
+            ? (state.correspondenceQuery ? "No spam matches that search." : "Spam is empty. Use Manage senders to keep an email address out of sight.")
             : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
         }
         $("threadList").innerHTML = `<div class="empty">${emptyCopy}</div>`;
@@ -2886,10 +3392,10 @@ _HTML = """<!doctype html>
       const contactActionMarkup = (contact) => {
         const contactKey = escapeHtml(contact.contact_key);
         if (hiddenActive) {
-          return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Return this correspondence to the main view">show</button>`;
+          return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Restore this sender and future mail to Correspondence">Restore</button>`;
         }
         return `
-          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this correspondence to Hidden" aria-label="Hide correspondence">
+          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this sender to Spam" aria-label="Move sender to Spam">
             <svg class="hide-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path d="M4 13.5c2.1 2.4 4.8 3.6 8 3.6s5.9-1.2 8-3.6"></path>
               <path d="M7.2 16.2l-1.4 2"></path>
@@ -2906,6 +3412,7 @@ _HTML = """<!doctype html>
             <span class="unread-orb ${contactHasNewMail(contact) ? "" : "hidden"}" aria-hidden="true"></span>
             <div class="thread-copy">
               <div class="subject">${escapeHtml(contact.contact_label || "(unknown contact)")}</div>
+              ${state.selectedIdentity === "all" ? `<span class="mail-identity-chip">${escapeHtml(contact.mail_identity_short_label || (messagesForContact(contact.contact_key)[0]?.mail_identity_short_label) || "FRG")}</span>` : ""}
               <div class="thread-timestamp">${escapeHtml(contactTimestampLabel(contact))}</div>
             </div>
           </div>
@@ -2933,7 +3440,7 @@ _HTML = """<!doctype html>
           event.stopPropagation();
           const contactKey = node.getAttribute("data-hide-contact") || "";
           if (!contactKey) return;
-          await hideContact(contactKey);
+          openSpamRules(contactKey);
         });
       }
       for (const node of document.querySelectorAll("[data-unhide-contact]")) {
@@ -3071,6 +3578,13 @@ _HTML = """<!doctype html>
       }
     }
 
+    function moveNewSelectionToOpenedMode() {
+      if (state.contactSortMode !== "new") return false;
+      state.contactSortMode = "opened";
+      state.listSignature = "";
+      return true;
+    }
+
     function clearCorrespondenceSelection(options = {}) {
       state.selectedContactKey = null;
       state.selectedThreadKey = null;
@@ -3100,7 +3614,7 @@ _HTML = """<!doctype html>
         persistSelectionState();
         $("detailPanel").classList.remove("draft-mode");
         const emptyCopy = state.activeView === "hidden"
-          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
+          ? (state.correspondenceQuery ? "No spam matches that search." : "No spam selected.")
           : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
         $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         return;
@@ -3114,7 +3628,7 @@ _HTML = """<!doctype html>
       if (!state.selectedId) {
         $("detailPanel").classList.remove("draft-mode");
         const emptyCopy = state.activeView === "hidden"
-          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
+          ? (state.correspondenceQuery ? "No spam matches that search." : "No spam selected.")
           : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
         $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
         return;
@@ -3128,6 +3642,31 @@ _HTML = """<!doctype html>
       loadDetail(state.selectedId).catch((error) => {
         $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
       });
+    }
+
+    function renderMailboxRefreshPreservingDetail() {
+      if (state.activeView === "drafts") return;
+      const selectedContactKey = String(state.selectedContactKey || "");
+      const selectedMessageId = Number(state.selectedId || 0);
+      const detailMessageId = Number(state.detail?.id || 0);
+      const selectedContactStillPresent = (state.overview?.contacts || []).some(
+        (contact) => String(contact?.contact_key || "") === selectedContactKey,
+      );
+      const selectedMessageStillPresent = (state.overview?.messages || []).some(
+        (message) => Number(message?.id || 0) === selectedMessageId,
+      );
+      if (
+        !selectedContactKey
+        || !selectedMessageId
+        || detailMessageId !== selectedMessageId
+        || !selectedContactStillPresent
+        || !selectedMessageStillPresent
+      ) {
+        renderCurrentSelection();
+        return;
+      }
+      renderChrome();
+      renderContactList(state.overview || {});
     }
 
     function renderDraftSelection() {
@@ -3221,6 +3760,8 @@ _HTML = """<!doctype html>
     }
 
     function blankDraft() {
+      const identityKey = state.selectedIdentity === "all" ? "frg" : state.selectedIdentity;
+      const identity = identityForKey(identityKey);
       return {
         id: null,
         subject: "",
@@ -3236,6 +3777,10 @@ _HTML = """<!doctype html>
         thread_key: "",
         reply_context: null,
         attachments: [],
+        mail_identity: identityKey,
+        mail_identity_label: identity?.label || "Cody / FRG",
+        from_email: identity?.from_email || "Cody <cody@frg.earth>",
+        identity_locked: false,
       };
     }
 
@@ -3258,6 +3803,8 @@ _HTML = """<!doctype html>
         ? next.reply_context
         : null;
       next.attachments = Array.isArray(next.attachments) ? next.attachments : [];
+      next.mail_identity = String(next.mail_identity || blankDraft().mail_identity);
+      next.identity_locked = Boolean(next.identity_locked || next.in_reply_to);
       next.label = localDraftLabel(next.subject || next.label || "");
       next.snippet = localDraftSnippet(next.body_text);
       return next;
@@ -3314,6 +3861,8 @@ _HTML = """<!doctype html>
           thread_key: String(replySeed.thread_key || ""),
           reference_count: Array.isArray(replySeed.references) ? replySeed.references.length : 0,
         },
+        mail_identity: String(replySeed.mail_identity || message.mail_identity || "frg"),
+        identity_locked: true,
       });
       state.selectedDraftId = null;
       state.draftStatus = "";
@@ -3477,6 +4026,7 @@ _HTML = """<!doctype html>
       const ccInput = $("draftCc");
       const bccInput = $("draftBcc");
       const bodyInput = $("draftBody");
+      const identityInput = $("draftIdentity");
       if (!subjectInput || !toInput || !ccInput || !bccInput || !bodyInput) return null;
       state.draftSaveInFlight = true;
       state.draftStatus = "saving...";
@@ -3493,6 +4043,7 @@ _HTML = """<!doctype html>
           in_reply_to: String(activeDraft.in_reply_to || ""),
           references: Array.isArray(activeDraft.references) ? activeDraft.references : [],
           thread_key: String(activeDraft.thread_key || ""),
+          mail_identity: String(identityInput?.value || activeDraft.mail_identity || "frg"),
         };
         const localDraft = {
           id: localId,
@@ -3506,6 +4057,10 @@ _HTML = """<!doctype html>
           updated_at: new Date().toISOString(),
           in_reply_to: payload.in_reply_to,
           references: payload.references,
+          mail_identity: payload.mail_identity,
+          mail_identity_label: identityForKey(payload.mail_identity)?.label || "",
+          from_email: identityForKey(payload.mail_identity)?.from_email || "",
+          identity_locked: Boolean(activeDraft.identity_locked),
           thread_key: payload.thread_key,
           reply_context: activeDraft.reply_context || null,
           attachments: Array.isArray(activeDraft.attachments) ? activeDraft.attachments : [],
@@ -3696,7 +4251,9 @@ _HTML = """<!doctype html>
       const previewNode = $("draftPreview");
       const bodyInput = $("draftBody");
       if (!previewNode || !bodyInput) return;
-      previewNode.innerHTML = composeDraftPreviewHtml(bodyInput.value);
+      const identityInput = $("draftIdentity");
+      previewNode.innerHTML = composeDraftPreviewHtml(bodyInput.value, identityInput?.value || selectedDraft()?.mail_identity || "frg");
+      prepareExternalEmailLinks(previewNode);
     }
 
     function draftReplyContextMarkup(draft) {
@@ -3760,6 +4317,13 @@ _HTML = """<!doctype html>
                 </div>
               </div>
             ` : ""}
+            <div class="draft-field">
+              <label for="draftIdentity">From</label>
+              <select id="draftIdentity" ${entry.identity_locked ? "disabled aria-disabled='true'" : ""}>
+                ${CMAIL_IDENTITIES.map((identity) => `<option value="${escapeHtml(identity.key)}" ${identity.key === entry.mail_identity ? "selected" : ""}>${escapeHtml(identity.label)} · ${escapeHtml(identity.address)}</option>`).join("")}
+              </select>
+              ${entry.identity_locked ? `<span class="mail-identity-chip">Reply identity locked</span>` : ""}
+            </div>
             <div class="draft-field">
               <label for="draftSubject">Subject</label>
               <input id="draftSubject" type="text" value="${escapeHtml(entry.subject || "")}" placeholder="Draft subject">
@@ -3828,6 +4392,7 @@ _HTML = """<!doctype html>
           </form>
         </div>
       `;
+      prepareExternalEmailLinks(detail);
       const form = $("draftForm");
       if (form) {
         form.addEventListener("submit", async (event) => {
@@ -3838,6 +4403,13 @@ _HTML = """<!doctype html>
       const bodyInput = $("draftBody");
       if (bodyInput) {
         bodyInput.addEventListener("input", () => renderDraftPreview());
+      }
+      const identityInput = $("draftIdentity");
+      if (identityInput) {
+        identityInput.addEventListener("change", () => {
+          entry.mail_identity = String(identityInput.value || "frg");
+          renderDraftPreview();
+        });
       }
       for (const fieldId of ["draftTo", "draftCc", "draftBcc"]) {
         const input = $(fieldId);
@@ -3910,11 +4482,15 @@ _HTML = """<!doctype html>
     function selectContact(contactKey) {
       state.selectedContactKey = contactKey || null;
       state.selectedThreadKey = null;
+      const movedToOpenedMode = moveNewSelectionToOpenedMode();
       markContactOpened(state.selectedContactKey);
       const messages = messagesForContact(state.selectedContactKey);
       markMessagesViewed(messages);
       state.selectedId = messages[0]?.id ?? null;
       persistSelectionState();
+      if (movedToOpenedMode) {
+        renderChrome();
+      }
       renderContactList(state.overview || {});
       if (state.selectedId) {
         loadDetail(state.selectedId);
@@ -4037,6 +4613,67 @@ _HTML = """<!doctype html>
       renderCurrentSelection();
     }
 
+    let spamReturnFocus = null;
+    let spamBusy = false;
+
+    function closeSpamRules() {
+      $("spamDialog").close();
+      const target = spamReturnFocus?.isConnected ? spamReturnFocus : $("tabHidden");
+      target?.focus();
+    }
+
+    function renderSpamRules(senders) {
+      $("spamSenderList").innerHTML = senders.length ? senders.map((rule) => `
+        <div class="spam-rule"><span>${escapeHtml(rule.sender)}<small>${escapeHtml(rule.scope)}</small></span>
+        <button class="secondary" type="button" data-remove-spam-rule="${escapeHtml(rule.id)}" aria-label="Restore ${escapeHtml(rule.sender)}">Restore</button></div>
+      `).join("") : '<p>No sender rules yet.</p>';
+      for (const button of $("spamSenderList").querySelectorAll("[data-remove-spam-rule]")) {
+        button.disabled = spamBusy;
+        button.addEventListener("click", () => updateSpamRules("/api/spam/senders/remove", { id: button.dataset.removeSpamRule }));
+      }
+    }
+
+    async function openSpamRules(contactKey = "") {
+      spamReturnFocus = document.activeElement;
+      $("spamSenderInput").value = String(contactKey).split("::").pop().replace(/^sender:/, "");
+      $("spamFeedback").textContent = "";
+      $("spamSenderList").textContent = "Loading senders…";
+      $("spamDialog").showModal();
+      $("spamSenderInput").focus();
+      try {
+        const payload = await fetchJson("/api/spam/senders");
+        renderSpamRules(payload.senders || []);
+      } catch (error) {
+        $("spamFeedback").textContent = error.message || "Unable to load sender rules.";
+      }
+    }
+
+    async function updateSpamRules(path, payload) {
+      if (spamBusy) return;
+      spamBusy = true;
+      for (const button of $("spamDialog").querySelectorAll("form button, [data-remove-spam-rule]")) button.disabled = true;
+      try {
+        const result = await postJson(path, payload);
+        renderSpamRules(result.senders || []);
+        $("spamSenderInput").value = "";
+        $("spamFeedback").textContent = path.endsWith("/remove")
+          ? "Sender restored. Existing and future mail returns to Correspondence."
+          : `${result.sender} moved to Spam. Future mail from this address will stay here.`;
+        state.detailCache.clear();
+        try {
+          await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+        } catch (_error) {
+          $("spamFeedback").textContent += " Rule saved. Refresh the mailbox to update its view.";
+        }
+        $("spamSenderInput").focus();
+      } catch (error) {
+        $("spamFeedback").textContent = error.message || "Unable to update sender rules.";
+      } finally {
+        spamBusy = false;
+        for (const button of $("spamDialog").querySelectorAll("form button, [data-remove-spam-rule]")) button.disabled = false;
+      }
+    }
+
     async function hideContact(contactKey) {
       const cleanContactKey = String(contactKey || "").trim();
       if (!cleanContactKey) return;
@@ -4056,6 +4693,7 @@ _HTML = """<!doctype html>
       removeContactFromLocalOverview(cleanContactKey);
       try {
         await postJson("/api/contacts/unhide", { contact_key: cleanContactKey }, { keepalive: true });
+        state.detailCache.clear();
         await loadOverview({ sync: false, render: state.activeView !== "drafts" });
       } catch (error) {
         await loadOverview({ sync: false, render: state.activeView !== "drafts" });
@@ -4174,6 +4812,7 @@ _HTML = """<!doctype html>
             <div class="message-header">
               <div class="message-title">${escapeHtml(message.contact_label || message.person || message.external_from || "(unknown contact)")}</div>
               <div class="message-subtitle">${escapeHtml(`${contact?.count || messages.length} message${(contact?.count || messages.length) === 1 ? "" : "s"} in this correspondence`)}</div>
+              <span class="mail-identity-chip">${escapeHtml(message.mail_identity_label || "Cody / FRG")}</span>
             </div>
             <button class="close-selection-button" type="button" data-clear-selection title="Close this correspondence" aria-label="Deselect correspondence">${closeIcon()}</button>
           </div>
@@ -4195,6 +4834,7 @@ _HTML = """<!doctype html>
             <div class="item item-action">
               <div class="detail-action-buttons">
                 <button class="secondary inline-reply" type="button" data-reply-message="${message.id}">reply</button>
+                <button class="secondary" type="button" ${message.is_spam ? "data-restore-sender" : "data-spam-sender"}>${message.is_spam ? "Restore sender" : "Move sender to Spam"}</button>
                 <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence" aria-label="Archive message">${trashIcon()}</button>
               </div>
             </div>
@@ -4211,6 +4851,12 @@ _HTML = """<!doctype html>
           ${attachmentsMarkup}
         </div>
       `;
+      prepareExternalEmailLinks(detail);
+      detail.querySelector("[data-spam-sender]")?.addEventListener("click", () => openSpamRules(message.contact_email || activeContactKey));
+      detail.querySelector("[data-restore-sender]")?.addEventListener("click", async () => {
+        try { await unhideContact(activeContactKey); }
+        catch (error) { $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`; }
+      });
       const messageSelect = detail.querySelector("#messageSelect");
       if (messageSelect) {
         messageSelect.addEventListener("change", () => {
@@ -4252,13 +4898,14 @@ _HTML = """<!doctype html>
       }
     }
 
-    async function loadOverview({ sync = false, render = true } = {}) {
+    async function loadOverview({ sync = false, render = true, preserveActiveDetail = false } = {}) {
       state.lastRefreshStartedAt = Date.now();
       const mailbox = state.activeView === "hidden" ? "hidden" : "correspondence";
       const params = new URLSearchParams({
         limit: "80",
         source: CORRESPONDENCE_SOURCE,
         mailbox,
+        identity: state.selectedIdentity,
       });
       if (sync) params.set("sync", "1");
       state.overview = normalizeOverviewPayload(await fetchJson(`/api/overview?${params.toString()}`), { allowPendingResolution: true });
@@ -4268,15 +4915,26 @@ _HTML = """<!doctype html>
       }
       state.mailboxVersionSignature = mailboxVersionSignature(state.overview);
       pruneDetailCache();
+      const deepLinkResolved = applyDeepLinkedMessageFromOverview();
       renderSyncBadge(state.overview);
+      renderDeliveryAlerts(state.overview);
       if (render) {
-        renderCurrentSelection();
+        if (preserveActiveDetail) {
+          renderMailboxRefreshPreservingDetail();
+        } else {
+          renderCurrentSelection();
+        }
         schedulePrefetch();
+        if (!deepLinkResolved) {
+          loadDeepLinkedMessageDetail().catch((error) => {
+            $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+          });
+        }
       }
     }
 
     async function loadDrafts() {
-      const payload = await fetchJson("/api/drafts");
+      const payload = await fetchJson(`/api/drafts?identity=${encodeURIComponent(state.selectedIdentity)}`);
       state.drafts = mergeDraftsWithPending(payload?.drafts || []);
       persistDraftsCache(state.drafts);
       if (!state.contacts.length) {
@@ -4330,7 +4988,11 @@ _HTML = """<!doctype html>
       try {
         const { mailboxChanged } = await loadSyncStatus();
         if (mailboxChanged || !state.overview) {
-          await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+          await loadOverview({
+            sync: false,
+            render: state.activeView !== "drafts",
+            preserveActiveDetail: true,
+          });
         }
       } catch (_error) {
         // Keep the last rendered inbox visible if the sync step hiccups.
@@ -4355,6 +5017,11 @@ _HTML = """<!doctype html>
 
     function handleEscape(event) {
       if (event.key !== "Escape") return;
+      if ($("spamDialog").open) {
+        event.preventDefault();
+        closeSpamRules();
+        return;
+      }
       if (state.pendingDelete) {
         event.preventDefault();
         closeConfirm();
@@ -4375,6 +5042,9 @@ _HTML = """<!doctype html>
       if (state.selectedContactKey || state.selectedId) {
         event.preventDefault();
         clearCorrespondenceSelection();
+      } else if (state.activeView === "hidden") {
+        event.preventDefault();
+        setActiveView("inbox");
       }
     }
 
@@ -4408,6 +5078,7 @@ _HTML = """<!doctype html>
 
     function renderInitialOverview() {
       if (state.activeView === "hidden") return;
+      if (state.selectedIdentity !== "all") return;
       const candidates = [
         SERVER_BOOTSTRAP_OVERVIEW,
         loadStoredJson(OVERVIEW_CACHE_STORAGE_KEY),
@@ -4423,16 +5094,46 @@ _HTML = """<!doctype html>
       primeViewedMessagesFromOverview(state.overview);
       persistOverviewCache(state.overview);
       state.mailboxVersionSignature = mailboxVersionSignature(state.overview);
+      const deepLinkResolved = applyDeepLinkedMessageFromOverview();
       renderSyncBadge(state.overview);
       renderCurrentSelection();
       schedulePrefetch();
+      if (!deepLinkResolved) {
+        loadDeepLinkedMessageDetail().catch((error) => {
+          $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+        });
+      }
     }
 
     renderInitialOverview();
     renderChrome();
+    $("identitySelect").value = state.selectedIdentity;
+    $("identitySelect").addEventListener("change", (event) => {
+      state.selectedIdentity = String(event.target.value || "all");
+      window.localStorage.setItem(SELECTED_IDENTITY_STORAGE_KEY, state.selectedIdentity);
+      state.selectedContactKey = null;
+      state.selectedThreadKey = null;
+      state.selectedId = null;
+      state.selectedDraftId = null;
+      state.draftComposerSeed = null;
+      state.overview = null;
+      persistSelectionState();
+      loadOverview({ sync: false }).catch((error) => {
+        $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+      });
+      loadDrafts().catch(() => {});
+    });
     $("tabInbox").addEventListener("click", () => setActiveView("inbox"));
     $("tabDrafts").addEventListener("click", () => setActiveView("drafts"));
     $("tabHidden").addEventListener("click", () => setActiveView("hidden"));
+    $("spamSendersButton").addEventListener("click", () => openSpamRules());
+    $("closeSpamDialog").addEventListener("click", closeSpamRules);
+    $("spamDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeSpamRules(); });
+    $("spamSenderForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      updateSpamRules("/api/spam/senders", { sender: $("spamSenderInput").value });
+    });
+    $("agentTerminalButton").addEventListener("click", openCmailAgentTerminal);
     $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
     $("sortAllButton").addEventListener("click", () => setContactSortMode("all"));
     $("sortNewButton").addEventListener("click", () => setContactSortMode("new"));
@@ -4454,6 +5155,8 @@ _HTML = """<!doctype html>
     setInterval(() => {
       flushDeleteQueue().catch(() => {});
       flushDraftSaveQueue().catch(() => {});
+    }, __MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS__);
+    setInterval(() => {
       refreshMailboxIfNeeded().catch(() => {});
     }, __MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__);
     window.addEventListener("focus", wakeRefresh);
@@ -5167,7 +5870,7 @@ def _body_display(body_text: str, *, html_body: str = "", snippet: str = "") -> 
     }
 
 
-def _summary_search_text(row: Any, *, max_chars: int = 8000) -> str:
+def _summary_search_text(row: Any, *, max_chars: int = MAIL_UI_SUMMARY_SEARCH_MAX_CHARS) -> str:
     values = [
         str(row["subject"] or ""),
         str(row["person"] or ""),
@@ -5190,12 +5893,19 @@ def _communication_summary(row: Any) -> dict[str, Any]:
         external_to=str(row["external_to"] or ""),
         source=str(row["source"] or ""),
     )
+    identity_key = _mail_identity_for_row(row)
+    identity = mail_identities.mail_identity(identity_key)
+    if identity_key != mail_identities.DEFAULT_MAIL_IDENTITY:
+        contact["contact_key"] = f"{identity_key}::{contact['contact_key']}"
     return {
         "id": int(row["id"]),
         "external_id": str(row["external_id"] or ""),
         "read_key": _communication_read_key(row),
         "subject": str(row["subject"] or ""),
         "direction": str(row["direction"] or "inbound"),
+        "mail_identity": identity_key,
+        "mail_identity_label": identity.label,
+        "mail_identity_short_label": identity.short_label,
         "status": str(row["status"] or ""),
         "source": str(row["source"] or ""),
         "person": str(row["person"] or ""),
@@ -5222,6 +5932,9 @@ def _group_contacts(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "contact_label": str(message.get("contact_label") or ""),
                 "contact_name": str(message.get("contact_name") or ""),
                 "contact_email": str(message.get("contact_email") or ""),
+                "mail_identity": str(message.get("mail_identity") or mail_identities.DEFAULT_MAIL_IDENTITY),
+                "mail_identity_label": str(message.get("mail_identity_label") or ""),
+                "mail_identity_short_label": str(message.get("mail_identity_short_label") or ""),
                 "latest_message_id": message["id"],
                 "subject": message["subject"],
                 "happened_at": message["happened_at"],
@@ -5290,6 +6003,9 @@ def _communication_ids_for_contact(
             external_to=str(row["external_to"] or ""),
             source=str(row["source"] or ""),
         )
+        identity_key = _mail_identity_for_row(row)
+        if identity_key != mail_identities.DEFAULT_MAIL_IDENTITY:
+            contact["contact_key"] = f"{identity_key}::{contact['contact_key']}"
         if contact["contact_key"] == contact_key:
             matches.append(int(row["id"]))
     return matches
@@ -5309,14 +6025,42 @@ def _draft_snippet(body_text: str) -> str:
 
 
 def _address_field_values(value: str) -> list[str]:
+    normalized_value = _quote_unquoted_comma_display_names(str(value or ""))
     formatted: list[str] = []
-    for name, email in getaddresses([str(value or "")]):
+    for name, email in getaddresses([normalized_value]):
         clean_email = str(email or "").strip()
         clean_name = str(name or "").strip()
-        if not clean_email:
+        if not _sendable_email_address(clean_email):
             continue
         formatted.append(formataddr((clean_name, clean_email)) if clean_name else clean_email)
     return formatted
+
+
+def _quote_unquoted_comma_display_names(value: str) -> str:
+    """Allow pasted contacts like `Chen, Rui <rui@example.edu>`.
+
+    `email.utils.getaddresses` treats the comma as an address separator unless
+    the display name is quoted. CMAIL's contact chips and reply scaffolds can
+    surface names in this unquoted form, so normalize them before parsing.
+    """
+
+    pattern = re.compile(
+        r"(^|[,;]\s*)([^<>\",;\r\n][^<>\"\r\n]*?,[^<>\"\r\n]*?)\s*<([^<>\s@]+@[^<>\s]+)>"
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        separator = match.group(1)
+        display_name = " ".join(match.group(2).split())
+        email = match.group(3).strip()
+        escaped_name = display_name.replace("\\", "\\\\").replace('"', r"\"")
+        return f'{separator}"{escaped_name}" <{email}>'
+
+    return pattern.sub(replace, str(value or ""))
+
+
+def _sendable_email_address(value: str) -> bool:
+    clean = str(value or "").strip()
+    return bool(clean and "@" in clean and not re.search(r"[\s<>,;]", clean))
 
 
 def _coerce_cmail_schedule_datetime(value: datetime | str | None) -> datetime | None:
@@ -5414,6 +6158,8 @@ def _draft_reply_context(connection: sqlite3.Connection, row: sqlite3.Row) -> di
 
 def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     draft_id = int(row["id"])
+    identity_key = _mail_identity_for_row(row)
+    identity = mail_identities.mail_identity(identity_key)
     return {
         "id": draft_id,
         "subject": str(row["subject"] or ""),
@@ -5429,6 +6175,10 @@ def _draft_summary(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
         "thread_key": str(row["thread_key"] or row["external_thread_id"] or ""),
         "reply_context": _draft_reply_context(connection, row),
         "attachments": _draft_attachment_summaries(connection, draft_id=draft_id),
+        "mail_identity": identity_key,
+        "mail_identity_label": identity.label,
+        "from_email": identity.from_email,
+        "identity_locked": bool(str(row["in_reply_to"] or "").strip()),
     }
 
 
@@ -5500,11 +6250,12 @@ def _strip_trailing_cmail_signature(body_text: str) -> str:
     return clean
 
 
-def _compose_cmail_body_text(body_text: str) -> str:
+def _compose_cmail_body_text(body_text: str, identity_key: str = mail_identities.DEFAULT_MAIL_IDENTITY) -> str:
     unsigned = _strip_trailing_cmail_signature(body_text)
+    signature = mail_identities.mail_identity(identity_key).signature_text
     if not unsigned:
-        return _CMAIL_SIGNATURE_TEXT
-    return f"{unsigned}\n\n{_CMAIL_SIGNATURE_TEXT}"
+        return signature
+    return f"{unsigned}\n\n{signature}"
 
 
 def _paragraph_html(text: str) -> str:
@@ -5520,12 +6271,51 @@ def _paragraph_html(text: str) -> str:
     )
 
 
-def _compose_cmail_html_body(body_text: str) -> str:
+def _compose_cmail_html_body(body_text: str, identity_key: str = mail_identities.DEFAULT_MAIL_IDENTITY) -> str:
     unsigned = _strip_trailing_cmail_signature(body_text)
     body_markup = _paragraph_html(unsigned)
+    signature_html = (
+        _CMAIL_SIGNATURE_EMAIL_HTML
+        if mail_identities.normalize_mail_identity(identity_key) == mail_identities.DEFAULT_MAIL_IDENTITY
+        else mail_identities.mail_identity(identity_key).signature_email_html
+    )
     if body_markup:
-        return f"{body_markup}\n{_CMAIL_SIGNATURE_EMAIL_HTML}"
-    return _CMAIL_SIGNATURE_EMAIL_HTML
+        return f"{body_markup}\n{signature_html}"
+    return signature_html
+
+
+def _row_value(row: Any, key: str) -> str:
+    try:
+        return str(row[key] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _mail_identity_for_row(row: Any) -> str:
+    return mail_identities.infer_mail_identity(
+        explicit=_row_value(row, "mail_identity"),
+        direction=_row_value(row, "direction"),
+        external_from=_row_value(row, "external_from"),
+        external_to=_row_value(row, "external_to"),
+        external_cc=_row_value(row, "external_cc"),
+        external_bcc=_row_value(row, "external_bcc"),
+        external_reply_to=_row_value(row, "external_reply_to"),
+    )
+
+
+def _reply_mail_identity(connection: sqlite3.Connection, *, in_reply_to: str, thread_key: str) -> str | None:
+    source_row = None
+    if in_reply_to:
+        source_row = connection.execute(
+            "SELECT * FROM communications WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            (in_reply_to,),
+        ).fetchone()
+    if source_row is None and thread_key:
+        source_row = connection.execute(
+            "SELECT * FROM communications WHERE thread_key = ? AND source != 'cmail_draft' ORDER BY happened_at DESC, id DESC LIMIT 1",
+            (thread_key,),
+        ).fetchone()
+    return _mail_identity_for_row(source_row) if source_row is not None else None
 
 
 def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -5550,13 +6340,16 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
     references = mail_metadata.message_id_tokens(payload.get("references") or [])
     thread_key = str(payload.get("thread_key") or "").strip()
     raw_body_text = str(payload.get("body_text") or "")
+    locked_identity = _reply_mail_identity(connection, in_reply_to=in_reply_to, thread_key=thread_key)
+    identity_key = locked_identity or mail_identities.normalize_mail_identity(payload.get("mail_identity"))
+    identity = mail_identities.mail_identity(identity_key)
     attachment_paths = [
         str(item).strip()
         for item in (payload.get("attachment_paths") or [])
         if str(item).strip()
     ]
-    body_text = _compose_cmail_body_text(raw_body_text)
-    html_body = _compose_cmail_html_body(raw_body_text)
+    body_text = _compose_cmail_body_text(raw_body_text, identity_key)
+    html_body = _compose_cmail_html_body(raw_body_text, identity_key)
     happened_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     snippet = _draft_snippet(body_text)
 
@@ -5567,7 +6360,7 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
             SET subject = ?, happened_at = ?, status = 'draft', source = 'cmail_draft',
                 external_to = ?, external_cc = ?, external_bcc = ?, body_text = ?, html_body = ?,
                 snippet = ?, direction = 'outbound', channel = 'email',
-                in_reply_to = ?, references_json = ?, thread_key = ?, deleted_at = NULL
+                in_reply_to = ?, references_json = ?, thread_key = ?, mail_identity = ?, external_from = ?, deleted_at = NULL
             WHERE id = ? AND source = 'cmail_draft'
             """,
             (
@@ -5582,6 +6375,8 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
                 in_reply_to,
                 json.dumps(references),
                 thread_key,
+                identity_key,
+                identity.from_email,
                 draft_id,
             ),
         )
@@ -5612,14 +6407,15 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
         """
         INSERT INTO communications (
             subject, channel, direction, person, happened_at, status, notes, source,
-            external_from, external_to, external_cc, external_bcc, body_text, html_body, snippet,
+            mail_identity, external_from, external_to, external_cc, external_bcc, body_text, html_body, snippet,
             in_reply_to, references_json, thread_key
-        ) VALUES (?, 'email', 'outbound', '', ?, 'draft', '', 'cmail_draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'email', 'outbound', '', ?, 'draft', '', 'cmail_draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             subject,
             happened_at,
-            "Cody <cody@frg.earth>",
+            identity_key,
+            identity.from_email,
             external_to,
             external_cc,
             external_bcc,
@@ -5678,6 +6474,8 @@ def get_cmail_draft_scaffold(
         "in_reply_to": str(scaffold.get("in_reply_to") or ""),
         "references": list(scaffold.get("references") or []),
         "thread_key": str(scaffold.get("thread_key") or ""),
+        "mail_identity": str(scaffold.get("mail_identity") or mail_identities.DEFAULT_MAIL_IDENTITY),
+        "identity_locked": bool(scaffold.get("identity_locked")),
     }
 
 
@@ -5703,7 +6501,9 @@ def send_cmail_draft(
             raise ValueError(f"draft {draft_id} is not sendable")
         subject = str(row["subject"] or "")
         body_text = str(row["body_text"] or "")
-        html_body = _compose_cmail_html_body(str(row["body_text"] or ""))
+        identity_key = _mail_identity_for_row(row)
+        identity = mail_identities.mail_identity(identity_key)
+        html_body = _compose_cmail_html_body(str(row["body_text"] or ""), identity_key)
         to_values = _address_field_values(str(row["external_to"] or ""))
         cc_values = _address_field_values(str(row["external_cc"] or ""))
         bcc_values = _address_field_values(str(row["external_bcc"] or ""))
@@ -5738,6 +6538,8 @@ def send_cmail_draft(
             subject=subject,
             text=body_text,
             html=html_body,
+            from_email=identity.from_email,
+            reply_to=identity.address,
             in_reply_to=str(row["in_reply_to"] or ""),
             references=_json_value(str(row["references_json"] or "[]"), []),
             thread_key=str(row["thread_key"] or row["external_thread_id"] or ""),
@@ -5747,6 +6549,7 @@ def send_cmail_draft(
             attempt_immediately=False,
             apply_signature=False,
             scheduled_at=scheduled_at,
+            mail_identity=identity_key,
         )
     finally:
         if temp_attachment_dir is not None:
@@ -5885,6 +6688,7 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
     message_id = str(row["message_id"] or "")
     thread_key = str(row["thread_key"] or row["external_thread_id"] or row["message_id"] or "")
     references = _json_value(str(row["references_json"] or "[]"), [])
+    identity_key = _mail_identity_for_row(row)
     if message_id and message_id not in references:
         references = [*references, message_id]
     reply_target = (
@@ -5898,6 +6702,8 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
         "references": references,
         "thread_key": thread_key,
         "body": "",
+        "mail_identity": identity_key,
+        "identity_locked": True,
     }
     return {
         "reply": {
@@ -5924,6 +6730,8 @@ def _draft_scaffolds(row: Any) -> dict[str, dict[str, Any]]:
             "references": [],
             "thread_key": "",
             "body": "",
+            "mail_identity": identity_key,
+            "identity_locked": False,
         },
     }
 
@@ -5939,6 +6747,10 @@ def _communication_detail(connection: Any, communication_id: int) -> dict[str, A
         external_to=str(row["external_to"] or ""),
         source=str(row["source"] or ""),
     )
+    identity_key = _mail_identity_for_row(row)
+    identity = mail_identities.mail_identity(identity_key)
+    if identity_key != mail_identities.DEFAULT_MAIL_IDENTITY:
+        contact["contact_key"] = f"{identity_key}::{contact['contact_key']}"
 
     attachments = [
         _attachment_summary_from_row(attachment)
@@ -5973,7 +6785,11 @@ def _communication_detail(connection: Any, communication_id: int) -> dict[str, A
         "read_key": _communication_read_key(row),
         "subject": str(row["subject"] or ""),
         "channel": str(row["channel"] or ""),
+        "is_spam": mail_spam.is_spam(row, mail_spam.rules(connection)),
         "direction": str(row["direction"] or ""),
+        "mail_identity": identity_key,
+        "mail_identity_label": identity.label,
+        "mail_identity_short_label": identity.short_label,
         "status": str(row["status"] or ""),
         "source": str(row["source"] or ""),
         "person": str(row["person"] or ""),
@@ -6008,6 +6824,73 @@ def _communication_detail(connection: Any, communication_id: int) -> dict[str, A
         ),
         "drafts": _draft_scaffolds(row),
     }
+
+
+def _cmail_agent_selection_from_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    view = str(payload.get("view") or "inbox").strip().lower()
+    if view not in {"inbox", "drafts", "hidden"}:
+        raise ValueError("invalid_cmail_agent_view")
+    identity = mail_identities.normalize_mail_identity(
+        str(payload.get("identity") or mail_identities.ALL_MAIL_IDENTITIES),
+        allow_all=True,
+    )
+
+    def _selected_id(key: str) -> int:
+        raw_value = payload.get(key)
+        if raw_value is None or raw_value == "":
+            return 0
+        if isinstance(raw_value, bool):
+            raise ValueError(f"invalid_{key}")
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"invalid_{key}") from exc
+        if value <= 0:
+            raise ValueError(f"invalid_{key}")
+        return value
+
+    communication_id = _selected_id("communication_id")
+    draft_id = _selected_id("draft_id")
+    if communication_id and draft_id:
+        raise ValueError("ambiguous_cmail_agent_selection")
+
+    selection: dict[str, Any] = {"view": view, "identity": identity}
+    selected_id = draft_id or communication_id
+    if not selected_id:
+        return selection
+
+    row = store.get_communication_by_id(connection, selected_id)
+    if row is None:
+        raise ValueError(f"communication_{selected_id}_not_found")
+    if draft_id and str(row["source"] or "") != "cmail_draft":
+        raise ValueError(f"draft_{draft_id}_not_found")
+
+    selected_identity = _mail_identity_for_row(row)
+    contact = _contact_identity(
+        direction=str(row["direction"] or ""),
+        person=str(row["person"] or ""),
+        external_from=str(row["external_from"] or ""),
+        external_to=str(row["external_to"] or ""),
+        source=str(row["source"] or ""),
+    )
+    contact_key = str(contact.get("contact_key") or "")
+    if selected_identity != mail_identities.DEFAULT_MAIL_IDENTITY and contact_key:
+        contact_key = f"{selected_identity}::{contact_key}"
+    thread_key = str(row["thread_key"] or row["external_thread_id"] or row["message_id"] or "")
+
+    selection["identity"] = selected_identity
+    selection["draftId" if draft_id else "communicationId"] = selected_id
+    if thread_key:
+        selection["threadKey"] = thread_key
+    message_id = str(row["message_id"] or "").strip()
+    if message_id:
+        selection["messageId"] = message_id
+    if contact_key:
+        selection["contactKey"] = contact_key
+    return selection
 
 
 def _read_attachment_content(connection: Any, attachment_id: int) -> tuple[bytes, str]:
@@ -6046,64 +6929,7 @@ def _active_alerts_from_connection(connection: sqlite3.Connection, *, limit: int
 
 
 def _resend_queue_status_from_connection(connection: sqlite3.Connection, *, limit: int = 25) -> dict[str, Any]:
-    rows = store.list_mail_delivery_queue(
-        connection,
-        provider="resend",
-        status="all",
-        limit=max(1, int(limit)),
-    )
-    alerts = store.list_system_alerts(
-        connection,
-        source="resend_delivery",
-        status="active",
-        limit=max(1, int(limit)),
-    )
-
-    counts: dict[str, int] = {}
-    for row in rows:
-        status_key = str(row["status"] or "unknown")
-        counts[status_key] = counts.get(status_key, 0) + 1
-    active_queue_count = sum(
-        1
-        for row in rows
-        if str(row["status"] or "") in {"queued", "retrying"}
-    )
-    return {
-        "queue_count": active_queue_count,
-        "retained_count": len(rows),
-        "due_count": sum(
-            1
-            for row in rows
-            if str(row["status"] or "") in {"queued", "retrying"}
-            and str(row["next_attempt_at"] or "") <= store._utc_now_string()
-        ),
-        "counts": counts,
-        "items": [
-            {
-                "queue_id": int(row["id"]),
-                "queue_key": str(row["queue_key"] or ""),
-                "communication_id": int(row["communication_id"]),
-                "status": str(row["status"] or ""),
-                "attempt_count": int(row["attempt_count"]),
-                "max_attempts": int(row["max_attempts"]),
-                "next_attempt_at": str(row["next_attempt_at"] or ""),
-                "last_error": str(row["last_error"] or ""),
-                "subject": str(row["subject"] or ""),
-                "external_to": str(row["external_to"] or ""),
-            }
-            for row in rows
-        ],
-        "active_alert_count": len(alerts),
-        "active_alerts": [
-            {
-                "alert_key": str(row["alert_key"] or ""),
-                "severity": str(row["severity"] or ""),
-                "title": str(row["title"] or ""),
-                "message": str(row["message"] or ""),
-            }
-            for row in alerts
-        ],
-    }
+    return resend_queue_status_from_connection(connection, limit=limit)
 
 
 def _parse_mail_ui_timestamp(value: str | None) -> datetime | None:
@@ -6178,19 +7004,39 @@ def _cloudflare_queue_status_from_connection(connection: sqlite3.Connection) -> 
 def _list_correspondence_rows(connection: sqlite3.Connection, *, limit: int | None) -> list[sqlite3.Row]:
     suppressed_ids = set(_orphaned_resend_correspondence_ids(connection))
     query = """
-        SELECT communications.*, organizations.name AS organization_name
+        SELECT
+            communications.id,
+            communications.subject,
+            communications.channel,
+            communications.direction,
+            communications.mail_identity,
+            communications.person,
+            communications.organization_id,
+            communications.happened_at,
+            communications.status,
+            communications.source,
+            communications.external_id,
+            communications.external_thread_id,
+            communications.external_from,
+            communications.external_to,
+            communications.external_cc,
+            communications.external_bcc,
+            communications.external_reply_to,
+            communications.message_id,
+            communications.thread_key,
+            communications.snippet,
+            communications.body_text,
+            communications.attachments_json,
+            organizations.name AS organization_name
         FROM communications
         LEFT JOIN organizations ON organizations.id = communications.organization_id
         WHERE communications.channel = 'email'
           AND communications.status != 'deleted'
-          AND (
-            (communications.source = ? AND communications.direction = 'inbound')
-            OR
-            (communications.source = ? AND communications.direction = 'outbound')
-          )
+          AND communications.source IN (?, ?, ?, ?)
+          AND communications.direction IN ('inbound', 'outbound')
         ORDER BY communications.happened_at DESC, communications.id DESC
     """
-    params: list[Any] = [DEFAULT_MAIL_UI_SOURCE, DEFAULT_MAIL_UI_OUTBOUND_SOURCE]
+    params: list[Any] = list(DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCES)
     if limit is not None:
         query += " LIMIT ?"
         params.append(max(1, int(limit)))
@@ -6474,14 +7320,17 @@ def _correspondence_messages_from_connection(
     *,
     limit: int | None,
     hidden: bool = False,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
 ) -> list[dict[str, Any]]:
     hidden_contacts = _hidden_contacts_from_connection(connection)
     rows = _list_correspondence_rows(connection, limit=None)
     messages = [_communication_summary(row) for row in rows]
-    if hidden:
-        messages = [message for message in messages if str(message.get("contact_key") or "").lower() in hidden_contacts]
-    elif hidden_contacts:
-        messages = [message for message in messages if str(message.get("contact_key") or "").lower() not in hidden_contacts]
+    identity_key = mail_identities.normalize_mail_identity(identity, allow_all=True)
+    if identity_key != mail_identities.ALL_MAIL_IDENTITIES:
+        messages = [message for message in messages if message.get("mail_identity") == identity_key]
+    for message in messages:
+        message["is_spam"] = mail_spam.is_spam(message, hidden_contacts)
+    messages = [message for message in messages if message["is_spam"] == hidden]
     if limit is not None:
         base_limit = max(1, int(limit))
         limited_messages = messages[:base_limit]
@@ -6489,12 +7338,22 @@ def _correspondence_messages_from_connection(
             opened_contact_keys = set(store.get_touched_mail_contacts(connection))
             if opened_contact_keys:
                 included_ids = {int(message["id"]) for message in limited_messages}
+                included_contact_keys = {
+                    str(message.get("contact_key") or "").strip().lower()
+                    for message in limited_messages
+                    if str(message.get("contact_key") or "").strip()
+                }
                 for message in messages[base_limit:]:
                     contact_key = str(message.get("contact_key") or "").strip().lower()
-                    if contact_key not in opened_contact_keys or int(message["id"]) in included_ids:
+                    if (
+                        contact_key not in opened_contact_keys
+                        or contact_key in included_contact_keys
+                        or int(message["id"]) in included_ids
+                    ):
                         continue
                     limited_messages.append(message)
                     included_ids.add(int(message["id"]))
+                    included_contact_keys.add(contact_key)
         messages = limited_messages
     return messages
 
@@ -6503,8 +7362,9 @@ def _correspondence_mailbox_version_from_connection(
     connection: sqlite3.Connection,
     *,
     hidden: bool = False,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
 ) -> dict[str, Any]:
-    messages = _correspondence_messages_from_connection(connection, limit=None, hidden=hidden)
+    messages = _correspondence_messages_from_connection(connection, limit=None, hidden=hidden, identity=identity)
     return {
         **_mailbox_version_from_messages(messages),
         **_mail_ui_state_version_from_connection(connection),
@@ -6536,13 +7396,16 @@ def _build_correspondence_overview_from_connection(
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     include_details: bool = False,
     hidden: bool = False,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
 ) -> dict[str, Any]:
     _ensure_existing_correspondence_marked_viewed(connection)
-    messages = _correspondence_messages_from_connection(connection, limit=limit, hidden=hidden)
+    messages = _correspondence_messages_from_connection(connection, limit=limit, hidden=hidden, identity=identity)
     contacts = _apply_contact_touch_metadata(connection, _group_contacts(messages))
     hidden_contacts = _hidden_contacts_from_connection(connection)
     payload = {
         "mailbox": "hidden" if hidden else "correspondence",
+        "identity": mail_identities.normalize_mail_identity(identity, allow_all=True),
+        "identities": mail_identities.public_mail_identities(),
         "message_count": len(messages),
         "contact_count": len(contacts),
         "hidden_contact_count": len(hidden_contacts),
@@ -6551,7 +7414,8 @@ def _build_correspondence_overview_from_connection(
         "viewed_message_keys": _viewed_message_keys_for_messages(connection, messages),
         "cloudflare_queue": _cloudflare_queue_status_from_connection(connection),
         "cloudflare_sync": _cloudflare_sync_status_from_connection(connection),
-        "mailbox_version": _correspondence_mailbox_version_from_connection(connection, hidden=hidden),
+        "resend_queue": _resend_queue_status_from_connection(connection),
+        "mailbox_version": _correspondence_mailbox_version_from_connection(connection, hidden=hidden, identity=identity),
     }
     if include_details:
         payload["details"] = {
@@ -6615,7 +7479,7 @@ def _clear_contact_hidden(
     *,
     contact_key: str,
 ) -> bool:
-    return store.clear_hidden_mail_contact(connection, contact_key=contact_key)
+    return mail_spam.restore_contact(connection, contact_key)
 
 
 def _build_mail_ui_overview_from_connection(
@@ -6629,6 +7493,7 @@ def _build_mail_ui_overview_from_connection(
     include_details: bool = False,
 ) -> dict[str, Any]:
     _ensure_existing_correspondence_marked_viewed(connection)
+    spam_rules = mail_spam.rules(connection)
     raw_messages = [
         _communication_summary(row)
         for row in store.list_communications(
@@ -6639,7 +7504,7 @@ def _build_mail_ui_overview_from_connection(
             status=status or None,
             limit=max(1, int(limit)),
         )
-        if str(row["status"] or "") != "deleted"
+        if str(row["status"] or "") != "deleted" and not mail_spam.is_spam(row, spam_rules)
     ]
     messages = raw_messages
     sync = _cloudflare_sync_status_from_connection(connection)
@@ -6655,6 +7520,7 @@ def _build_mail_ui_overview_from_connection(
         "viewed_message_keys": _viewed_message_keys_for_messages(connection, messages),
         "cloudflare_queue": cloudflare,
         "cloudflare_sync": sync,
+        "resend_queue": _resend_queue_status_from_connection(connection),
         "mailbox_version": _mailbox_version_from_connection(
             connection,
             source=source,
@@ -6732,6 +7598,7 @@ def build_mail_ui_overview(
     limit: int = DEFAULT_MAIL_UI_LIMIT,
     include_details: bool = False,
     mailbox: str | None = None,
+    identity: str = mail_identities.ALL_MAIL_IDENTITIES,
 ) -> dict[str, Any]:
     hidden = _mail_ui_mailbox_is_hidden(mailbox)
     with store.open_db(db_path) as connection:
@@ -6741,6 +7608,7 @@ def build_mail_ui_overview(
                 limit=limit,
                 include_details=include_details,
                 hidden=hidden,
+                identity=identity,
             )
             if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
             else _build_mail_ui_overview_from_connection(
@@ -6951,41 +7819,21 @@ def _frg_booking_interval_conflict(
     ).fetchone()
 
 
-def _frg_booking_availability_payload(*, db_path: Path, start_day: date, end_day: date) -> dict[str, Any]:
-    if end_day < start_day:
-        raise ValueError("invalid_frg_booking_availability_range")
-    if (end_day - start_day).days > 120:
-        raise ValueError("frg_booking_availability_range_too_large")
-
-    with store.open_db(db_path) as connection:
-        rows = connection.execute(
-            f"""
-            SELECT id, entry_date, start_time, end_time
-            FROM calendar_entries
-            WHERE source = ?
-              AND source_table = ?
-              AND entry_date >= ?
-              AND entry_date <= ?
-              AND {_frg_booking_active_status_clause()}
-              AND start_time != ''
-            ORDER BY entry_date ASC, start_time ASC, id ASC
-            """,
-            (
-                FRG_BOOKING_WEBHOOK_SOURCE,
-                FRG_BOOKING_WEBHOOK_SOURCE_TABLE,
-                start_day.isoformat(),
-                end_day.isoformat(),
-                *FRG_BOOKING_INACTIVE_STATUSES,
-            ),
-        ).fetchall()
-
-    return {
-        "ok": True,
-        "start": start_day.isoformat(),
-        "end": end_day.isoformat(),
-        "generatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "heldSlots": [_frg_booking_hold_from_row(row) for row in rows],
-    }
+def _frg_booking_availability_payload(
+    *,
+    db_path: Path,
+    start_day: date,
+    end_day: date,
+    duration_minutes: Any = 30,
+    package_id: Any = "",
+) -> dict[str, Any]:
+    return build_frg_booking_availability_payload(
+        db_path=db_path,
+        start_day=start_day,
+        end_day=end_day,
+        duration_minutes=duration_minutes,
+        package_id=package_id,
+    )
 
 
 def _format_frg_booking_notes(payload: dict[str, Any]) -> str:
@@ -7423,890 +8271,27 @@ def _remove_contact_from_overview_payload(payload: dict[str, Any] | None, contac
     }
 
 
-_CALENDAR_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Life Ops Calendar</title>
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #090d0a;
-      --panel: #111712;
-      --panel-2: #172019;
-      --line: #29352b;
-      --text: #f1f5ed;
-      --muted: #96a394;
-      --accent: #b8ff4d;
-      --warning: #ffd166;
-      --danger: #ff8b78;
-      --sans: "SF Pro Display", "Inter", system-ui, sans-serif;
-      --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: var(--text);
-      font-family: var(--sans);
-      background: linear-gradient(180deg, #12180f 0%, #090d0a 58%, #060806 100%);
-    }
-    .shell {
-      width: min(1480px, calc(100vw - 28px));
-      margin: 0 auto;
-      padding: 22px 0 28px;
-      display: grid;
-      gap: 16px;
-    }
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      flex-wrap: wrap;
-    }
-    h1 {
-      margin: 0;
-      font-size: clamp(40px, 7vw, 82px);
-      line-height: 0.92;
-      letter-spacing: 0;
-    }
-    .tabbar {
-      display: inline-flex;
-      gap: 8px;
-      padding: 4px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(255,255,255,0.035);
-    }
-    .tabbar a {
-      color: var(--muted);
-      text-decoration: none;
-      padding: 8px 14px;
-      border-radius: 999px;
-      font: 700 13px/1 var(--mono);
-      letter-spacing: 0;
-      text-transform: uppercase;
-    }
-    .tabbar a.active {
-      color: #0a1009;
-      background: var(--accent);
-    }
-    .toolbar, .form-grid, .range-actions {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    input, select, textarea, button {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #0d130f;
-      color: var(--text);
-      padding: 10px 12px;
-      font: 600 14px/1.3 var(--sans);
-    }
-    textarea {
-      width: 100%;
-      min-height: 82px;
-      resize: vertical;
-      line-height: 1.55;
-    }
-    button {
-      cursor: pointer;
-    }
-    button.primary {
-      border: none;
-      color: #091008;
-      background: linear-gradient(180deg, #cfff77 0%, #8ecc2d 100%);
-      font-weight: 800;
-    }
-    button.secondary {
-      background: var(--panel-2);
-    }
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.65fr);
-      gap: 14px;
-    }
-    .range-stack {
-      display: grid;
-      gap: 14px;
-      min-width: 0;
-    }
-    .panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)),
-        var(--panel);
-      overflow: hidden;
-    }
-    .panel-head {
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    .panel-title {
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: 0;
-    }
-    .panel-body {
-      padding: 18px;
-      display: grid;
-      gap: 16px;
-    }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .stat {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.025);
-      padding: 12px;
-    }
-    .stat-label {
-      color: var(--muted);
-      font: 700 11px/1 var(--mono);
-      letter-spacing: 0;
-      text-transform: uppercase;
-    }
-    .stat-value {
-      margin-top: 8px;
-      font-size: 30px;
-      font-weight: 800;
-    }
-    .section {
-      display: grid;
-      gap: 10px;
-    }
-    .section h2 {
-      margin: 0;
-      color: var(--accent);
-      font: 800 12px/1 var(--mono);
-      letter-spacing: 0;
-      text-transform: uppercase;
-    }
-    .entry {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.02);
-      padding: 12px 13px;
-      display: grid;
-      gap: 8px;
-    }
-    .entry.done {
-      opacity: 0.72;
-    }
-    .entry-title {
-      font-size: 17px;
-      font-weight: 800;
-      line-height: 1.25;
-    }
-    .entry-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: start;
-    }
-    .entry-meta, .muted {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-    .pill-row {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .pill {
-      border: 1px solid rgba(184,255,77,0.26);
-      border-radius: 999px;
-      padding: 4px 7px;
-      color: var(--accent);
-      font: 800 11px/1 var(--mono);
-      letter-spacing: 0;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-    .entry-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .entry-actions button {
-      padding: 7px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-    }
-    .calendar-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .month {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(0,0,0,0.14);
-      padding: 10px;
-      min-width: 0;
-    }
-    .month-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    .month-title {
-      font-weight: 900;
-      font-size: 14px;
-    }
-    .month-count {
-      color: var(--muted);
-      font: 800 11px/1 var(--mono);
-    }
-    .weekdays,
-    .days {
-      display: grid;
-      grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 4px;
-    }
-    .weekday {
-      color: var(--muted);
-      font: 800 10px/1 var(--mono);
-      text-align: center;
-      text-transform: uppercase;
-    }
-    .day-cell {
-      appearance: none;
-      min-height: 44px;
-      border-radius: 8px;
-      border: 1px solid rgba(255,255,255,0.06);
-      background: rgba(255,255,255,0.018);
-      color: var(--text);
-      padding: 5px;
-      display: grid;
-      align-content: space-between;
-      gap: 4px;
-      text-align: left;
-    }
-    .day-cell.blank {
-      visibility: hidden;
-    }
-    .day-cell.has-items {
-      border-color: rgba(184,255,77,0.28);
-      background: rgba(184,255,77,0.08);
-    }
-    .day-cell.today {
-      outline: 2px solid var(--warning);
-      outline-offset: 1px;
-    }
-    .day-cell.selected {
-      border-color: var(--accent);
-      background: rgba(184,255,77,0.18);
-    }
-    .day-number {
-      font-weight: 900;
-      font-size: 13px;
-    }
-    .day-markers {
-      display: flex;
-      gap: 3px;
-      min-height: 6px;
-    }
-    .marker {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: var(--accent);
-    }
-    .marker.signup { background: var(--warning); }
-    .marker.recurring { background: #7cc7ff; }
-    .marker.urgent { background: var(--danger); }
-    .upcoming-list {
-      display: grid;
-      gap: 8px;
-      max-height: 420px;
-      overflow: auto;
-      padding-right: 4px;
-    }
-    .upcoming-item {
-      width: 100%;
-      text-align: left;
-      border-radius: 8px;
-      border-color: var(--line);
-      background: rgba(255,255,255,0.02);
-      display: grid;
-      gap: 4px;
-    }
-    .upcoming-date {
-      color: var(--accent);
-      font: 800 11px/1 var(--mono);
-      text-transform: uppercase;
-    }
-    .note-card {
-      border: 1px solid rgba(184,255,77,0.18);
-      border-radius: 8px;
-      background: rgba(184,255,77,0.07);
-      padding: 14px;
-      display: grid;
-      gap: 8px;
-    }
-    .empty {
-      color: var(--muted);
-      padding: 14px;
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-    }
-    .status {
-      color: var(--muted);
-      font-size: 13px;
-      min-height: 18px;
-    }
-    .capture-panel {
-      align-self: start;
-      position: sticky;
-      top: 14px;
-    }
-    .two-col {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .full {
-      grid-column: 1 / -1;
-    }
-    @media (max-width: 980px) {
-      .layout { grid-template-columns: 1fr; }
-      .calendar-grid { grid-template-columns: 1fr; }
-      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .capture-panel { position: static; }
-    }
-    @media (min-width: 981px) and (max-width: 1240px) {
-      .calendar-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <div class="topbar">
-      <h1>Calendar</h1>
-      <div class="tabbar">
-        <a href="/">Correspondence</a>
-        <a href="/#drafts">Drafts</a>
-        <a href="/calendar" class="active">Calendar</a>
-      </div>
-    </div>
-    <div class="toolbar">
-      <input id="calendarDate" type="date">
-      <button class="secondary" type="button" id="todayButton">today</button>
-      <button class="secondary" type="button" id="loadDayButton">load day</button>
-      <button class="primary" type="button" id="saveDayButton">save historic day</button>
-      <button class="secondary" type="button" id="rolloverButton">roll unfinished to tomorrow</button>
-      <span class="status" id="statusText"></span>
-    </div>
-    <section class="layout">
-      <div class="range-stack">
-        <section class="panel">
-          <div class="panel-head">
-            <div>
-              <div class="panel-title" id="rangeTitle">Next 365 Days</div>
-              <div class="muted" id="rangeSubtitle">Loading planning horizon…</div>
-            </div>
-            <div class="range-actions">
-              <input id="rangeStart" type="date">
-              <button class="secondary" type="button" id="loadRangeButton">load year</button>
-            </div>
-          </div>
-          <div class="panel-body">
-            <section class="stats" id="rangeStats"></section>
-            <div class="calendar-grid" id="calendarGrid"></div>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-head">
-            <div>
-              <div class="panel-title" id="dayTitle">Loading calendar…</div>
-              <div class="muted" id="daySubtitle">Local-first LifeOps day view</div>
-            </div>
-          </div>
-          <div class="panel-body" id="dayBody"></div>
-        </section>
-      </div>
-      <aside class="panel capture-panel">
-        <div class="panel-head">
-          <div>
-            <div class="panel-title">Capture</div>
-            <div class="muted" id="captureDateLabel"></div>
-          </div>
-        </div>
-        <div class="panel-body">
-          <form class="section" id="entryForm">
-            <h2>New Entry</h2>
-            <input id="entryDate" type="date">
-            <input id="entryTitle" type="text" placeholder="What needs to be tracked?">
-            <div class="form-grid">
-              <select id="entryType">
-                <option value="task">task</option>
-                <option value="event">event</option>
-                <option value="note">note</option>
-                <option value="memory">memory</option>
-                <option value="habit">habit</option>
-                <option value="milestone">milestone</option>
-              </select>
-              <select id="entryPriority">
-                <option value="normal">normal</option>
-                <option value="urgent">urgent</option>
-                <option value="high">high</option>
-                <option value="low">low</option>
-              </select>
-              <select id="entryList">
-                <option value="personal">personal</option>
-                <option value="professional">professional</option>
-                <option value="general">general</option>
-              </select>
-              <input id="entryStartTime" type="time" aria-label="start time">
-              <input id="entryEndTime" type="time" aria-label="end time">
-            </div>
-            <div class="two-col">
-              <select id="repeatFrequency">
-                <option value="">does not repeat</option>
-                <option value="daily">daily</option>
-                <option value="weekly">weekly</option>
-                <option value="monthly">monthly</option>
-                <option value="yearly">yearly</option>
-              </select>
-              <input id="repeatInterval" type="number" min="1" value="1" aria-label="repeat interval">
-              <input id="repeatAnchorDate" type="date" aria-label="repeat anchor date">
-              <input id="repeatUntil" type="date" aria-label="repeat until">
-              <input id="repeatCount" type="number" min="1" placeholder="count" aria-label="repeat count">
-              <input id="entryTags" type="text" placeholder="tags">
-            </div>
-            <textarea id="entryNotes" placeholder="Notes, evidence, context, or why this matters"></textarea>
-            <button class="primary" type="submit">add to day</button>
-          </form>
-          <section class="section">
-            <h2>Upcoming</h2>
-            <div class="upcoming-list" id="upcomingList"></div>
-          </section>
-          <form class="section" id="noteForm">
-            <h2>Day Notes</h2>
-            <input id="dayIntention" type="text" placeholder="Intention">
-            <input id="dayMood" type="text" placeholder="Mood">
-            <input id="dayEnergy" type="text" placeholder="Energy">
-            <textarea id="dayReflection" placeholder="Reflection"></textarea>
-            <textarea id="dayLooseNotes" placeholder="Loose notes"></textarea>
-            <button class="secondary" type="submit">save notes</button>
-          </form>
-        </div>
-      </aside>
-    </section>
-  </main>
-  <script>
-    const INITIAL_DAY = __INITIAL_CALENDAR_JSON__;
-    const INITIAL_RANGE = __INITIAL_RANGE_JSON__;
-    const state = {
-      day: INITIAL_DAY || {},
-      range: INITIAL_RANGE || {},
-      selectedDate: (INITIAL_DAY && INITIAL_DAY.date) || new Date().toISOString().slice(0, 10),
-      rangeStart: (INITIAL_RANGE && INITIAL_RANGE.start_date) || new Date().toISOString().slice(0, 10),
-    };
-    const $ = (id) => document.getElementById(id);
-
-    function escapeHtml(value) {
-      return String(value || "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;");
-    }
-
-    function dateObject(value) {
-      return new Date(`${value}T00:00:00`);
-    }
-
-    function labelDate(value) {
-      if (!value) return "";
-      return dateObject(value).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
-    }
-
-    function tomorrowDate(value) {
-      const date = dateObject(value);
-      date.setDate(date.getDate() + 1);
-      return date.toISOString().slice(0, 10);
-    }
-
-    async function fetchJson(path) {
-      const response = await fetch(path);
-      if (!response.ok) throw new Error(await response.text());
-      return await response.json();
-    }
-
-    async function postJson(path, payload) {
-      const response = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload || {}),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      return await response.json();
-    }
-
-    function setStatus(text) {
-      $("statusText").textContent = text || "";
-    }
-
-    function timeLabel(entry) {
-      if (entry.start_time) return `${entry.start_time}${entry.end_time ? `-${entry.end_time}` : ""}`;
-      if (entry.time) return entry.time;
-      return "anytime";
-    }
-
-    function recurrenceLabel(entry) {
-      const frequency = entry.recurrence_frequency || "";
-      if (!frequency || frequency === "none") return "";
-      const interval = Number(entry.recurrence_interval || 1);
-      const every = interval > 1 ? `every ${interval} ${frequency}s` : frequency;
-      const anchor = entry.recurrence_anchor_date ? `since ${entry.recurrence_anchor_date}` : "";
-      return [every, anchor].filter(Boolean).join(" · ");
-    }
-
-    function entryMarkup(entry) {
-      const done = entry.status === "done";
-      const repeat = recurrenceLabel(entry);
-      const canUpdateStatus = !entry.is_virtual;
-      const pills = [
-        entry.section,
-        entry.is_recurring ? "repeats" : "",
-        entry.is_virtual ? "projected" : "",
-      ].filter(Boolean);
-      return `
-        <article class="entry ${done ? "done" : ""}">
-          <div class="entry-head">
-            <div>
-              <div class="entry-title">${escapeHtml(entry.title)}</div>
-              <div class="entry-meta">#${escapeHtml(entry.id)} · ${escapeHtml(timeLabel(entry))} · ${escapeHtml(entry.status || "scheduled")} · ${escapeHtml(entry.type || entry.kind || "item")} · ${escapeHtml(entry.priority || "normal")}</div>
-            </div>
-            ${pills.length ? `<div class="pill-row">${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}</div>` : ""}
-          </div>
-          ${repeat ? `<div class="entry-meta">${escapeHtml(repeat)}</div>` : ""}
-          ${entry.notes ? `<div class="muted">${escapeHtml(entry.notes)}</div>` : ""}
-          ${canUpdateStatus ? `
-            <div class="entry-actions">
-              <button type="button" data-entry-status="${entry.id}:done" class="secondary">done</button>
-              <button type="button" data-entry-status="${entry.id}:missed" class="secondary">missed</button>
-              <button type="button" data-entry-status="${entry.id}:deferred" class="secondary">defer</button>
-            </div>
-          ` : ""}
-        </article>
-      `;
-    }
-
-    function agendaMarkup(item) {
-      return `
-        <article class="entry">
-          <div class="entry-title">${escapeHtml(item.title || "(untitled)")}</div>
-          <div class="entry-meta">${escapeHtml(item.time || item.sort_time || "anytime")} · ${escapeHtml(item.type || "agenda")}</div>
-        </article>
-      `;
-    }
-
-    function rangeStatMarkup(label, value) {
-      return `<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(value)}</div></div>`;
-    }
-
-    function dayMarkers(day) {
-      const markers = [];
-      if (day.urgent_count) markers.push("urgent");
-      if (day.signup_count) markers.push("signup");
-      if (day.recurring_count) markers.push("recurring");
-      while (markers.length < Math.min(Number(day.item_count || 0), 3)) markers.push("");
-      return markers.map((name) => `<span class="marker ${name}"></span>`).join("");
-    }
-
-    function monthMarkup(month) {
-      const days = month.days || [];
-      const firstDay = days[0]?.date || `${month.key}-01`;
-      const blanks = Array.from({ length: dateObject(firstDay).getDay() }, () => '<button class="day-cell blank" type="button" tabindex="-1"></button>').join("");
-      const cells = days.map((day) => {
-        const classes = ["day-cell"];
-        if (day.item_count) classes.push("has-items");
-        if (day.is_today) classes.push("today");
-        if (day.date === state.selectedDate) classes.push("selected");
-        return `
-          <button class="${classes.join(" ")}" type="button" data-day="${escapeHtml(day.date)}" title="${escapeHtml(day.label)}">
-            <span class="day-number">${escapeHtml(day.day_number)}</span>
-            <span class="day-markers">${dayMarkers(day)}</span>
-          </button>
-        `;
-      }).join("");
-      return `
-        <section class="month">
-          <div class="month-head">
-            <div class="month-title">${escapeHtml(month.label)}</div>
-            <div class="month-count">${month.item_count || 0}</div>
-          </div>
-          <div class="weekdays">
-            ${["S", "M", "T", "W", "T", "F", "S"].map((day) => `<div class="weekday">${day}</div>`).join("")}
-          </div>
-          <div class="days">${blanks}${cells}</div>
-        </section>
-      `;
-    }
-
-    function upcomingMarkup(item) {
-      return `
-        <button class="upcoming-item" type="button" data-upcoming-day="${escapeHtml(item.date)}">
-          <span class="upcoming-date">${escapeHtml(labelDate(item.date))} · ${escapeHtml(timeLabel(item))}</span>
-          <strong>${escapeHtml(item.title || "(untitled)")}</strong>
-          <span class="entry-meta">${escapeHtml(item.section || item.kind || "calendar")}${item.is_recurring ? " · repeats" : ""}</span>
-        </button>
-      `;
-    }
-
-    function renderRange(payload) {
-      state.range = payload || {};
-      state.rangeStart = state.range.start_date || state.rangeStart;
-      $("rangeStart").value = state.rangeStart;
-      $("rangeSubtitle").textContent = `${state.range.start_date || ""} to ${state.range.end_date || ""}`;
-      const summary = state.range.summary || {};
-      $("rangeStats").innerHTML = [
-        rangeStatMarkup("items", summary.items || 0),
-        rangeStatMarkup("repeat", summary.recurring_occurrences || 0),
-        rangeStatMarkup("signups", summary.signups || 0),
-        rangeStatMarkup("urgent", summary.urgent || 0),
-      ].join("");
-      $("calendarGrid").innerHTML = (state.range.months || []).map(monthMarkup).join("") || `<div class="empty">No range loaded.</div>`;
-      $("upcomingList").innerHTML = (state.range.upcoming || []).slice(0, 40).map(upcomingMarkup).join("") || `<div class="empty">No upcoming calendar items.</div>`;
-      for (const button of document.querySelectorAll("[data-day]")) {
-        button.addEventListener("click", () => loadDay(String(button.getAttribute("data-day") || "")).catch((error) => setStatus(error.message)));
-      }
-      for (const button of document.querySelectorAll("[data-upcoming-day]")) {
-        button.addEventListener("click", () => loadDay(String(button.getAttribute("data-upcoming-day") || "")).catch((error) => setStatus(error.message)));
-      }
-    }
-
-    function syncCaptureDate(day) {
-      $("entryDate").value = day;
-      $("captureDateLabel").textContent = labelDate(day);
-      if (!$("repeatFrequency").value) $("repeatAnchorDate").value = day;
-    }
-
-    function renderDay(payload) {
-      state.day = payload || {};
-      state.selectedDate = state.day.date || state.selectedDate;
-      $("calendarDate").value = state.selectedDate;
-      syncCaptureDate(state.selectedDate);
-      $("dayTitle").textContent = state.day.label || state.day.date || "Calendar";
-      const stats = state.day.stats || {};
-      const note = state.day.day_note || {};
-      $("daySubtitle").textContent = `${stats.done_entries || 0} done · ${stats.open_entries || 0} not done · ${stats.agenda_items || 0} agenda`;
-      $("dayIntention").value = note.intention || "";
-      $("dayMood").value = note.mood || "";
-      $("dayEnergy").value = note.energy || "";
-      $("dayReflection").value = note.reflection || "";
-      $("dayLooseNotes").value = note.notes || "";
-      const entries = state.day.entries || [];
-      const agenda = state.day.agenda?.items || [];
-      const needs = state.day.need_to_get_to || [];
-      const latestSave = (state.day.snapshots || [])[0];
-      $("dayBody").innerHTML = `
-        <section class="stats">
-          ${rangeStatMarkup("tracked", stats.tracked_entries || 0)}
-          ${rangeStatMarkup("done", stats.done_entries || 0)}
-          ${rangeStatMarkup("not done", stats.open_entries || 0)}
-          ${rangeStatMarkup("saves", (state.day.snapshots || []).length)}
-        </section>
-        ${(note.intention || note.reflection || note.notes || note.mood || note.energy) ? `
-          <section class="note-card">
-            ${note.intention ? `<div><strong>Intention:</strong> ${escapeHtml(note.intention)}</div>` : ""}
-            ${note.reflection ? `<div><strong>Reflection:</strong> ${escapeHtml(note.reflection)}</div>` : ""}
-            ${note.notes ? `<div><strong>Notes:</strong> ${escapeHtml(note.notes)}</div>` : ""}
-            ${(note.mood || note.energy) ? `<div class="muted">${escapeHtml([note.mood, note.energy].filter(Boolean).join(" · "))}</div>` : ""}
-          </section>
-        ` : ""}
-        <section class="section">
-          <h2>Tracked</h2>
-          ${entries.length ? entries.map((entry) => entryMarkup({ ...entry, section: entry.section || "" })).join("") : `<div class="empty">No tracked entries for this day yet.</div>`}
-        </section>
-        <section class="section">
-          <h2>Agenda</h2>
-          ${agenda.length ? agenda.map(agendaMarkup).join("") : `<div class="empty">Open space.</div>`}
-        </section>
-        <section class="section">
-          <h2>Need To Get To</h2>
-          ${needs.length ? needs.map((entry) => entryMarkup({ ...entry, section: entry.section || "" })).join("") : `<div class="empty">Nothing currently outstanding for this day.</div>`}
-        </section>
-        ${latestSave ? `
-          <section class="section">
-            <h2>Latest Historic Save</h2>
-            <div class="entry">
-              <div class="entry-title">${escapeHtml(latestSave.summary || "Saved day")}</div>
-              <div class="entry-meta">#${latestSave.id} · ${escapeHtml(latestSave.snapshot_at || "")}</div>
-            </div>
-          </section>
-        ` : ""}
-      `;
-      for (const button of document.querySelectorAll("[data-entry-status]")) {
-        button.addEventListener("click", async () => {
-          const [id, status] = String(button.getAttribute("data-entry-status") || "").split(":");
-          if (!id || !status) return;
-          setStatus("updating...");
-          const next = await postJson(`/api/calendar/entries/${id}/status`, { status, date: state.day.date });
-          renderDay(next.day);
-          await loadRange(state.rangeStart);
-          setStatus("updated");
-        });
-      }
-      renderRange(state.range);
-    }
-
-    async function loadDay(day) {
-      if (!day) return;
-      setStatus("loading...");
-      const payload = await fetchJson(`/api/calendar/day?date=${encodeURIComponent(day)}`);
-      renderDay(payload.day);
-      setStatus("loaded");
-    }
-
-    async function loadRange(start) {
-      const cleanStart = start || $("rangeStart").value || state.rangeStart;
-      setStatus("loading year...");
-      const payload = await fetchJson(`/api/calendar/range?start=${encodeURIComponent(cleanStart)}&days=365`);
-      renderRange(payload.range);
-      setStatus("year loaded");
-    }
-
-    $("calendarDate").addEventListener("change", () => loadDay($("calendarDate").value).catch((error) => setStatus(error.message)));
-    $("entryDate").addEventListener("change", () => {
-      $("calendarDate").value = $("entryDate").value;
-      if (!$("repeatFrequency").value) $("repeatAnchorDate").value = $("entryDate").value;
-    });
-    $("repeatFrequency").addEventListener("change", () => {
-      if (!$("repeatAnchorDate").value) $("repeatAnchorDate").value = $("entryDate").value || state.selectedDate;
-    });
-    $("loadDayButton").addEventListener("click", () => loadDay($("calendarDate").value).catch((error) => setStatus(error.message)));
-    $("loadRangeButton").addEventListener("click", () => loadRange($("rangeStart").value).catch((error) => setStatus(error.message)));
-    $("todayButton").addEventListener("click", async () => {
-      const today = new Date().toISOString().slice(0, 10);
-      $("calendarDate").value = today;
-      $("rangeStart").value = today;
-      await loadDay(today);
-      await loadRange(today);
-    });
-    $("saveDayButton").addEventListener("click", async () => {
-      try {
-        setStatus("saving historic day...");
-        const payload = await postJson("/api/calendar/day-save", { date: $("calendarDate").value });
-        renderDay(payload.day);
-        setStatus(`saved snapshot #${payload.snapshot_id}`);
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-    $("rolloverButton").addEventListener("click", async () => {
-      try {
-        const sourceDate = $("calendarDate").value;
-        setStatus("rolling unfinished work...");
-        await postJson("/api/calendar/rollover", { source_date: sourceDate, target_date: tomorrowDate(sourceDate) });
-        await loadDay(sourceDate);
-        await loadRange(state.rangeStart);
-        setStatus("rolled unfinished work to tomorrow");
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-    $("entryForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        const title = $("entryTitle").value.trim();
-        if (!title) {
-          setStatus("add a title first");
-          return;
-        }
-        const tags = $("entryTags").value.split(",").map((value) => value.trim()).filter(Boolean);
-        const repeatCount = $("repeatCount").value ? Number($("repeatCount").value) : null;
-        setStatus("adding...");
-        const payload = await postJson("/api/calendar/entries", {
-          date: $("entryDate").value || $("calendarDate").value,
-          title,
-          type: $("entryType").value,
-          priority: $("entryPriority").value,
-          list_name: $("entryList").value,
-          start_time: $("entryStartTime").value,
-          end_time: $("entryEndTime").value,
-          notes: $("entryNotes").value,
-          tags,
-          recurrence_frequency: $("repeatFrequency").value,
-          recurrence_interval: Number($("repeatInterval").value || 1),
-          recurrence_anchor_date: $("repeatAnchorDate").value,
-          recurrence_until: $("repeatUntil").value,
-          recurrence_count: repeatCount,
-        });
-        $("entryTitle").value = "";
-        $("entryNotes").value = "";
-        $("entryTags").value = "";
-        $("repeatFrequency").value = "";
-        $("repeatUntil").value = "";
-        $("repeatCount").value = "";
-        renderDay(payload.day);
-        await loadRange(state.rangeStart);
-        setStatus("added");
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-    $("noteForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        setStatus("saving notes...");
-        const payload = await postJson("/api/calendar/day-note", {
-          date: $("calendarDate").value,
-          intention: $("dayIntention").value,
-          mood: $("dayMood").value,
-          energy: $("dayEnergy").value,
-          reflection: $("dayReflection").value,
-          notes: $("dayLooseNotes").value,
-        });
-        renderDay(payload.day);
-        setStatus("notes saved");
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-    renderDay(INITIAL_DAY || {});
-    if (INITIAL_RANGE && INITIAL_RANGE.months) {
-      renderRange(INITIAL_RANGE);
-    } else {
-      loadRange(state.rangeStart).catch((error) => setStatus(error.message));
-    }
-  </script>
-</body>
-</html>
-"""
-
 
 def _render_mail_ui_html(initial_overview: dict[str, Any] | None = None) -> str:
     return (
         _HTML.replace(
+            "__MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS__",
+            str(MAIL_UI_CLIENT_QUEUE_FLUSH_INTERVAL_MS),
+        )
+        .replace(
             "__MAIL_UI_CLIENT_REFRESH_INTERVAL_MS__",
             str(MAIL_UI_CLIENT_REFRESH_INTERVAL_MS),
+        )
+        .replace(
+            "__MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT__",
+            str(MAIL_UI_CLIENT_DETAIL_PREFETCH_LIMIT),
         )
         .replace("__CMAIL_PUBLIC_URL__", CMAIL_PUBLIC_URL)
         .replace("__INITIAL_OVERVIEW_JSON__", json.dumps(initial_overview or {}))
         .replace("__CMAIL_SIGNATURE_TEXT_JSON__", json.dumps(_CMAIL_SIGNATURE_TEXT))
         .replace("__CMAIL_KNOWN_SIGNATURE_TEXTS_JSON__", json.dumps(list(_CMAIL_KNOWN_SIGNATURE_TEXTS)))
         .replace("__CMAIL_SIGNATURE_PREVIEW_HTML_JSON__", json.dumps(_CMAIL_SIGNATURE_PREVIEW_HTML))
+        .replace("__CMAIL_IDENTITIES_JSON__", json.dumps(mail_identities.public_mail_identities()))
         .replace("__CMAIL_TAILNET_ACCESS_MESSAGE_JSON__", json.dumps(CMAIL_TAILNET_ACCESS_MESSAGE))
     )
 
@@ -8608,17 +8593,6 @@ def _render_mail_ui_manifest() -> dict[str, Any]:
     }
 
 
-def _render_calendar_ui_html(
-    initial_day: dict[str, Any] | None = None,
-    initial_range: dict[str, Any] | None = None,
-) -> str:
-    return (
-        _CALENDAR_HTML
-        .replace("__INITIAL_CALENDAR_JSON__", json.dumps(initial_day or {}))
-        .replace("__INITIAL_RANGE_JSON__", json.dumps(initial_range or {}))
-    )
-
-
 def _background_mail_ui_sync_loop(
     *,
     db_path: Path,
@@ -8695,6 +8669,7 @@ def _make_handler(
         page_limit: int,
         include_details: bool,
         mailbox: str | None = None,
+        identity: str = mail_identities.ALL_MAIL_IDENTITIES,
     ) -> bool:
         return (
             (source or DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE) == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -8704,6 +8679,7 @@ def _make_handler(
             and int(page_limit) == int(limit)
             and not include_details
             and not _mail_ui_mailbox_is_hidden(mailbox)
+            and mail_identities.normalize_mail_identity(identity, allow_all=True) == mail_identities.ALL_MAIL_IDENTITIES
         )
 
     def _build_default_overview_payload(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -8723,8 +8699,8 @@ def _make_handler(
             overview_cache_state["default_payload"] = cloned
         return _clone_json_payload(cloned)
 
-    def _get_default_overview_cache() -> dict[str, Any] | None:
-        if use_live_runtime_reads:
+    def _get_default_overview_cache(*, allow_live_runtime_cache: bool = False) -> dict[str, Any] | None:
+        if use_live_runtime_reads and not allow_live_runtime_cache:
             return None
         with overview_cache_lock:
             payload = overview_cache_state.get("default_payload")
@@ -9080,6 +9056,8 @@ def _make_handler(
                     return
                 raw_start = str((query.get("start") or [""])[0] or "").strip()
                 raw_end = str((query.get("end") or [""])[0] or "").strip()
+                raw_duration = str((query.get("duration") or [""])[0] or "").strip()
+                raw_package_id = str((query.get("package") or [""])[0] or "").strip()
                 try:
                     start_day = date.fromisoformat(raw_start) if raw_start else date.today()
                     end_day = date.fromisoformat(raw_end) if raw_end else start_day + timedelta(days=93)
@@ -9087,6 +9065,8 @@ def _make_handler(
                         db_path=db_path,
                         start_day=start_day,
                         end_day=end_day,
+                        duration_minutes=raw_duration or 30,
+                        package_id=raw_package_id,
                     )
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, status_code=400)
@@ -9100,82 +9080,20 @@ def _make_handler(
             if path == "/":
                 if not self._require_auth_or_respond(html_response=True):
                     return
-                initial_overview = _get_default_overview_cache()
-                if initial_overview is None:
-                    try:
-                        if use_live_runtime_reads:
-                            _ensure_viewed_seeded_from_writable_db()
-                            connection = snapshot_cache.get_connection()
-                            try:
-                                initial_overview = _build_default_overview_payload(connection)
-                            finally:
-                                connection.close()
-                        else:
-                            initial_overview = _refresh_default_overview_cache()
-                    except TimeoutError:
-                        initial_overview = {}
-                self._send_html(_render_mail_ui_html(initial_overview=initial_overview))
-                return
-
-            if path == "/calendar":
-                if not self._require_auth_or_respond(html_response=True):
-                    return
-                raw_day = str((query.get("date") or [""])[0] or "").strip()
-                try:
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    connection = snapshot_cache.get_connection()
-                    try:
-                        initial_day = build_calendar_day(connection, target_day=target_day)
-                        initial_range = build_calendar_range(connection, start_day=target_day, days=365)
-                    finally:
-                        connection.close()
-                except (TimeoutError, ValueError):
-                    initial_day = {}
-                    initial_range = {}
-                self._send_html(_render_calendar_ui_html(initial_day=initial_day, initial_range=initial_range))
+                # The root document must paint independently of mailbox I/O.
+                # Reuse the background-warmed snapshot when available; the
+                # client verifies mailbox freshness immediately after paint.
+                initial_overview = _get_default_overview_cache(allow_live_runtime_cache=True) or {}
+                self._send_html(_render_mail_ui_html(initial_overview))
                 return
 
             if path.startswith("/api/") and not self._require_auth_or_respond(html_response=False):
                 return
 
-            if path == "/api/calendar/day":
-                raw_day = str((query.get("date") or [""])[0] or "").strip()
-                try:
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    connection = snapshot_cache.get_connection()
-                    try:
-                        day_payload = build_calendar_day(connection, target_day=target_day)
-                    finally:
-                        connection.close()
-                except ValueError:
-                    self._send_json({"error": "invalid_calendar_date"}, status_code=400)
-                    return
-                except TimeoutError as exc:
-                    self._send_json({"error": str(exc)}, status_code=503)
-                    return
-                self._send_json({"day": day_payload})
-                return
-
-            if path == "/api/calendar/range":
-                raw_start = str((query.get("start") or [""])[0] or "").strip()
-                try:
-                    days = int((query.get("days") or ["365"])[0] or "365")
-                except ValueError:
-                    days = 365
-                try:
-                    start_day = date.fromisoformat(raw_start) if raw_start else date.today()
-                    connection = snapshot_cache.get_connection()
-                    try:
-                        range_payload = build_calendar_range(connection, start_day=start_day, days=days)
-                    finally:
-                        connection.close()
-                except ValueError:
-                    self._send_json({"error": "invalid_calendar_range"}, status_code=400)
-                    return
-                except TimeoutError as exc:
-                    self._send_json({"error": str(exc)}, status_code=503)
-                    return
-                self._send_json({"range": range_payload})
+            if path == "/api/spam/senders":
+                with store.open_db(db_path) as connection:
+                    senders = mail_spam.list_senders(connection)
+                self._send_json({"senders": senders})
                 return
 
             if path == "/api/contacts":
@@ -9198,8 +9116,15 @@ def _make_handler(
                 return
 
             if path == "/api/drafts":
+                identity = mail_identities.normalize_mail_identity(
+                    (query.get("identity") or [mail_identities.ALL_MAIL_IDENTITIES])[0],
+                    allow_all=True,
+                )
                 try:
-                    payload = {"drafts": _refresh_drafts_cache()}
+                    drafts = _refresh_drafts_cache()
+                    if identity != mail_identities.ALL_MAIL_IDENTITIES:
+                        drafts = [draft for draft in drafts if draft.get("mail_identity") == identity]
+                    payload = {"drafts": drafts, "identity": identity}
                 except TimeoutError as exc:
                     self._send_json({"error": str(exc)}, status_code=503)
                     return
@@ -9233,6 +9158,10 @@ def _make_handler(
                 channel = (query.get("channel") or ["email"])[0] or "email"
                 status = (query.get("status") or ["all"])[0] or "all"
                 mailbox = (query.get("mailbox") or ["correspondence"])[0] or "correspondence"
+                identity = mail_identities.normalize_mail_identity(
+                    (query.get("identity") or [mail_identities.ALL_MAIL_IDENTITIES])[0],
+                    allow_all=True,
+                )
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 is_default_request = _is_default_overview_request(
                     source=source,
@@ -9242,6 +9171,7 @@ def _make_handler(
                     page_limit=limit,
                     include_details=False,
                     mailbox=mailbox,
+                    identity=identity,
                 )
                 try:
                     triggered = False
@@ -9251,16 +9181,19 @@ def _make_handler(
                     if cached_overview is not None:
                         stored_queue = dict(cached_overview.get("cloudflare_queue") or {})
                         stored_sync = dict(cached_overview.get("cloudflare_sync") or {})
+                        stored_resend_queue = dict(cached_overview.get("resend_queue") or {})
                         mailbox_version = dict(cached_overview.get("mailbox_version") or {})
                     else:
                         connection = snapshot_cache.get_connection()
                         try:
                             stored_queue = _cloudflare_queue_status_from_connection(connection)
                             stored_sync = _cloudflare_sync_status_from_connection(connection)
+                            stored_resend_queue = _resend_queue_status_from_connection(connection)
                             mailbox_version = (
                                 _correspondence_mailbox_version_from_connection(
                                     connection,
                                     hidden=_mail_ui_mailbox_is_hidden(mailbox),
+                                    identity=identity,
                                 )
                                 if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
                                 else _mailbox_version_from_connection(
@@ -9285,6 +9218,7 @@ def _make_handler(
                             **stored_sync,
                             **runtime_sync,
                         },
+                        "resend_queue": stored_resend_queue,
                         "mailbox_version": mailbox_version,
                         "sync_requested": should_sync,
                         "sync_triggered": triggered,
@@ -9304,6 +9238,10 @@ def _make_handler(
                 channel = (query.get("channel") or ["email"])[0] or "email"
                 status = (query.get("status") or ["all"])[0] or "all"
                 mailbox = (query.get("mailbox") or ["correspondence"])[0] or "correspondence"
+                identity = mail_identities.normalize_mail_identity(
+                    (query.get("identity") or [mail_identities.ALL_MAIL_IDENTITIES])[0],
+                    allow_all=True,
+                )
                 hidden_mailbox = _mail_ui_mailbox_is_hidden(mailbox)
                 should_sync = ((query.get("sync") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
                 include_details = ((query.get("include_details") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
@@ -9317,6 +9255,7 @@ def _make_handler(
                     page_limit=page_limit,
                     include_details=include_details,
                     mailbox=mailbox,
+                    identity=identity,
                 )
                 try:
                     if should_sync:
@@ -9335,6 +9274,7 @@ def _make_handler(
                                             limit=page_limit,
                                             include_details=include_details,
                                             hidden=hidden_mailbox,
+                                            identity=identity,
                                         ),
                                     }
                                     if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -9374,7 +9314,8 @@ def _make_handler(
                                             connection,
                                             limit=page_limit,
                                             include_details=include_details,
-                                            hidden=hidden_mailbox,
+                                        hidden=hidden_mailbox,
+                                        identity=identity,
                                         ),
                                     }
                                     if (source or "").strip().lower() == DEFAULT_MAIL_UI_CORRESPONDENCE_SOURCE
@@ -9510,10 +9451,85 @@ def _make_handler(
                 if not self._require_auth_or_respond(html_response=False):
                     return
 
+            if path in {"/api/agent-terminal", "/api/spam/senders", "/api/spam/senders/remove"}:
+                client_host = str(self.client_address[0] if self.client_address else "")
+                authorized, authorization_reason = _cmail_agent_request_authorized(
+                    self.headers,
+                    client_host=client_host,
+                )
+                if not authorized:
+                    self._send_json(
+                        {
+                            "error": authorization_reason,
+                            "message": "The CMAIL Agent button is available from this Mac or Cody's authenticated tailnet session.",
+                        },
+                        status_code=403,
+                    )
+                    return
+
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
                 self._send_json({"error": "invalid_json"}, status_code=400)
+                return
+
+            if path in {"/api/spam/senders", "/api/spam/senders/remove"}:
+                try:
+                    if not isinstance(payload, dict):
+                        raise ValueError("Expected a sender rule object.")
+                    with store.open_db(db_path) as connection:
+                        if path.endswith("/remove"):
+                            rule_id = str(payload.get("id") or "").strip()
+                            if not rule_id:
+                                raise ValueError("Choose a sender rule to restore.")
+                            changed = mail_spam.remove_rule(connection, rule_id)
+                            sender = ""
+                        else:
+                            sender = mail_spam.add_sender(connection, payload.get("sender"))
+                            changed = True
+                        senders = mail_spam.list_senders(connection)
+                    snapshot_cache.invalidate()
+                    _set_default_overview_cache(None)
+                    self._send_json({"ok": True, "sender": sender, "changed": changed, "senders": senders})
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                except TimeoutError as exc:
+                    self._send_json({"error": str(exc)}, status_code=503)
+                return
+
+            if path == "/api/agent-terminal":
+                try:
+                    with store.open_db(db_path) as connection:
+                        selection = _cmail_agent_selection_from_payload(connection, payload)
+                    result = cmail_agent.open_terminal(selection)
+                except ValueError as exc:
+                    self._send_json(
+                        {"error": str(exc), "message": "The selected CMAIL item is no longer available."},
+                        status_code=400,
+                    )
+                    return
+                except cmail_agent.CmailAgentBusyError as exc:
+                    self._send_json(
+                        {"error": "cmail_agent_busy", "message": str(exc)},
+                        status_code=409,
+                    )
+                    return
+                except cmail_agent.CmailAgentError as exc:
+                    self._send_json(
+                        {"error": "cmail_agent_unavailable", "message": str(exc)},
+                        status_code=503,
+                    )
+                    return
+                except OSError as exc:
+                    self._send_json(
+                        {
+                            "error": "cmail_agent_state_error",
+                            "message": f"CMAIL could not save the agent handoff: {exc}",
+                        },
+                        status_code=500,
+                    )
+                    return
+                self._send_json(result)
                 return
 
             if path == "/api/frg/bookings":
@@ -9611,141 +9627,6 @@ def _make_handler(
                         "touched_at": result.get("touched_at") or "",
                     }
                 )
-                return
-
-            if path == "/api/calendar/entries":
-                raw_day = str(payload.get("date") or "").strip()
-                title = str(payload.get("title") or "").strip()
-                if not title:
-                    self._send_json({"error": "missing_title"}, status_code=400)
-                    return
-                try:
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    raw_tags = payload.get("tags") or []
-                    if isinstance(raw_tags, str):
-                        tags = [raw_tags]
-                    elif isinstance(raw_tags, list):
-                        tags = raw_tags
-                    else:
-                        tags = []
-                    raw_recurrence_count = payload.get("recurrence_count") or payload.get("repeat_count") or None
-                    recurrence_count = int(raw_recurrence_count) if raw_recurrence_count not in (None, "") else None
-                    with store.open_db(db_path) as connection:
-                        store.add_calendar_entry(
-                            connection,
-                            entry_date=target_day,
-                            title=title,
-                            entry_type=str(payload.get("type") or payload.get("entry_type") or "task"),
-                            status=str(payload.get("status") or "planned"),
-                            priority=str(payload.get("priority") or "normal"),
-                            list_name=str(payload.get("list_name") or "personal"),
-                            start_time=str(payload.get("start_time") or ""),
-                            end_time=str(payload.get("end_time") or ""),
-                            notes=str(payload.get("notes") or ""),
-                            tags=tags,
-                            recurrence_frequency=str(payload.get("recurrence_frequency") or payload.get("repeat_frequency") or ""),
-                            recurrence_interval=payload.get("recurrence_interval") or payload.get("repeat_interval") or 1,
-                            recurrence_until=payload.get("recurrence_until") or payload.get("repeat_until") or None,
-                            recurrence_count=recurrence_count,
-                            recurrence_anchor_date=payload.get("recurrence_anchor_date") or payload.get("repeat_anchor_date") or None,
-                        )
-                        day_payload = build_calendar_day(connection, target_day=target_day)
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=400)
-                    return
-                snapshot_cache.invalidate()
-                self._send_json({"ok": True, "day": day_payload})
-                return
-
-            if path.startswith("/api/calendar/entries/") and path.endswith("/status"):
-                parts = [part for part in path.split("/") if part]
-                if len(parts) != 5:
-                    self._send_json({"error": "invalid_calendar_status_path"}, status_code=400)
-                    return
-                try:
-                    entry_id = int(parts[3])
-                    raw_day = str(payload.get("date") or "").strip()
-                    status = str(payload.get("status") or "").strip()
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    with store.open_db(db_path) as connection:
-                        store.set_calendar_entry_status(connection, entry_id=entry_id, status=status)
-                        row = store.get_calendar_entry(connection, entry_id)
-                        if row is not None:
-                            target_day = date.fromisoformat(str(row["entry_date"]))
-                        day_payload = build_calendar_day(connection, target_day=target_day)
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=400)
-                    return
-                snapshot_cache.invalidate()
-                self._send_json({"ok": True, "day": day_payload})
-                return
-
-            if path == "/api/calendar/day-note":
-                raw_day = str(payload.get("date") or "").strip()
-                try:
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    with store.open_db(db_path) as connection:
-                        store.update_calendar_day_note(
-                            connection,
-                            day=target_day,
-                            intention=str(payload.get("intention") or ""),
-                            reflection=str(payload.get("reflection") or ""),
-                            notes=str(payload.get("notes") or ""),
-                            mood=str(payload.get("mood") or ""),
-                            energy=str(payload.get("energy") or ""),
-                        )
-                        day_payload = build_calendar_day(connection, target_day=target_day)
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=400)
-                    return
-                snapshot_cache.invalidate()
-                self._send_json({"ok": True, "day": day_payload})
-                return
-
-            if path == "/api/calendar/day-save":
-                raw_day = str(payload.get("date") or "").strip()
-                try:
-                    target_day = date.fromisoformat(raw_day) if raw_day else date.today()
-                    with store.open_db(db_path) as connection:
-                        result = save_calendar_day(
-                            connection,
-                            target_day=target_day,
-                            title=str(payload.get("title") or ""),
-                            summary=str(payload.get("summary") or ""),
-                        )
-                        day_payload = build_calendar_day(connection, target_day=target_day)
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=400)
-                    return
-                snapshot_cache.invalidate()
-                self._send_json(
-                    {
-                        "ok": True,
-                        "snapshot_id": result["snapshot_id"],
-                        "summary": result["summary"],
-                        "day": day_payload,
-                    }
-                )
-                return
-
-            if path == "/api/calendar/rollover":
-                raw_source_day = str(payload.get("source_date") or payload.get("from") or "").strip()
-                raw_target_day = str(payload.get("target_date") or payload.get("to") or "").strip()
-                try:
-                    source_day = date.fromisoformat(raw_source_day) if raw_source_day else date.today()
-                    target_day = date.fromisoformat(raw_target_day) if raw_target_day else source_day + timedelta(days=1)
-                    with store.open_db(db_path) as connection:
-                        result = rollover_calendar_day(
-                            connection,
-                            source_day=source_day,
-                            target_day=target_day,
-                        )
-                        day_payload = build_calendar_day(connection, target_day=source_day)
-                except ValueError as exc:
-                    self._send_json({"error": str(exc)}, status_code=400)
-                    return
-                snapshot_cache.invalidate()
-                self._send_json({"ok": True, **result, "day": day_payload})
                 return
 
             if path.startswith("/api/communications/") and path.endswith("/delete"):

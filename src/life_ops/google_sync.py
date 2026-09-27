@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Optional
 
 from life_ops import classification
+from life_ops import mail_identities
 from life_ops import store
 from life_ops import tracing
 
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.readonly",
-]
+GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GOOGLE_SCOPES = [GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE]
+GMAIL_ARCHIVE_SCOPES = [GOOGLE_GMAIL_READONLY_SCOPE]
 
 DEFAULT_GMAIL_QUERY = "in:inbox is:unread newer_than:7d -category:promotions -category:social"
 DEFAULT_GMAIL_BACKFILL_QUERY = "-in:chats"
@@ -112,13 +113,23 @@ class _HTMLTextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self._parts: list[str] = []
+        self._ignored_depth = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:  # pragma: no cover - parser callback
+        if tag in {"head", "style", "script", "noscript"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
         if tag in {"br", "div", "li", "p", "tr"}:
             self._parts.append("\n")
 
+    def handle_endtag(self, tag: str) -> None:  # pragma: no cover - parser callback
+        if tag in {"head", "style", "script", "noscript"} and self._ignored_depth:
+            self._ignored_depth -= 1
+
     def handle_data(self, data: str) -> None:  # pragma: no cover - parser callback
-        if data:
+        if data and not self._ignored_depth:
             self._parts.append(data)
 
     def text(self) -> str:
@@ -147,25 +158,48 @@ def _import_google_clients():
     return Request, Credentials, InstalledAppFlow, build
 
 
-def get_google_credentials(credentials_path: Path, token_path: Path):
+def get_google_credentials(
+    credentials_path: Path,
+    token_path: Path,
+    scopes: Optional[list[str]] = None,
+    *,
+    allow_interactive_auth: bool = False,
+):
     Request, Credentials, InstalledAppFlow, _ = _import_google_clients()
+    effective_scopes = list(scopes or GOOGLE_SCOPES)
 
     credentials = None
+    auth_error: Optional[Exception] = None
     if token_path.exists():
-        credentials = Credentials.from_authorized_user_file(str(token_path), GOOGLE_SCOPES)
+        try:
+            credentials = Credentials.from_authorized_user_file(str(token_path), effective_scopes)
+        except Exception as exc:
+            auth_error = exc
 
     if credentials and credentials.valid:
         return credentials
 
     if credentials and credentials.expired and credentials.refresh_token:
-        credentials.refresh(Request())
-    else:
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            auth_error = exc
+            credentials = None
+
+    if credentials is None or not credentials.valid:
+        if not allow_interactive_auth:
+            reason = f" Cached-token error: {auth_error}" if auth_error else ""
+            raise RuntimeError(
+                "Google OAuth authorization is required. "
+                "Run `zsh ./bin/life-ops google-auth` interactively, then retry the operation."
+                f"{reason}"
+            ) from auth_error
         if not credentials_path.exists():
             raise FileNotFoundError(
                 f"Google OAuth credentials not found at {credentials_path}. "
                 "Download the Desktop app credentials JSON from Google Cloud and place it there."
             )
-        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), GOOGLE_SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), effective_scopes)
         credentials = flow.run_local_server(port=0)
 
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,12 +207,23 @@ def get_google_credentials(credentials_path: Path, token_path: Path):
     return credentials
 
 
-def ensure_google_auth(credentials_path: Path, token_path: Path) -> dict:
-    get_google_credentials(credentials_path, token_path)
+def ensure_google_auth(
+    credentials_path: Path,
+    token_path: Path,
+    *,
+    scopes: Optional[list[str]] = None,
+) -> dict:
+    effective_scopes = list(scopes or GOOGLE_SCOPES)
+    get_google_credentials(
+        credentials_path,
+        token_path,
+        effective_scopes,
+        allow_interactive_auth=True,
+    )
     return {
         "credentials_path": str(credentials_path),
         "token_path": str(token_path),
-        "scopes": GOOGLE_SCOPES,
+        "scopes": effective_scopes,
     }
 
 
@@ -632,12 +677,153 @@ def _gmail_notes(triage: dict, classification_result: dict) -> str:
     )
 
 
-def _gmail_service(credentials_path: Path, token_path: Path):
+def _gmail_service(
+    credentials_path: Path,
+    token_path: Path,
+    *,
+    scopes: Optional[list[str]] = None,
+):
     _, _, _, build = _import_google_clients()
-    credentials = get_google_credentials(credentials_path, token_path)
+    credentials = get_google_credentials(credentials_path, token_path, scopes)
     service = build("gmail", "v1", credentials=credentials)
     profile = service.users().getProfile(userId="me").execute()
     return service, str(profile.get("emailAddress", ""))
+
+
+def _decode_gmail_raw_message(value: str) -> bytes:
+    clean = str(value or "").strip()
+    if not clean:
+        raise ValueError("Gmail returned an empty raw message payload.")
+    try:
+        return base64.urlsafe_b64decode((clean + ("=" * (-len(clean) % 4))).encode("ascii"))
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Gmail returned an invalid raw message payload.") from exc
+
+
+def archive_gmail_to_cmail(
+    *,
+    db_path: Path,
+    credentials_path: Path,
+    token_path: Path,
+    mail_identity: str = mail_identities.CODACLI_MAIL_IDENTITY,
+    query: str = DEFAULT_GMAIL_BACKFILL_QUERY,
+    max_results: int = 0,
+    include_spam_trash: bool = False,
+    commit_every: int = 50,
+) -> dict:
+    """Archive complete Gmail RFC 822 messages and attachments into the encrypted CMAIL vault."""
+    from life_ops import mail_ingest
+
+    identity_key = mail_identities.normalize_mail_identity(mail_identity)
+    identity = mail_identities.mail_identity(identity_key)
+    service, user_email = _gmail_service(
+        credentials_path,
+        token_path,
+        scopes=GMAIL_ARCHIVE_SCOPES,
+    )
+    if user_email.strip().lower() != identity.address.lower():
+        raise ValueError(
+            f"Google authenticated as {user_email or '(unknown)'}, but the requested CMAIL identity is {identity.address}."
+        )
+
+    page_token: Optional[str] = None
+    seen = 0
+    archived = 0
+    skipped_existing = 0
+    inbound = 0
+    outbound = 0
+    attachments = 0
+    failures: list[dict[str, str]] = []
+    batch_size = max(1, int(commit_every))
+    effective_limit = max(0, int(max_results))
+
+    with store.open_db(db_path) as connection:
+        existing_rows = connection.execute(
+            "SELECT external_id, raw_relative_path FROM communications WHERE source = 'gmail_archive'"
+        ).fetchall()
+        existing_artifacts = {
+            str(row["external_id"]): str(row["raw_relative_path"] or "")
+            for row in existing_rows
+        }
+
+        while True:
+            remaining = effective_limit - seen if effective_limit else 500
+            if effective_limit and remaining <= 0:
+                break
+            response = service.users().messages().list(
+                userId="me",
+                q=query,
+                maxResults=min(500, remaining),
+                pageToken=page_token,
+                includeSpamTrash=bool(include_spam_trash),
+            ).execute()
+            message_stubs = response.get("messages", []) or []
+            for message_stub in message_stubs:
+                if effective_limit and seen >= effective_limit:
+                    break
+                seen += 1
+                gmail_id = str(message_stub.get("id") or "").strip()
+                external_id = f"gmail:{user_email.lower()}:{gmail_id}"
+                existing_relative_path = existing_artifacts.get(external_id, "")
+                if existing_relative_path and (store.attachment_vault_root() / existing_relative_path).exists():
+                    skipped_existing += 1
+                    continue
+                try:
+                    message = service.users().messages().get(
+                        userId="me",
+                        id=gmail_id,
+                        format="raw",
+                    ).execute()
+                    raw_bytes = _decode_gmail_raw_message(str(message.get("raw") or ""))
+                    labels = [str(label) for label in message.get("labelIds", []) or []]
+                    direction = "outbound" if {"SENT", "DRAFT"}.intersection(labels) else "inbound"
+                    result = mail_ingest.ingest_cloudflare_email_payload(
+                        {
+                            "provider": "gmail-archive",
+                            "external_id": external_id,
+                            "external_thread_id": f"gmail:{user_email.lower()}:{message.get('threadId') or gmail_id}",
+                            "envelope_from": identity.address if direction == "outbound" else "",
+                            "envelope_to": identity.address,
+                            "user_email": identity.address,
+                            "direction": direction,
+                            "gmail_labels": labels,
+                            "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                        },
+                        connection=connection,
+                        commit=False,
+                    )
+                    existing_artifacts[external_id] = str(result.get("raw_relative_path") or "")
+                    archived += 1
+                    attachments += int(result.get("attachments_count") or 0)
+                    if direction == "outbound":
+                        outbound += 1
+                    else:
+                        inbound += 1
+                    if archived % batch_size == 0:
+                        connection.commit()
+                except Exception as exc:
+                    failures.append({"gmail_id": gmail_id, "error": str(exc)})
+
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token or (effective_limit and seen >= effective_limit):
+                break
+        connection.commit()
+
+    return {
+        "db_path": str(db_path),
+        "user_email": user_email,
+        "mail_identity": identity_key,
+        "query": query,
+        "messages_seen": seen,
+        "messages_archived": archived,
+        "messages_skipped_existing": skipped_existing,
+        "messages_failed": len(failures),
+        "inbound_archived": inbound,
+        "outbound_archived": outbound,
+        "attachments_archived": attachments,
+        "complete": not failures and (not page_token),
+        "failures": failures[:25],
+    }
 
 
 def _gmail_query_with_before_ts(base_query: str, *, before_ts: Optional[int] = None) -> str:

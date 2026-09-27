@@ -266,7 +266,19 @@ def export_secret_values(
     values: dict[str, str] = {}
     missing: list[str] = []
     for name in available_names:
-        value = resolve_secret(name=name, path=path)
+        clean_name = str(name or "").strip()
+        value = str(os.getenv(clean_name) or "").strip() or None
+        if value is None:
+            registry = _load_registry(path)
+            entry = registry.get(clean_name)
+            if entry:
+                backend = str(entry.get("backend") or "")
+                if backend == "keychain":
+                    value = _read_keychain_secret(name=clean_name)
+                elif backend == "file":
+                    value = str(entry.get("value") or "").strip() or None
+        if value is None:
+            value = _load_service_secrets().get(clean_name)
         if value is None:
             missing.append(name)
             continue

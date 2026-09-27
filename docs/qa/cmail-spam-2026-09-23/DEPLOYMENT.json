@@ -1,0 +1,43 @@
+{
+  "prepared_at": "2026-09-23T23:37:18.269350+00:00",
+  "strategy": "Seven audited modules in the existing production bundle; two use Spam-only patches to preserve unrelated checkout differences. Install without dependencies or build isolation. Restart existing CMAIL and Life UI. Schedulers load checkout source on each scheduled invocation.",
+  "files": [
+    {
+      "path": "src/life_ops/mail_ui.py",
+      "before_sha256": "9bbfcb1a2e4952deddc06832f1e8f46077e5a6477befcfe301d9b815d8dcd141",
+      "after_sha256": "5d8103c680b5480e6f1d2b12b0dae2f49d9d85cf8f069f853ceef2885dc28392"
+    },
+    {
+      "path": "src/life_ops/mail_spam.py",
+      "before_sha256": null,
+      "after_sha256": "2550beb852640c9a7b5ceeda1faf951a8efe77195735e3443ebc34da33153510"
+    },
+    {
+      "path": "src/life_ops/store.py",
+      "before_sha256": "da50226e1b8a21255307ebe3eb2418cedf5fb2b3861038d8485732e2991259ea",
+      "after_sha256": "b34591e2b261d94a291a445813d227af46459caced5ff321b800af0a7097a123"
+    },
+    {
+      "path": "src/life_ops/calendar.py",
+      "before_sha256": "775555bc90fc8704347a1bc61b83e2dffe323e36731d0f7d565e16ed4720eb42",
+      "after_sha256": "c3a8712c36d617531df9a278fb213f34b71d4f355f7124533a65f6477b553b98"
+    },
+    {
+      "path": "src/life_ops/communication_sweep.py",
+      "before_sha256": "f30356520080b51739314a3c814e32d16dce70b271bbdaf6480057e30534e69f",
+      "after_sha256": "a1d329a22e2af5bac3f549b9e730d9df5ec814c1ae09148a619dd723cb5266fa"
+    },
+    {
+      "path": "src/life_ops/critical_bills.py",
+      "before_sha256": "be2ac2c7b9f3101bf90d87e17bf9db9ea41f937170b5503f13dd17eb5c516af3",
+      "after_sha256": "ea8721811faed2edd13ba5c8f8f4e0baccbaf8160cd9b4a28c6e846120ac340a",
+      "overlay": "Only the audited Spam integration; unrelated checkout changes preserved outside the CMAIL bundle"
+    },
+    {
+      "path": "src/life_ops/job_search_follow_up.py",
+      "before_sha256": "5ddaebd11824682212fb4b0b4366dd466c3f8b49be38ec17b31a3953045f8d5b",
+      "after_sha256": "8cfa7a578de900e2769f2ab6baa7f6979ed8c3fab185c51eb34551f5ec01d1b5",
+      "overlay": "Only the audited Spam integration; unrelated checkout changes preserved outside the CMAIL bundle"
+    }
+  ]
+}

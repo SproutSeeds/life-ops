@@ -1,0 +1,671 @@
+--- a/src/life_ops/mail_ui.py
++++ b/src/life_ops/mail_ui.py
+@@ -32,6 +32,7 @@
+ from life_ops.document_ingest import extract_text_from_saved_attachment
+ from life_ops import mail_metadata
+ from life_ops import mail_identities
++from life_ops import mail_spam
+ from life_ops import mail_vault
+ from life_ops.frg_booking_availability import build_frg_booking_availability_payload
+ from life_ops.resend_integration import (
+@@ -1082,6 +1083,29 @@
+     .confirm-layer.hidden {
+       display: none;
+     }
++    .spam-dialog {
++      width: min(540px, calc(100vw - 32px));
++      max-height: calc(100dvh - 40px);
++      overflow-y: auto;
++      box-sizing: border-box;
++      border: 1px solid var(--line);
++      border-radius: 20px;
++      padding: 24px;
++      background: #111813;
++      color: var(--text);
++    }
++    .spam-dialog::backdrop { background: rgba(0,0,0,.65); }
++    .spam-dialog header, .spam-rule { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
++    .spam-dialog h2 { margin: 0; }
++    .spam-dialog p, .spam-rule small { color: var(--muted); line-height: 1.5; }
++    .spam-dialog form { display: grid; gap: 10px; margin: 20px 0; }
++    .spam-dialog input { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 10px; background: #080e0a; color: var(--text); border: 1px solid var(--line); }
++    .spam-rule { padding: 12px 0; border-top: 1px solid var(--line); }
++    .spam-rule span { min-width: 0; overflow-wrap: anywhere; }
++    .spam-rule small { display: block; }
++    .spam-dialog button, [data-spam-sender], [data-restore-sender] { cursor: pointer; }
++    .spam-dialog button:disabled { cursor: wait; }
++    .spam-feedback { min-height: 1.5em; overflow-wrap: anywhere; }
+     .confirm-card {
+       width: min(420px, calc(100vw - 48px));
+       border-radius: 20px;
+@@ -1947,7 +1971,7 @@
+         <div class="tabbar" role="tablist" aria-label="Mail views">
+           <button class="tab-button active" type="button" id="tabInbox" role="tab" aria-selected="true">Correspondence</button>
+           <button class="tab-button" type="button" id="tabDrafts" role="tab" aria-selected="false">Drafts</button>
+-          <button class="tab-button" type="button" id="tabHidden" role="tab" aria-selected="false">Hidden</button>
++          <button class="tab-button" type="button" id="tabHidden" role="tab" aria-selected="false">Spam</button>
+         </div>
+         <div class="agent-terminal-control">
+           <button class="agent-terminal-button" type="button" id="agentTerminalButton" aria-label="Open CMAIL Agent in Terminal">
+@@ -1968,6 +1992,7 @@
+           <h2 id="panelTitle">correspondence</h2>
+           <div class="panel-actions">
+             <button class="secondary hidden" type="button" id="newDraftButton">new draft</button>
++            <button class="secondary hidden" type="button" id="spamSendersButton">Manage senders</button>
+             <span class="badge" id="threadCount">0 contacts</span>
+           </div>
+         </div>
+@@ -1987,11 +2012,22 @@
+     </section>
+   </div>
+   <div class="confirm-layer hidden" id="confirmLayer" aria-hidden="true"></div>
++  <dialog class="spam-dialog" id="spamDialog" aria-labelledby="spamTitle">
++    <header><h2 id="spamTitle">Spam senders</h2><button class="secondary" id="closeSpamDialog" type="button">Back</button></header>
++    <p>Keep correspondence with these exact email addresses out of sight. Existing and future mail goes to Spam across your CMAIL inboxes and stays out of mail reminders. Messages are kept until you restore the sender.</p>
++    <form id="spamSenderForm">
++      <label for="spamSenderInput">Sender email address</label>
++      <input type="email" id="spamSenderInput" placeholder="sender@example.com" required autocomplete="off" spellcheck="false">
++      <button class="primary" type="submit" id="addSpamSender">Move sender to Spam</button>
++    </form>
++    <div class="spam-feedback" id="spamFeedback" role="status" aria-live="polite"></div>
++    <div id="spamSenderList"></div>
++  </dialog>
+   <script>
+     // Version this cache whenever the overview wire shape changes. Older CMAIL
+     // builds stored multi-megabyte mailbox payloads here, which made a fixed
+     // server response feel slow again on the next browser refresh.
+-    const OVERVIEW_CACHE_STORAGE_KEY = "lifeops.mail.overviewCache.v2";
++    const OVERVIEW_CACHE_STORAGE_KEY = "lifeops.mail.overviewCache.v3";
+     const DRAFTS_CACHE_STORAGE_KEY = "lifeops.mail.draftsCache";
+     const CONTACTS_CACHE_STORAGE_KEY = "lifeops.mail.contactsCache";
+     const SELECTED_CONTACT_STORAGE_KEY = "lifeops.mail.selectedContact";
+@@ -2292,6 +2328,7 @@
+ 
+     function normalizeActiveView(value) {
+       const clean = String(value || "").trim().toLowerCase();
++      if (clean === "spam") return "hidden";
+       if (clean === "drafts" || clean === "hidden") return clean;
+       return "inbox";
+     }
+@@ -3154,10 +3191,11 @@
+       $("tabDrafts").setAttribute("aria-selected", draftsActive ? "true" : "false");
+       $("tabHidden").classList.toggle("active", hiddenActive);
+       $("tabHidden").setAttribute("aria-selected", hiddenActive ? "true" : "false");
+-      $("panelTitle").textContent = hiddenActive ? "hidden" : draftsActive ? "drafts" : "correspondence";
++      $("panelTitle").textContent = hiddenActive ? "spam" : draftsActive ? "drafts" : "correspondence";
+       $("newDraftButton").classList.toggle("hidden", !draftsActive);
++      $("spamSendersButton").classList.toggle("hidden", !hiddenActive);
+       $("correspondenceSearchWrap").classList.toggle("hidden", draftsActive);
+-      $("correspondenceSearch").placeholder = hiddenActive ? "search hidden mail" : "search name, email, or body";
++      $("correspondenceSearch").placeholder = hiddenActive ? "search spam" : "search name, email, or body";
+       $("correspondenceSearch").value = state.correspondenceQuery || "";
+       const sortAllButton = $("sortAllButton");
+       const sortNewButton = $("sortNewButton");
+@@ -3337,7 +3375,7 @@
+             : "No opened correspondence yet.";
+         } else {
+           emptyCopy = hiddenActive
+-            ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence.")
++            ? (state.correspondenceQuery ? "No spam matches that search." : "Spam is empty. Use Manage senders to keep an email address out of sight.")
+             : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence yet.");
+         }
+         $("threadList").innerHTML = `<div class="empty">${emptyCopy}</div>`;
+@@ -3354,10 +3392,10 @@
+       const contactActionMarkup = (contact) => {
+         const contactKey = escapeHtml(contact.contact_key);
+         if (hiddenActive) {
+-          return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Return this correspondence to the main view">show</button>`;
++          return `<button class="hide-button restore-button" type="button" data-unhide-contact="${contactKey}" title="Restore this sender and future mail to Correspondence">Restore</button>`;
+         }
+         return `
+-          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this correspondence to Hidden" aria-label="Hide correspondence">
++          <button class="hide-button" type="button" data-hide-contact="${contactKey}" title="Move this sender to Spam" aria-label="Move sender to Spam">
+             <svg class="hide-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+               <path d="M4 13.5c2.1 2.4 4.8 3.6 8 3.6s5.9-1.2 8-3.6"></path>
+               <path d="M7.2 16.2l-1.4 2"></path>
+@@ -3402,7 +3440,7 @@
+           event.stopPropagation();
+           const contactKey = node.getAttribute("data-hide-contact") || "";
+           if (!contactKey) return;
+-          await hideContact(contactKey);
++          openSpamRules(contactKey);
+         });
+       }
+       for (const node of document.querySelectorAll("[data-unhide-contact]")) {
+@@ -3576,7 +3614,7 @@
+         persistSelectionState();
+         $("detailPanel").classList.remove("draft-mode");
+         const emptyCopy = state.activeView === "hidden"
+-          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
++          ? (state.correspondenceQuery ? "No spam matches that search." : "No spam selected.")
+           : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
+         $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
+         return;
+@@ -3590,7 +3628,7 @@
+       if (!state.selectedId) {
+         $("detailPanel").classList.remove("draft-mode");
+         const emptyCopy = state.activeView === "hidden"
+-          ? (state.correspondenceQuery ? "No hidden correspondence matches that search." : "No hidden correspondence selected.")
++          ? (state.correspondenceQuery ? "No spam matches that search." : "No spam selected.")
+           : (state.correspondenceQuery ? "No correspondence matches that search." : "No correspondence selected yet.");
+         $("detailPanel").innerHTML = `<div class="empty">${emptyCopy}</div>`;
+         return;
+@@ -4575,6 +4613,67 @@
+       renderCurrentSelection();
+     }
+ 
++    let spamReturnFocus = null;
++    let spamBusy = false;
++
++    function closeSpamRules() {
++      $("spamDialog").close();
++      const target = spamReturnFocus?.isConnected ? spamReturnFocus : $("tabHidden");
++      target?.focus();
++    }
++
++    function renderSpamRules(senders) {
++      $("spamSenderList").innerHTML = senders.length ? senders.map((rule) => `
++        <div class="spam-rule"><span>${escapeHtml(rule.sender)}<small>${escapeHtml(rule.scope)}</small></span>
++        <button class="secondary" type="button" data-remove-spam-rule="${escapeHtml(rule.id)}" aria-label="Restore ${escapeHtml(rule.sender)}">Restore</button></div>
++      `).join("") : '<p>No sender rules yet.</p>';
++      for (const button of $("spamSenderList").querySelectorAll("[data-remove-spam-rule]")) {
++        button.disabled = spamBusy;
++        button.addEventListener("click", () => updateSpamRules("/api/spam/senders/remove", { id: button.dataset.removeSpamRule }));
++      }
++    }
++
++    async function openSpamRules(contactKey = "") {
++      spamReturnFocus = document.activeElement;
++      $("spamSenderInput").value = String(contactKey).split("::").pop().replace(/^sender:/, "");
++      $("spamFeedback").textContent = "";
++      $("spamSenderList").textContent = "Loading senders…";
++      $("spamDialog").showModal();
++      $("spamSenderInput").focus();
++      try {
++        const payload = await fetchJson("/api/spam/senders");
++        renderSpamRules(payload.senders || []);
++      } catch (error) {
++        $("spamFeedback").textContent = error.message || "Unable to load sender rules.";
++      }
++    }
++
++    async function updateSpamRules(path, payload) {
++      if (spamBusy) return;
++      spamBusy = true;
++      for (const button of $("spamDialog").querySelectorAll("form button, [data-remove-spam-rule]")) button.disabled = true;
++      try {
++        const result = await postJson(path, payload);
++        renderSpamRules(result.senders || []);
++        $("spamSenderInput").value = "";
++        $("spamFeedback").textContent = path.endsWith("/remove")
++          ? "Sender restored. Existing and future mail returns to Correspondence."
++          : `${result.sender} moved to Spam. Future mail from this address will stay here.`;
++        state.detailCache.clear();
++        try {
++          await loadOverview({ sync: false, render: state.activeView !== "drafts" });
++        } catch (_error) {
++          $("spamFeedback").textContent += " Rule saved. Refresh the mailbox to update its view.";
++        }
++        $("spamSenderInput").focus();
++      } catch (error) {
++        $("spamFeedback").textContent = error.message || "Unable to update sender rules.";
++      } finally {
++        spamBusy = false;
++        for (const button of $("spamDialog").querySelectorAll("form button, [data-remove-spam-rule]")) button.disabled = false;
++      }
++    }
++
+     async function hideContact(contactKey) {
+       const cleanContactKey = String(contactKey || "").trim();
+       if (!cleanContactKey) return;
+@@ -4594,6 +4693,7 @@
+       removeContactFromLocalOverview(cleanContactKey);
+       try {
+         await postJson("/api/contacts/unhide", { contact_key: cleanContactKey }, { keepalive: true });
++        state.detailCache.clear();
+         await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+       } catch (error) {
+         await loadOverview({ sync: false, render: state.activeView !== "drafts" });
+@@ -4734,6 +4834,7 @@
+             <div class="item item-action">
+               <div class="detail-action-buttons">
+                 <button class="secondary inline-reply" type="button" data-reply-message="${message.id}">reply</button>
++                <button class="secondary" type="button" ${message.is_spam ? "data-restore-sender" : "data-spam-sender"}>${message.is_spam ? "Restore sender" : "Move sender to Spam"}</button>
+                 <button class="delete-button inline-delete" type="button" data-delete-message="${message.id}" title="Archive this message from correspondence" aria-label="Archive message">${trashIcon()}</button>
+               </div>
+             </div>
+@@ -4751,6 +4852,11 @@
+         </div>
+       `;
+       prepareExternalEmailLinks(detail);
++      detail.querySelector("[data-spam-sender]")?.addEventListener("click", () => openSpamRules(message.contact_email || activeContactKey));
++      detail.querySelector("[data-restore-sender]")?.addEventListener("click", async () => {
++        try { await unhideContact(activeContactKey); }
++        catch (error) { $("detailPanel").innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`; }
++      });
+       const messageSelect = detail.querySelector("#messageSelect");
+       if (messageSelect) {
+         messageSelect.addEventListener("change", () => {
+@@ -4911,6 +5017,11 @@
+ 
+     function handleEscape(event) {
+       if (event.key !== "Escape") return;
++      if ($("spamDialog").open) {
++        event.preventDefault();
++        closeSpamRules();
++        return;
++      }
+       if (state.pendingDelete) {
+         event.preventDefault();
+         closeConfirm();
+@@ -4931,6 +5042,9 @@
+       if (state.selectedContactKey || state.selectedId) {
+         event.preventDefault();
+         clearCorrespondenceSelection();
++      } else if (state.activeView === "hidden") {
++        event.preventDefault();
++        setActiveView("inbox");
+       }
+     }
+ 
+@@ -5012,6 +5126,13 @@
+     $("tabInbox").addEventListener("click", () => setActiveView("inbox"));
+     $("tabDrafts").addEventListener("click", () => setActiveView("drafts"));
+     $("tabHidden").addEventListener("click", () => setActiveView("hidden"));
++    $("spamSendersButton").addEventListener("click", () => openSpamRules());
++    $("closeSpamDialog").addEventListener("click", closeSpamRules);
++    $("spamDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeSpamRules(); });
++    $("spamSenderForm").addEventListener("submit", (event) => {
++      event.preventDefault();
++      updateSpamRules("/api/spam/senders", { sender: $("spamSenderInput").value });
++    });
+     $("agentTerminalButton").addEventListener("click", openCmailAgentTerminal);
+     $("correspondenceSearch").addEventListener("input", (event) => updateCorrespondenceSearch(event.target.value));
+     $("sortAllButton").addEventListener("click", () => setContactSortMode("all"));
+@@ -6664,6 +6785,7 @@
+         "read_key": _communication_read_key(row),
+         "subject": str(row["subject"] or ""),
+         "channel": str(row["channel"] or ""),
++        "is_spam": mail_spam.is_spam(row, mail_spam.rules(connection)),
+         "direction": str(row["direction"] or ""),
+         "mail_identity": identity_key,
+         "mail_identity_label": identity.label,
+@@ -7206,10 +7328,9 @@
+     identity_key = mail_identities.normalize_mail_identity(identity, allow_all=True)
+     if identity_key != mail_identities.ALL_MAIL_IDENTITIES:
+         messages = [message for message in messages if message.get("mail_identity") == identity_key]
+-    if hidden:
+-        messages = [message for message in messages if str(message.get("contact_key") or "").lower() in hidden_contacts]
+-    elif hidden_contacts:
+-        messages = [message for message in messages if str(message.get("contact_key") or "").lower() not in hidden_contacts]
++    for message in messages:
++        message["is_spam"] = mail_spam.is_spam(message, hidden_contacts)
++    messages = [message for message in messages if message["is_spam"] == hidden]
+     if limit is not None:
+         base_limit = max(1, int(limit))
+         limited_messages = messages[:base_limit]
+@@ -7358,7 +7479,7 @@
+     *,
+     contact_key: str,
+ ) -> bool:
+-    return store.clear_hidden_mail_contact(connection, contact_key=contact_key)
++    return mail_spam.restore_contact(connection, contact_key)
+ 
+ 
+ def _build_mail_ui_overview_from_connection(
+@@ -7372,6 +7493,7 @@
+     include_details: bool = False,
+ ) -> dict[str, Any]:
+     _ensure_existing_correspondence_marked_viewed(connection)
++    spam_rules = mail_spam.rules(connection)
+     raw_messages = [
+         _communication_summary(row)
+         for row in store.list_communications(
+@@ -7382,7 +7504,7 @@
+             status=status or None,
+             limit=max(1, int(limit)),
+         )
+-        if str(row["status"] or "") != "deleted"
++        if str(row["status"] or "") != "deleted" and not mail_spam.is_spam(row, spam_rules)
+     ]
+     messages = raw_messages
+     sync = _cloudflare_sync_status_from_connection(connection)
+@@ -8966,6 +9088,12 @@
+                 return
+ 
+             if path.startswith("/api/") and not self._require_auth_or_respond(html_response=False):
++                return
++
++            if path == "/api/spam/senders":
++                with store.open_db(db_path) as connection:
++                    senders = mail_spam.list_senders(connection)
++                self._send_json({"senders": senders})
+                 return
+ 
+             if path == "/api/contacts":
+@@ -9323,7 +9451,7 @@
+                 if not self._require_auth_or_respond(html_response=False):
+                     return
+ 
+-            if path == "/api/agent-terminal":
++            if path in {"/api/agent-terminal", "/api/spam/senders", "/api/spam/senders/remove"}:
+                 client_host = str(self.client_address[0] if self.client_address else "")
+                 authorized, authorization_reason = _cmail_agent_request_authorized(
+                     self.headers,
+@@ -9343,6 +9471,30 @@
+                 payload = self._read_json_body()
+             except json.JSONDecodeError:
+                 self._send_json({"error": "invalid_json"}, status_code=400)
++                return
++
++            if path in {"/api/spam/senders", "/api/spam/senders/remove"}:
++                try:
++                    if not isinstance(payload, dict):
++                        raise ValueError("Expected a sender rule object.")
++                    with store.open_db(db_path) as connection:
++                        if path.endswith("/remove"):
++                            rule_id = str(payload.get("id") or "").strip()
++                            if not rule_id:
++                                raise ValueError("Choose a sender rule to restore.")
++                            changed = mail_spam.remove_rule(connection, rule_id)
++                            sender = ""
++                        else:
++                            sender = mail_spam.add_sender(connection, payload.get("sender"))
++                            changed = True
++                        senders = mail_spam.list_senders(connection)
++                    snapshot_cache.invalidate()
++                    _set_default_overview_cache(None)
++                    self._send_json({"ok": True, "sender": sender, "changed": changed, "senders": senders})
++                except ValueError as exc:
++                    self._send_json({"error": str(exc)}, status_code=400)
++                except TimeoutError as exc:
++                    self._send_json({"error": str(exc)}, status_code=503)
+                 return
+ 
+             if path == "/api/agent-terminal":
+--- /dev/null
++++ b/src/life_ops/mail_spam.py
+@@ -0,0 +1,127 @@
++"""Reversible CMAIL sender rules, shared by the inbox and mail attention views.
++
++Rules use the existing encrypted/snapshotted UI state. Original mail and work
++dispositions stay intact. Legacy Hidden keys retain their original identity scope.
++"""
++from __future__ import annotations
++
++import json
++import re
++import sqlite3
++from email.utils import getaddresses
++
++from life_ops import mail_identities, store
++
++SENDER_PREFIX = "sender:"
++
++
++def normalize_sender(value: object) -> str:
++    raw = str(value or "").strip()
++    if not raw or any(c in raw for c in "\r\n\x00"):
++        raise ValueError("Enter one complete email address.")
++    addresses = getaddresses([raw])
++    if len(addresses) != 1:
++        raise ValueError("Enter one complete email address.")
++    email = addresses[0][1].strip().lower()
++    if not re.fullmatch(r"[^\s@<>,;:\\\"()]+@[^\s@<>,;:\\\"()]+\.[^\s@<>,;:\\\"()]+", email) or "*" in email:
++        raise ValueError("Enter one complete email address; domains and wildcards are not supported.")
++    return email
++
++
++def rules(connection: sqlite3.Connection) -> dict[str, str]:
++    return store.get_hidden_mail_contacts(connection)
++
++
++def list_senders(connection: sqlite3.Connection) -> list[dict]:
++    result = []
++    for rule_id, created_at in rules(connection).items():
++        global_rule = rule_id.startswith(SENDER_PREFIX)
++        sender = rule_id[len(SENDER_PREFIX):] if global_rule else rule_id.rsplit("::", 1)[-1]
++        result.append({"id": rule_id, "sender": sender, "created_at": created_at,
++                       "scope": "All CMAIL inboxes" if global_rule else "Existing hidden correspondence"})
++    return sorted(result, key=lambda item: (item["sender"], item["id"]))
++
++
++def _lock_rules(connection: sqlite3.Connection) -> None:
++    # Serialize read/modify/write even on the plaintext live runtime database.
++    if not connection.in_transaction:
++        connection.execute("BEGIN IMMEDIATE")
++
++
++def add_sender(connection: sqlite3.Connection, sender: object) -> str:
++    email = normalize_sender(sender)
++    _lock_rules(connection)
++    current = rules(connection)
++    # A deliberate all-inbox rule replaces narrower legacy rules for this address.
++    for rule_id in list(current):
++        if not rule_id.startswith(SENDER_PREFIX) and rule_id.rsplit("::", 1)[-1] == email:
++            current.pop(rule_id)
++    current.setdefault(SENDER_PREFIX + email, store._utc_now_string())
++    store.set_hidden_mail_contacts(connection, current)
++    return email
++
++
++def remove_rule(connection: sqlite3.Connection, rule_id: str) -> bool:
++    _lock_rules(connection)
++    current = rules(connection)
++    existed = current.pop(str(rule_id).strip().lower(), None) is not None
++    store.set_hidden_mail_contacts(connection, current)
++    return existed
++
++
++def restore_contact(connection: sqlite3.Connection, contact_key: str) -> bool:
++    _lock_rules(connection)
++    current = rules(connection)
++    contact_key = contact_key.strip().lower()
++    email = contact_key.rsplit("::", 1)[-1]
++    removed = False
++    for rule_id in (contact_key, SENDER_PREFIX + email):
++        removed = current.pop(rule_id, None) is not None or removed
++    store.set_hidden_mail_contacts(connection, current)
++    return removed
++
++
++def is_spam(message, sender_rules: dict[str, str]) -> bool:
++    record = dict(message)
++    if not sender_rules or record.get("channel", "email") != "email" or record.get("source") == "gmail":
++        return False
++    contact_key = str(record.get("contact_key") or "").lower()
++    direction = str(record.get("direction") or "inbound").lower()
++    if not contact_key:
++        address_field = "external_to" if direction == "outbound" else "external_from"
++        address = str(record.get(address_field) or "")
++        if not address and direction != "outbound":
++            try:
++                sender = json.loads(record.get("from_json") or "{}")
++                address = sender.get("email", "") if isinstance(sender, dict) else ""
++            except (ValueError, TypeError):
++                pass
++        contact_key = store.mail_contact_key(person=record.get("person", ""), external_from=address, source=record.get("source", ""))
++        identity = mail_identities.infer_mail_identity(
++            explicit=record.get("mail_identity", ""),
++            direction=direction,
++            external_from=record.get("external_from", ""),
++            external_to=record.get("external_to", ""),
++            external_cc=record.get("external_cc", ""),
++            external_bcc=record.get("external_bcc", ""),
++        )
++        if identity != mail_identities.DEFAULT_MAIL_IDENTITY:
++            contact_key = f"{identity}::{contact_key}"
++    email = contact_key.rsplit("::", 1)[-1]
++    return contact_key in sender_rules or SENDER_PREFIX + email in sender_rules
++
++
++def suppressed_ids(connection: sqlite3.Connection) -> set[int]:
++    sender_rules = rules(connection)
++    if not sender_rules:
++        return set()
++    return {int(row["id"]) for row in connection.execute(
++        """SELECT id, channel, source, direction, person, mail_identity,
++                  external_from, external_to, external_cc, external_bcc, from_json
++           FROM communications WHERE channel = 'email' AND source != 'gmail'"""
++    ) if is_spam(row, sender_rules)}
++
++
++def suppresses_all(communication_ids, suppressed: set[int]) -> bool:
++    ids = {int(value) for value in communication_ids}
++    return bool(ids) and ids.issubset(suppressed)
+--- a/src/life_ops/store.py
++++ b/src/life_ops/store.py
+@@ -5568,6 +5568,8 @@
+     normalized_key = str(contact_key or "").strip().lower()
+     if not normalized_key:
+         return
++    if not connection.in_transaction:
++        connection.execute("BEGIN IMMEDIATE")
+     hidden_contacts = get_hidden_mail_contacts(connection)
+     hidden_contacts[normalized_key] = str(hidden_at or _utc_now_string())
+     set_hidden_mail_contacts(connection, hidden_contacts)
+@@ -5577,6 +5579,8 @@
+     normalized_key = str(contact_key or "").strip().lower()
+     if not normalized_key:
+         return False
++    if not connection.in_transaction:
++        connection.execute("BEGIN IMMEDIATE")
+     hidden_contacts = get_hidden_mail_contacts(connection)
+     if normalized_key not in hidden_contacts:
+         return False
+--- a/src/life_ops/calendar.py
++++ b/src/life_ops/calendar.py
+@@ -12,6 +12,7 @@
+ 
+ from life_ops.agenda import build_agenda
+ from life_ops import store
++from life_ops import mail_spam
+ 
+ 
+ OPEN_CALENDAR_STATUSES = {"planned", "in_progress", "missed", "deferred"}
+@@ -1953,8 +1954,10 @@
+         params,
+     ).fetchall()
+     threads: dict[str, list[sqlite3.Row]] = {}
++    spam_rules = mail_spam.rules(connection)
+     for row in rows:
+-        threads.setdefault(_communication_thread_identity(row), []).append(row)
++        if not mail_spam.is_spam(row, spam_rules):
++            threads.setdefault(_communication_thread_identity(row), []).append(row)
+ 
+     candidates: list[sqlite3.Row] = []
+     for thread_rows in threads.values():
+--- a/src/life_ops/communication_sweep.py
++++ b/src/life_ops/communication_sweep.py
+@@ -10,7 +10,7 @@
+ from pathlib import Path
+ from typing import Any, Callable, Optional
+ 
+-from life_ops import classification, store, tracing
++from life_ops import classification, mail_spam, store, tracing
+ from life_ops.action_model import DEFAULT_MODEL as DEFAULT_SWEEP_MODEL, DEFAULT_REASONING_EFFORT
+ 
+ 
+@@ -212,7 +212,7 @@
+ 
+ 
+ def _mail_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+-    return connection.execute(
++    rows = connection.execute(
+         """
+         SELECT communications.*, organizations.name AS organization_name
+         FROM communications
+@@ -224,6 +224,8 @@
+         ORDER BY communications.happened_at ASC, communications.id ASC
+         """
+     ).fetchall()
++    spam_rules = mail_spam.rules(connection)
++    return [row for row in rows if not mail_spam.is_spam(row, spam_rules)]
+ 
+ 
+ def _candidate_rows(
+@@ -387,6 +389,7 @@
+ 
+ def _existing_loop_payload(connection: sqlite3.Connection, *, mailbox: str, limit: int = 80) -> list[dict]:
+     loops = store.list_communication_loops(connection, mailbox=mailbox, include_messages=True, limit=limit)
++    suppressed = mail_spam.suppressed_ids(connection)
+     return [
+         {
+             "id": loop["id"],
+@@ -407,6 +410,7 @@
+             "updated_at": loop["updated_at"],
+         }
+         for loop in loops
++        if not mail_spam.suppresses_all(loop["communication_ids"], suppressed)
+     ]
+ 
+ 
+--- a/src/life_ops/critical_bills.py
++++ b/src/life_ops/critical_bills.py
+@@ -13,7 +13,7 @@
+ from zoneinfo import ZoneInfo
+ 
+ from life_ops.action_model import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT
+-from life_ops import google_sync, plaid_integration, store
++from life_ops import google_sync, mail_spam, plaid_integration, store
+ from life_ops.communication_sweep import _extract_json_object, _run_codex
+ 
+ 
+@@ -311,7 +311,10 @@
+         """
+     ).fetchall()
+     candidates: list[dict] = []
++    spam_rules = mail_spam.rules(connection)
+     for row in rows:
++        if mail_spam.is_spam(row, spam_rules):
++            continue
+         try:
+             happened = store.parse_datetime(str(row["happened_at"] or ""))
+         except (TypeError, ValueError):
+--- a/src/life_ops/job_search_follow_up.py
++++ b/src/life_ops/job_search_follow_up.py
+@@ -18,7 +18,7 @@
+ from zoneinfo import ZoneInfo
+ 
+ from life_ops.action_model import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT
+-from life_ops import action_threads, store
++from life_ops import action_threads, mail_spam, store
+ 
+ 
+ ACTION_ID = "lifeops.job-search-follow-up"
+@@ -123,6 +123,8 @@
+         f"Review started at: {generated_at}\n"
+         f"Previous successful review: {previous}\n"
+         f"CMAIL database: {Path(database_path).expanduser().resolve()}\n"
++        "Honor CMAIL Spam sender rules using life_ops.mail_spam.rules and is_spam before reviewing incoming mail. "
++        "Do not create or reopen follow-ups from Spam. Preserve existing explicit job obligations; a sender rule does not complete them.\n"
+         f"Priority file: {Path(priority_path).expanduser().resolve()}\n"
+         f"Structured review file: {Path(review_path).expanduser().resolve()}\n"
+         f"Cached status file: {Path(status_path).expanduser().resolve()}\n"
+@@ -709,9 +711,15 @@
+         }
+     )
+     communication_records = _communication_records(connection, all_evidence_ids)
+-    counts = {"created": 0, "updated": 0, "reopened": 0, "completed": 0, "preserved": 0}
++    counts = {"created": 0, "updated": 0, "reopened": 0, "completed": 0, "preserved": 0, "spam_suppressed": 0}
++    sender_rules = mail_spam.rules(connection)
++    def only_spam(ids):
++        return bool(ids) and all(mail_spam.is_spam(communication_records[value], sender_rules) for value in ids)
+ 
+     for item in active_items:
++        if only_spam(item.get("sourceCommunicationIds") or []):
++            counts["spam_suppressed"] += 1
++            continue
+         key = str(item["key"])
+         existing_row = connection.execute(
+             "SELECT * FROM job_search_action_items WHERE action_id = ? AND item_key = ?",
+@@ -843,6 +851,9 @@
+         )
+ 
+     for resolution in resolved_items:
++        if only_spam(resolution.get("evidenceCommunicationIds") or []):
++            counts["spam_suppressed"] += 1
++            continue
+         key = str(resolution["key"])
+         existing_row = connection.execute(
+             "SELECT * FROM job_search_action_items WHERE action_id = ? AND item_key = ?",

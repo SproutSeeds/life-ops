@@ -108,6 +108,7 @@ class MailIngestTests(unittest.TestCase):
         self.assertTrue(row["raw_relative_path"])
         self.assertTrue(row["raw_sha256"])
         self.assertEqual("inbound", row["direction"])
+        self.assertEqual("frg", row["mail_identity"])
         self.assertEqual("Alice Example <alice@example.com>", row["external_from"])
         self.assertEqual("cody@frg.earth", row["external_to"])
         self.assertEqual("<msg-123@example.com>", row["message_id"])
@@ -129,6 +130,163 @@ class MailIngestTests(unittest.TestCase):
             relative_path=str(row["raw_relative_path"]),
         )
         self.assertIn(b"Action required: review this draft", raw_bytes)
+
+    def test_ingest_classifies_bind_my_soul_from_original_recipient(self) -> None:
+        message = EmailMessage()
+        message["From"] = "Player One <player@example.com>"
+        message["To"] = "Bind My Soul Support <support@bindmysoul.com>"
+        message["Subject"] = "Character archive question"
+        message["Message-ID"] = "<bms-support-1@example.com>"
+        message.set_content("How do I connect my archive?")
+        payload = {
+            "provider": "cloudflare-email-routing",
+            "envelope_from": "player@example.com",
+            "envelope_to": "cody@frg.earth",
+            "raw_base64": base64.b64encode(message.as_bytes()).decode("ascii"),
+            "raw_size": len(message.as_bytes()),
+        }
+
+        result = mail_ingest.ingest_cloudflare_email_payload(payload, db_path=self.db_path)
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+
+        assert row is not None
+        self.assertEqual("bind_my_soul", row["mail_identity"])
+        self.assertEqual("Bind My Soul Support <support@bindmysoul.com>", row["external_to"])
+
+    def test_ingest_tolerates_malformed_message_id_header(self) -> None:
+        raw_bytes = (
+            b"From: Microsoft Vetting Services <maccount@example.com>\r\n"
+            b"To: cody@frg.earth\r\n"
+            b"Subject: Verify your email account\r\n"
+            b"Message-ID: <[malformed-id@example.com]>\r\n"
+            b"MIME-Version: 1.0\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Please verify your email address.\r\n"
+        )
+        payload = {
+            "provider": "cloudflare-email-routing",
+            "envelope_from": "maccount@example.com",
+            "envelope_to": "cody@frg.earth",
+            "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+            "raw_size": len(raw_bytes),
+        }
+
+        result = mail_ingest.ingest_cloudflare_email_payload(payload, db_path=self.db_path)
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+
+        assert row is not None
+        self.assertEqual("<[malformed-id@example.com]>", row["message_id"])
+        self.assertEqual("Verify your email account", row["subject"])
+
+    def test_ingest_classifies_deckfound_from_original_recipient(self) -> None:
+        message = EmailMessage()
+        message["From"] = "DeckFound Customer <customer@example.com>"
+        message["To"] = "DeckFound Support <support@deckfound.com>"
+        message["Subject"] = "DeckFound install question"
+        message["Message-ID"] = "<deckfound-support-1@example.com>"
+        message.set_content("Can you help with installation?")
+        raw_bytes = message.as_bytes()
+
+        result = mail_ingest.ingest_cloudflare_email_payload(
+            {
+                "provider": "cloudflare-email-routing",
+                "envelope_from": "customer@example.com",
+                "envelope_to": "cody@frg.earth",
+                "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                "raw_size": len(raw_bytes),
+            },
+            db_path=self.db_path,
+        )
+
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+
+        assert row is not None
+        self.assertEqual("deckfound", row["mail_identity"])
+        self.assertEqual("DeckFound Support <support@deckfound.com>", row["external_to"])
+
+    def test_ingest_classifies_frg_info_from_recipient(self) -> None:
+        message = EmailMessage()
+        message["From"] = "Prospective Client <client@example.com>"
+        message["To"] = "Fractal Research Group <info@frg.earth>"
+        message["Subject"] = "General FRG inquiry"
+        message["Message-ID"] = "<frg-info-1@example.com>"
+        message.set_content("I would like to learn more about FRG.")
+        raw_bytes = message.as_bytes()
+
+        result = mail_ingest.ingest_cloudflare_email_payload(
+            {
+                "provider": "cloudflare-email-routing",
+                "envelope_from": "client@example.com",
+                "envelope_to": "info@frg.earth",
+                "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                "raw_size": len(raw_bytes),
+            },
+            db_path=self.db_path,
+        )
+
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+
+        assert row is not None
+        self.assertEqual("frg_info", row["mail_identity"])
+        self.assertEqual("Fractal Research Group <info@frg.earth>", row["external_to"])
+
+    def test_ingest_classifies_codacli_from_recipient(self) -> None:
+        message = EmailMessage()
+        message["From"] = "Customer <customer@example.com>"
+        message["To"] = "Cody <cody@codacli.com>"
+        message["Subject"] = "CodaCLI question"
+        message["Message-ID"] = "<codacli-1@example.com>"
+        message.set_content("Can you help with the CLI?")
+        raw_bytes = message.as_bytes()
+
+        result = mail_ingest.ingest_cloudflare_email_payload(
+            {
+                "provider": "cloudflare-email-routing",
+                "envelope_from": "customer@example.com",
+                "envelope_to": "cody@codacli.com",
+                "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+            },
+            db_path=self.db_path,
+        )
+
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+        assert row is not None
+        self.assertEqual("codacli", row["mail_identity"])
+        self.assertEqual("Cody <cody@codacli.com>", row["external_to"])
+
+    def test_ingest_resend_receiving_preserves_source_and_external_id(self) -> None:
+        message = EmailMessage()
+        message["From"] = "Player One <player@example.com>"
+        message["To"] = "support@bindmysoul.com"
+        message["Subject"] = "Direct receiving"
+        message["Message-ID"] = "<bms-support-resend@example.com>"
+        message.set_content("This arrived through Resend Receiving.")
+        raw_bytes = message.as_bytes()
+        result = mail_ingest.ingest_cloudflare_email_payload(
+            {
+                "provider": "resend-receiving",
+                "external_id": "resend-receiving:received-123",
+                "envelope_from": "player@example.com",
+                "envelope_to": "support@bindmysoul.com",
+                "raw_base64": base64.b64encode(raw_bytes).decode("ascii"),
+            },
+            db_path=self.db_path,
+        )
+
+        self.assertEqual("resend_inbound", result["source"])
+        self.assertEqual("resend-receiving:received-123", result["external_id"])
+        with store.open_db(self.db_path) as connection:
+            row = store.get_communication_by_id(connection, int(result["communication_id"]))
+        assert row is not None
+        self.assertEqual("resend_inbound", row["source"])
+        self.assertEqual("bind_my_soul", row["mail_identity"])
+        self.assertTrue(str(row["raw_relative_path"]).startswith("resend_inbound/"))
 
     def test_ingest_cloudflare_email_payload_preserves_inline_image_attachments(self) -> None:
         message = EmailMessage()

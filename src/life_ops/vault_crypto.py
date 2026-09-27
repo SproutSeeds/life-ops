@@ -18,6 +18,8 @@ HKDF_SALT = b"life-ops-hkdf-salt-v1"
 LOCAL_DB_STORAGE_PURPOSE = "local-db-storage-v1"
 LOCAL_DB_BACKUP_PURPOSE = "local-db-backup-v1"
 CLOUDFLARE_MAIL_ARCHIVE_PURPOSE = "cloudflare-mail-archive-v1"
+PLAID_SECRET_PURPOSE = "plaid-secret-v1"
+PLAID_ACCESS_TOKEN_PURPOSE = "plaid-access-token-v1"
 
 
 def _utc_now_iso() -> str:
