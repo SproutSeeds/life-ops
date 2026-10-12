@@ -25,7 +25,7 @@ function dateLabel(value, full = false) {
     ? { dateStyle: 'medium', timeStyle: 'short' }
     : { month: 'short', day: 'numeric' }).format(date);
 }
-function senderLabel(value) { return String(value).replace(/<[^>]*>/g, '').replace(/^"|"$/g, '').trim() || value; }
+function senderLabel(value) { return String(value).replace(/<[^>]*>/g, '').trim().replace(/^"|"$/g, '').trim() || value; }
 function mailboxAddress(value) {
   if (!value) return '';
   if (value.group) return value.group.map(mailboxAddress).join(', ');
@@ -90,6 +90,7 @@ async function openMessage(id) {
     const message = await api(`messages/${encodeURIComponent(id)}`);
     if (generation !== readingGeneration) return;
     selectedId = id;
+    window.history.replaceState(null, '', `#${id}`);
     document.querySelectorAll('.message-row').forEach((row) => row.classList.toggle('selected', row.dataset.id === id));
     $('messageSubject').textContent = message.subject; $('messageMailbox').textContent = message.mailbox;
     $('messageFrom').textContent = mailboxAddress(message.from); $('senderAvatar').textContent = (message.from?.name || message.from?.address || 'M').slice(0, 1).toUpperCase();
@@ -111,9 +112,15 @@ $('applyDates').addEventListener('click', () => load(true));
 $('loadMore').addEventListener('click', () => load());
 $('back').addEventListener('click', () => {
   readingGeneration += 1; selectedId = null; document.body.classList.remove('reading');
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
   $('message').hidden = true; $('readerPlaceholder').hidden = false;
   document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
 });
 $('allMail').addEventListener('click', () => { $('search').value = ''; $('mailbox').value = ''; $('after').value = ''; $('before').value = ''; load(true); });
 api('session').then((session) => { $('accountEmail').textContent = session.email; }).catch((error) => notice(error.message));
-load(true);
+function openLinkedMessage() {
+  const linked = window.location.hash.match(/^#(mail_\d{16})$/);
+  if (linked) return openMessage(linked[1]);
+}
+window.addEventListener('hashchange', openLinkedMessage);
+load(true).then(openLinkedMessage);

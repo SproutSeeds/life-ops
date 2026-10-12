@@ -4,6 +4,8 @@ This adds a private, read-only inbox to the existing Cloudflare email-ingest Wor
 
 The browser can search senders/subjects, filter by recipient mailbox and received date, page through older messages, read decoded message bodies, and download attachments or the original `.eml`. Its manifest supports installation as a web app on macOS and iPhone. Mail bodies are not cached for offline use. Only mail delivered to this Cloudflare Worker is available; Gmail/Fastmail account synchronization and cloud sending are separate follow-up work.
 
+Opening a message adds its archive ID to the URL fragment. This gives each message a bookmarkable link that still requires owner sign-in and survives a page reload.
+
 ## Existing service compatibility
 
 `src/legacy-worker.mjs` is generated from `life_ops.cloudflare_email._worker_source` at Life Ops commit `6ff0e1c`. It retains the inbound email handler, encryption format, record keys, `primary` object name, and signed `/api/mail/queue/*` API. The active deployment inspected before this change was `3b8232d5`; its only observed protocol-helper difference is an older constant-time signature comparison implementation.
