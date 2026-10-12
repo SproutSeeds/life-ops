@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1411">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="C-mail">
+  <title>C-mail</title>
+  <link rel="manifest" href="/cmail/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/cmail/icon-192.png">
+  <link rel="icon" href="/cmail/icon-192.png">
+  <link rel="stylesheet" href="/cmail/style.css">
+  <script src="/cmail/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/cmail/" aria-label="C-mail inbox"><span class="brandmark">C</span><span>C-mail<span class="brand-dot">.</span></span></a>
+    <span class="connection"><span class="status-dot"></span><span id="connectionText">Connecting</span></span>
+    <button id="refresh" class="quiet" type="button">↻ <span>Refresh</span></button>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar">
+      <p class="eyebrow">YOUR WORKSPACE</p>
+      <button class="nav-item active" id="allMail" type="button"><span>▤</span> All mail <span class="pill" id="total">—</span></button>
+      <div class="account-filter"><label for="mailbox">MAILBOX</label><input id="mailbox" type="email" placeholder="All connected addresses" aria-label="Filter by mailbox"></div>
+      <div class="sidebar-note"><span class="small-dot"></span><div><strong>Always within reach</strong><p>Your cloud inbox stays available when your computer is off.</p></div></div>
+      <div class="profile"><span class="avatar">C</span><div><strong>Private workspace</strong><span id="accountEmail">Signing in…</span></div></div>
+    </aside>
+    <main class="inbox" aria-label="Inbox">
+      <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1>Inbox</h1></div><span class="read-only">Read only</span></div>
+      <form id="searchForm" class="search-form"><label class="search-label" for="search">⌕</label><input type="search" id="search" placeholder="Search sender or subject" aria-label="Search sender or subject"><button type="submit" aria-label="Search">↵</button></form>
+      <details class="date-filters"><summary>Filter by date</summary><div><label>From<input type="date" id="after"></label><label>Through<input type="date" id="before"></label><button id="applyDates" type="button">Apply</button></div></details>
+      <div class="list-meta"><span id="listLabel">Latest messages</span><span id="resultCount"></span></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="messages" class="messages" aria-live="polite"><div class="empty-list">Opening your inbox…</div></div>
+      <button id="loadMore" class="load-more" type="button" hidden>Load older messages</button>
+    </main>
+    <section class="reader" aria-label="Message reader">
+      <div id="readerPlaceholder" class="reader-placeholder"><div class="envelope">✉</div><p class="eyebrow">A LITTLE SPACE TO FOCUS</p><h2>Your mail, wherever you are.</h2><p>Select a message to read it.<br>Your inbox no longer needs your home computer.</p><span class="private-badge">PRIVATE · SIGN-IN REQUIRED</span></div>
+      <article id="message" hidden>
+        <div class="reader-toolbar"><button id="back" class="quiet" type="button">← <span>Inbox</span></button><a id="downloadRaw" class="quiet" href="#">Download email ↗</a></div>
+        <div class="message-content"><p class="eyebrow" id="messageMailbox"></p><h2 id="messageSubject"></h2><div class="message-sender"><span class="avatar" id="senderAvatar">M</span><div><strong id="messageFrom"></strong><span id="messageTo"></span></div><time id="messageDate"></time></div><div id="attachments" class="attachments"></div><div id="messageBody" class="message-body"></div></div>
+      </article>
+    </section>
+  </div>
+</body>
+</html>

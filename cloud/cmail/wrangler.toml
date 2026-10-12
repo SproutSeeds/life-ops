@@ -1,0 +1,19 @@
+name = "life-ops-email-ingest"
+main = "dist/index.js"
+compatibility_date = "2026-03-27"
+workers_dev = true
+# Keep existing FORWARD_TO and account-specific settings when deploying.
+# Wrangler preserves existing secrets. Never rotate the archive master key here.
+keep_vars = true
+
+[build]
+command = "npm run build"
+
+[[durable_objects.bindings]]
+name = "MAIL_QUEUE"
+class_name = "MailQueue"
+
+# This is the existing namespace's migration, not a new namespace or class.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MailQueue"]
