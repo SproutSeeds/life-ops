@@ -6,6 +6,10 @@ workers_dev = true
 # Wrangler preserves existing secrets. Never rotate the archive master key here.
 keep_vars = true
 
+[[routes]]
+pattern = "cmail.frg.earth"
+custom_domain = true
+
 [build]
 command = "npm run build"
 

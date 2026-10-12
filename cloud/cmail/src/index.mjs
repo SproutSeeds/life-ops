@@ -9,6 +9,7 @@ import largeIcon from '../web/icon-512.png';
 
 export { MailQueue };
 const PREFIX = '/cmail';
+const PUBLIC_HOSTNAME = 'cmail.frg.earth';
 const securityHeaders = {
   'Cache-Control': 'private, no-store',
   'X-Content-Type-Options': 'nosniff',
@@ -28,23 +29,28 @@ export function createWorker(checkAccess = authorize) {
     email: legacyWorker.email,
     async fetch(request, env, context) {
       const url = new URL(request.url);
-      if (url.pathname !== PREFIX && !url.pathname.startsWith(`${PREFIX}/`)) {
+      const publicHostname = url.hostname === PUBLIC_HOSTNAME;
+      const publicRoot = publicHostname && url.pathname === '/';
+      if (!publicRoot && url.pathname !== PREFIX && !url.pathname.startsWith(`${PREFIX}/`)) {
         return legacyWorker.fetch(request, env, context);
       }
       const access = await checkAccess(request, env);
       if (!access.ok) return json({ error: access.error }, access.status);
       if (request.method !== 'GET') return json({ error: 'read_only' }, 405);
       if (url.pathname === PREFIX) return response('', undefined, 302, { Location: `${PREFIX}/` });
-      if (url.pathname === `${PREFIX}/`) return response(page, 'text/html; charset=utf-8');
+      if (publicRoot || url.pathname === `${PREFIX}/`) {
+        return response(publicHostname ? page.replace('href="/cmail/"', 'href="/"') : page, 'text/html; charset=utf-8');
+      }
       if (url.pathname === `${PREFIX}/style.css`) return response(styles, 'text/css; charset=utf-8');
       if (url.pathname === `${PREFIX}/app.js`) return response(client, 'text/javascript; charset=utf-8');
       if (url.pathname === `${PREFIX}/icon-192.png`) return response(bytes(icon), 'image/png');
       if (url.pathname === `${PREFIX}/icon-512.png`) return response(bytes(largeIcon), 'image/png');
       if (url.pathname === `${PREFIX}/manifest.webmanifest`) {
+        const home = publicHostname ? '/' : `${PREFIX}/`;
         return response(JSON.stringify({
-          id: `${PREFIX}/`, name: 'C-mail', short_name: 'C-mail',
+          id: home, name: 'C-mail', short_name: 'C-mail',
           description: 'Your connected mail, available wherever you are.',
-          start_url: `${PREFIX}/`, scope: `${PREFIX}/`, display: 'standalone',
+          start_url: home, scope: home, display: 'standalone',
           background_color: '#0d1411', theme_color: '#0d1411',
           icons: [192, 512].map((size) => ({ src: `${PREFIX}/icon-${size}.png`, sizes: `${size}x${size}`, type: 'image/png', purpose: 'any' })),
         }), 'application/manifest+json');

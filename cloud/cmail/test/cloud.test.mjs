@@ -119,6 +119,15 @@ test('missing sign-in configuration or identity fails closed before accessing st
     assert.equal((await worker.fetch(request, {})).status, 503);
     assert.equal((await worker.fetch(request, accessEnv)).status, 401);
   }
+  const publicRoot = new Request('https://cmail.frg.earth/');
+  assert.equal((await worker.fetch(publicRoot, {})).status, 503);
+  assert.equal((await worker.fetch(publicRoot, accessEnv)).status, 401);
+  const otherOwner = new Request(publicRoot, { headers: { 'Cf-Access-Jwt-Assertion': await token({ email: 'someone-else@example.com' }) } });
+  assert.equal((await worker.fetch(otherOwner, accessEnv)).status, 403);
+  const owner = new Request(publicRoot, { headers: { 'Cf-Access-Jwt-Assertion': await token() } });
+  const page = await worker.fetch(owner, accessEnv);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /<title>C-mail<\/title>/);
 });
 
 test('cloud routes are read-only, private, and preserve the signed sync API', async () => {
