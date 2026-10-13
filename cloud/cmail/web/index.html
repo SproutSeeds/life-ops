@@ -23,13 +23,13 @@
   <div class="workspace">
     <aside class="sidebar">
       <p class="eyebrow">YOUR WORKSPACE</p>
-      <button class="nav-item active" id="allMail" type="button"><span>▤</span> All mail <span class="pill" id="total">—</span></button>
-      <div class="account-filter"><label for="mailbox">MAILBOX</label><input id="mailbox" type="email" placeholder="All connected addresses" aria-label="Filter by mailbox"></div>
+      <button class="nav-item active" id="allMail" type="button"><span>▤</span> All inboxes <span class="pill" id="total">—</span></button>
       <div class="sidebar-note"><span class="small-dot"></span><div><strong>Always within reach</strong><p>Your cloud inbox stays available when your computer is off.</p></div></div>
       <div class="profile"><span class="avatar">C</span><div><strong>Private workspace</strong><span id="accountEmail">Signing in…</span></div></div>
     </aside>
     <main class="inbox" aria-label="Inbox">
-      <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1>Inbox</h1></div><span class="read-only">Read only</span></div>
+      <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1 id="inboxTitle">All inboxes</h1></div><span class="read-only">Read only</span></div>
+      <div class="inbox-switcher"><label for="mailbox">INBOX</label><select id="mailbox" aria-label="Choose inbox" aria-describedby="mailboxStatus"><option value="">All inboxes</option></select><p id="mailboxStatus" role="status">Loading inbox list…</p></div>
       <form id="searchForm" class="search-form"><label class="search-label" for="search">⌕</label><input type="search" id="search" placeholder="Search all mail" aria-label="Search messages, senders, and subjects"><button type="submit" aria-label="Search">↵</button></form>
       <details class="date-filters"><summary>Filter by date</summary><div><label>From<input type="date" id="after"></label><label>Through<input type="date" id="before"></label><button id="applyDates" type="button">Apply</button></div></details>
       <div class="list-meta"><span id="listLabel" role="status">Latest messages</span><span id="resultCount"></span><button id="stopSearch" type="button" hidden>Stop</button></div>

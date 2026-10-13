@@ -68,6 +68,21 @@ test('empty filtered pages retain a cursor; mailbox and date filters apply', asy
   assert.equal(next.next_cursor, null);
 });
 
+test('individual inboxes use the delivery address, preserve search scope, and combine without changing mail', async () => {
+  const { state, legacy, archive } = setup();
+  const owner = await legacy.enqueue(fixture('Shared topic', 1));
+  // The visible To header can differ for forwarded or Bcc mail.
+  const second = await legacy.enqueue(fixture('Shared topic', 2, { envelope_to: 'Second@Example.com' }));
+  await legacy.ack({ ids: [second.id] });
+  const snapshot = structuredClone([...state.storage.values]);
+  const filtered = await archive.listArchive({ mailbox: 'SECOND@example.com', query: 'shared' });
+  assert.deepEqual(filtered.items.map(item => item.id), [second.id]);
+  assert.deepEqual((await archive.listArchive({ mailbox: 'owner@example.com' })).items.map(item => item.id), [owner.id]);
+  assert.deepEqual((await archive.listArchive({})).items.map(item => item.id), [second.id, owner.id]);
+  assert.equal((await archive.listArchive({ mailbox: 'empty@example.com' })).items.length, 0);
+  assert.deepEqual([...state.storage.values], snapshot);
+});
+
 test('encoded headers are searchable and a malformed archive does not hide intact mail', async () => {
   const { state, legacy, archive } = setup();
   await legacy.enqueue(fixture('=?UTF-8?B?SW50ZXJ2aWV3IOKckw==?=', 1));
@@ -132,7 +147,7 @@ test('authentication verifies signature and restricts access to the configured o
 
 test('missing sign-in configuration or identity fails closed before accessing storage', async () => {
   const worker = createWorker(authorize);
-  for (const path of ['/cmail', '/cmail/', '/cmail/api/messages', '/cmail/api/messages/mail_0000000000000001/raw']) {
+  for (const path of ['/cmail', '/cmail/', '/cmail/api/session', '/cmail/api/messages', '/cmail/api/messages/mail_0000000000000001/raw']) {
     const request = new Request(`https://mail.example.com${path}`);
     assert.equal((await worker.fetch(request, {})).status, 503);
     assert.equal((await worker.fetch(request, accessEnv)).status, 401);
@@ -146,6 +161,17 @@ test('missing sign-in configuration or identity fails closed before accessing st
   const page = await worker.fetch(owner, accessEnv);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /<title>C-mail<\/title>/);
+});
+
+test('authenticated inbox choices include configured addresses even before mail arrives', async () => {
+  const worker = createWorker(async () => ({ ok: true, email: 'owner@example.com' }));
+  const config = { CMAIL_MAILBOXES: ' Owner@Example.com,empty@example.com\nowner@example.com, bad address, <bad@example.com>' };
+  const response = await worker.fetch(new Request('https://mail.example.com/cmail/api/session'), config);
+  const session = await response.json();
+  assert.equal(session.email, 'owner@example.com');
+  assert.deepEqual(session.mailboxes, ['owner@example.com', 'empty@example.com']);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal((await worker.fetch(new Request('https://mail.example.com/cmail/api/session', { method: 'POST' }), config)).status, 405);
 });
 
 test('cloud routes are read-only, private, and preserve the signed sync API', async () => {

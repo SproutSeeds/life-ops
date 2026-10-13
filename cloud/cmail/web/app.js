@@ -9,6 +9,39 @@ let scanned = 0;
 let failed = 0;
 let loadController = null;
 let signingOut = false;
+const knownMailboxes = new Set();
+
+function addMailboxes(addresses) {
+  for (const value of addresses) {
+    const address = String(value || '').trim().toLowerCase();
+    if (!address || knownMailboxes.has(address)) continue;
+    knownMailboxes.add(address);
+    const option = document.createElement('option'); option.value = address; option.textContent = address;
+    $('mailbox').append(option);
+  }
+  updateInboxLabel();
+}
+function updateInboxLabel() {
+  const mailbox = $('mailbox').value;
+  $('inboxTitle').textContent = mailbox ? 'Inbox' : 'All inboxes';
+  $('allMail').classList.toggle('active', !mailbox);
+  $('search').placeholder = mailbox ? 'Search this inbox' : 'Search all inboxes';
+  $('mailboxStatus').textContent = mailbox ? 'Showing mail sent to this address.'
+    : `${knownMailboxes.size} ${knownMailboxes.size === 1 ? 'address' : 'addresses'} · One combined inbox`;
+}
+function closeMessage() {
+  readingGeneration += 1; selectedId = null; document.body.classList.remove('reading');
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  $('message').hidden = true; $('readerPlaceholder').hidden = false;
+  document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
+}
+function switchInbox() {
+  const url = new URL(window.location.href);
+  if ($('mailbox').value) url.searchParams.set('mailbox', $('mailbox').value);
+  else url.searchParams.delete('mailbox');
+  url.hash = ''; window.history.replaceState(null, '', url);
+  closeMessage(); updateInboxLabel(); load(true);
+}
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 function connected(value) { $('connectionText').textContent = value; }
@@ -59,13 +92,15 @@ async function load(reset = false) {
   const { signal } = loadController;
   loading = true; $('loadMore').disabled = true; $('refresh').disabled = true;
   const query = $('search').value.trim();
-  const parameters = new URLSearchParams({ query, mailbox: $('mailbox').value.trim(), after: $('after').value, before: $('before').value });
-  const searching = [...parameters.values()].some(Boolean);
+  const mailbox = $('mailbox').value;
+  const parameters = new URLSearchParams({ query, mailbox, after: $('after').value, before: $('before').value });
+  const searching = Boolean(query || $('after').value || $('before').value);
+  const startingShown = shown;
   let interrupted = false;
   connected(searching ? 'Searching mail' : 'Loading mail');
-  $('listLabel').textContent = searching ? 'Searching all mail…' : 'Latest messages';
+  $('listLabel').textContent = searching ? (mailbox ? 'Searching this inbox…' : 'Searching all inboxes…') : 'Loading messages…';
   $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
-  $('stopSearch').hidden = !searching;
+  $('stopSearch').hidden = false;
   $('loadMore').hidden = true;
   try {
     do {
@@ -74,25 +109,32 @@ async function load(reset = false) {
       const result = await api(`messages?${parameters}`, signal);
       if (generation !== requestGeneration || signingOut) return;
       document.querySelector('.empty-list')?.remove();
+      addMailboxes(result.items.map((item) => item.mailbox));
       result.items.forEach(appendRow); shown += result.items.length; cursor = result.next_cursor;
       scanned += result.scanned; failed += result.failed;
       $('total').textContent = new Intl.NumberFormat().format(result.total_stored);
       $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
       if (searching) $('listLabel').textContent = `Searching ${scanned.toLocaleString()} / ${Number(result.total_stored).toLocaleString()}`;
+      else $('listLabel').textContent = 'Latest messages';
       if (failed) notice('Some messages could not be searched. Results may be incomplete.');
       if (!shown && searching && cursor) addText($('messages'), 'div', 'empty-list', 'Searching older messages… Results will appear here as they are found.');
-    } while (searching && cursor);
+      else if (!searching && shown === startingShown && cursor) {
+        $('listLabel').textContent = 'Looking for messages…';
+        addText($('messages'), 'div', 'empty-list', 'Looking through older mail for this inbox…');
+      }
+    } while (cursor && (searching || shown === startingShown));
     if (searching) $('listLabel').textContent = failed ? 'Search finished with errors' : 'Search complete';
     if (!shown) {
       document.querySelector('.empty-list')?.remove();
-      addText($('messages'), 'div', 'empty-list', failed ? 'No matches found in the readable messages. Some messages could not be searched.' : 'No messages match these filters.');
+      addText($('messages'), 'div', 'empty-list', failed ? 'No matches found in the readable messages. Some messages could not be searched.'
+        : searching ? 'No messages match these filters.' : mailbox ? 'No messages have arrived for this address yet.' : 'No messages have arrived yet.');
     }
     connected('Cloud inbox');
   } catch (error) {
     if (generation !== requestGeneration || signingOut) return;
     interrupted = true;
     if (error.name === 'AbortError') {
-      $('listLabel').textContent = 'Search paused'; connected('Search paused');
+      $('listLabel').textContent = searching ? 'Search paused' : 'Loading paused'; connected(searching ? 'Search paused' : 'Loading paused');
     } else {
       notice(error.message); connected('Connection interrupted');
       if (searching) $('listLabel').textContent = 'Search interrupted';
@@ -101,13 +143,13 @@ async function load(reset = false) {
       document.querySelector('.empty-list')?.remove();
       addText($('messages'), 'div', 'empty-list', searching
         ? 'The search has not finished. Choose “Continue search” to keep looking.'
-        : 'Mail could not be loaded. Please try Refresh.');
+        : error.name === 'AbortError' ? 'Loading paused. Choose “Continue loading” to keep looking.' : 'Mail could not be loaded. Please try Refresh.');
     }
   } finally {
     if (generation === requestGeneration && !signingOut) {
       loading = false; $('loadMore').disabled = false; $('refresh').disabled = false; $('stopSearch').hidden = true;
-      $('loadMore').hidden = !cursor && !(searching && interrupted);
-      $('loadMore').textContent = searching ? 'Continue search' : 'Load older messages';
+      $('loadMore').hidden = !cursor && !interrupted;
+      $('loadMore').textContent = searching ? 'Continue search' : interrupted ? 'Continue loading' : 'Load older messages';
     }
   }
 }
@@ -148,7 +190,7 @@ async function openMessage(id) {
 }
 $('searchForm').addEventListener('submit', (event) => { event.preventDefault(); load(true); });
 $('refresh').addEventListener('click', () => load(true));
-$('mailbox').addEventListener('change', () => load(true));
+$('mailbox').addEventListener('change', switchInbox);
 $('applyDates').addEventListener('click', () => load(true));
 $('loadMore').addEventListener('click', () => load());
 $('stopSearch').addEventListener('click', () => loadController?.abort());
@@ -159,17 +201,13 @@ $('signOut').addEventListener('click', (event) => {
   document.body.replaceChildren(); document.title = 'Signing out · C-mail';
 });
 window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
-$('back').addEventListener('click', () => {
-  readingGeneration += 1; selectedId = null; document.body.classList.remove('reading');
-  window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  $('message').hidden = true; $('readerPlaceholder').hidden = false;
-  document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
-});
-$('allMail').addEventListener('click', () => { $('search').value = ''; $('mailbox').value = ''; $('after').value = ''; $('before').value = ''; load(true); });
+$('back').addEventListener('click', closeMessage);
+$('allMail').addEventListener('click', () => { $('search').value = ''; $('mailbox').value = ''; $('after').value = ''; $('before').value = ''; switchInbox(); });
 api('session').then((session) => {
   if (signingOut) return;
   $('accountEmail').textContent = session.email;
   $('signOut').title = `Sign out ${session.email}`;
+  addMailboxes(session.mailboxes || []);
 }).catch((error) => { if (!signingOut) notice(error.message); });
 function openLinkedMessage() {
   if (signingOut) return;
@@ -177,4 +215,7 @@ function openLinkedMessage() {
   if (linked) return openMessage(linked[1]);
 }
 window.addEventListener('hashchange', openLinkedMessage);
+const initialMailbox = new URLSearchParams(window.location.search).get('mailbox') || '';
+if (initialMailbox) { addMailboxes([initialMailbox]); $('mailbox').value = initialMailbox.trim().toLowerCase(); }
+updateInboxLabel();
 load(true).then(openLinkedMessage);

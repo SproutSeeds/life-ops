@@ -55,7 +55,12 @@ export function createWorker(checkAccess = authorize) {
           icons: [192, 512].map((size) => ({ src: `${PREFIX}/icon-${size}.png`, sizes: `${size}x${size}`, type: 'image/png', purpose: 'any' })),
         }), 'application/manifest+json');
       }
-      if (url.pathname === `${PREFIX}/api/session`) return json({ email: access.email, read_only: true });
+      if (url.pathname === `${PREFIX}/api/session`) {
+        const mailboxes = [...new Set(String(env.CMAIL_MAILBOXES || '').split(/[,\n]/)
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value)))];
+        return json({ email: access.email, mailboxes, read_only: true });
+      }
       let path;
       let parameters;
       let download = false;

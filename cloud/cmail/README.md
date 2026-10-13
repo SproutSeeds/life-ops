@@ -6,6 +6,8 @@ This adds a private, read-only inbox to the existing Cloudflare email-ingest Wor
 
 The browser can search senders, subjects, recipients, and decoded message bodies, filter by recipient mailbox and received date, page through older messages, read decoded message bodies, and download attachments or the original `.eml`. Its manifest supports installation as a web app on macOS and iPhone. Mail bodies are not cached for offline use. Only mail delivered to this Cloudflare Worker is available; Gmail/Fastmail account synchronization and cloud sending are separate follow-up work.
 
+Use the **Inbox** dropdown above the message list on desktop or phone to select an address, or choose **All inboxes** for the combined view. Search and date filters apply within the selected inbox. Switching inboxes closes the previous message, and the selected address is retained in the page URL for reloads and bookmarks. An individual inbox loads recent matches first and can page through older messages; searches still scan the full archive.
+
 Opening a message adds its archive ID to the URL fragment. This gives each message a bookmarkable link that still requires owner sign-in and survives a page reload.
 
 ## Existing service compatibility
@@ -43,6 +45,9 @@ Configure these Worker environment values:
 | `CMAIL_ACCESS_TEAM_DOMAIN` | The exact `<team>.cloudflareaccess.com` domain, without a URL scheme. |
 | `CMAIL_ACCESS_AUD` | The Access application's audience tag. |
 | `CMAIL_OWNER_EMAIL` | The exact email allowed by the Access policy. |
+| `CMAIL_MAILBOXES` | Comma- or newline-separated addresses routed to this Worker, for the inbox selector. Include connected addresses that have not received mail yet. This list does not configure routing or grant access. |
+
+Keep the mailbox list in sync when adding or removing email routes. It is returned only by the authenticated session API; addresses found in loaded mail are also added to the selector. Account-specific addresses belong in the Worker environment, not the public repository.
 
 The Worker independently verifies the Access JWT signature, issuer, audience, expiry, required identity claims, and owner email. Missing configuration or an invalid token fails closed, including through alternate Worker URLs. All inbox responses use `Cache-Control: private, no-store`; message HTML is converted to text, and remote images/scripts are never rendered.
 

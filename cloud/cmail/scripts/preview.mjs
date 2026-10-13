@@ -11,7 +11,10 @@ const storage = {
     if (reverse) list.reverse(); return new Map(list.slice(0, limit));
   },
 };
-const env = { LIFE_OPS_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url') };
+const env = {
+  LIFE_OPS_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
+  CMAIL_MAILBOXES: 'preview@example.com,team@example.com,empty@example.com',
+};
 const queue = new MailQueue({ storage }, env);
 env.MAIL_QUEUE = { getByName: () => ({ fetch: (url, options) => queue.fetch(new Request(url, options)) }) };
 for (const [index, [from, subject, text]] of [
@@ -20,8 +23,9 @@ for (const [index, [from, subject, text]] of [
   ['Calendar <calendar@example.com>', 'Tomorrow’s conversation', 'A reminder for tomorrow’s conversation.\n\nTuesday, October 13\n11:00–11:30 AM Eastern\n\nThis is sample data for a local interface check.'],
   ['Jordan Lee <jordan@example.com>', 'Interview details and what to expect', 'Hi Cody,\n\nLooking forward to our conversation tomorrow. We’ll discuss the Orchard project with Rowan.\n\nPlease bring any questions you have for the team.\n\nBest,\nJordan\n\nSample message — no real interview information.'],
 ].entries()) {
-  const raw = `From: ${from}\r\nTo: preview@example.com\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`;
-  await queue.enqueue({ headers: { from, to: 'preview@example.com', subject }, envelope_to: 'preview@example.com', raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date(Date.now() - (3 - index) * 3600000).toISOString() });
+  const mailbox = index === 3 ? 'team@example.com' : 'preview@example.com';
+  const raw = `From: ${from}\r\nTo: ${mailbox}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`;
+  await queue.enqueue({ headers: { from, to: mailbox, subject }, envelope_to: mailbox, raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date(Date.now() - (3 - index) * 3600000).toISOString() });
 }
 const worker = createWorker(async () => ({ ok: true, email: 'preview@example.com' }));
 // Put the sample conversation beyond the first archive scan to exercise search.
