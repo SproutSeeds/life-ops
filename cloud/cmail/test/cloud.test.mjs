@@ -220,6 +220,27 @@ test('calendar attachment contents and exact raw messages can be recovered', asy
   await assert.rejects(archive.readArchiveMessage({ id, attachment: -1 }));
 });
 
+test('thread metadata scans all inboxes and archived deliveries without changing flags or mail', async () => {
+  const { state, legacy, archive } = setup();
+  const root = await legacy.enqueue(fixture('Root message', 1));
+  await legacy.ack({ ids: [root.id] });
+  await archive.applyAction({ ids:[root.id], action:'archive' });
+  for (let i = 2; i < 45; i++) await legacy.enqueue(fixture('Unrelated mail', i));
+  const raw = 'From: sender@example.com\r\nTo: second@example.com\r\nSubject: Re: Root message\r\nMessage-ID: <reply@example.com>\r\nIn-Reply-To: <message-1@example.com>\r\nReferences: <message-1@example.com>\r\n\r\nPrivate reply body';
+  const reply = await legacy.enqueue(fixture('Re: Root message', 45, { envelope_to:'second@example.com', raw_base64:Buffer.from(raw).toString('base64') }));
+  const snapshot = structuredClone([...state.storage.values]);
+  const first = await archive.listThreadIndex(); assert.equal(first.scanned,40); assert(first.next_cursor);
+  const second = await archive.listThreadIndex({ cursor:first.next_cursor }); assert.equal(second.next_cursor,null);
+  const nodes = [...first.items,...second.items]; assert.equal(nodes.length,45);
+  const replyNode = nodes.find(node=>node.id===reply.id); assert.equal(replyNode.in_reply_to,'<message-1@example.com>'); assert.equal(replyNode.references,'<message-1@example.com>');
+  assert(nodes.some(node=>node.id===root.id)); assert(!JSON.stringify(nodes).includes('Private reply body'));
+  const message = await archive.readArchiveMessage({ id:reply.id }); assert.equal(message.in_reply_to,'<message-1@example.com>');
+  assert.deepEqual([...state.storage.values],snapshot);
+  await assert.rejects(archive.listThreadIndex({ cursor:'bad' }));
+  const broken = await state.storage.get(`mail:${root.id}`); broken.payload_ref.prefix='missing:'; await state.storage.put(`mail:${root.id}`,broken);
+  const partial = await archive.listThreadIndex({ cursor:first.next_cursor }); assert.equal(partial.failed,1);
+});
+
 const { privateKey, publicKey } = await generateKeyPair('RS256');
 const publicJwk = await exportJWK(publicKey); publicJwk.kid = 'fixture';
 const authorize = createAuthorizer(() => createLocalJWKSet({ keys: [publicJwk] }));
@@ -242,7 +263,7 @@ test('authentication verifies signature and restricts access to the configured o
 
 test('missing sign-in configuration or identity fails closed before accessing storage', async () => {
   const worker = createWorker(authorize);
-  for (const path of ['/cmail', '/cmail/', '/cmail/api/session', '/cmail/api/messages', '/cmail/api/messages/mail_0000000000000001/raw']) {
+  for (const path of ['/cmail', '/cmail/', '/cmail/api/session', '/cmail/api/messages', '/cmail/api/thread-index', '/cmail/api/messages/mail_0000000000000001/raw']) {
     const request = new Request(`https://mail.example.com${path}`);
     assert.equal((await worker.fetch(request, {})).status, 503);
     assert.equal((await worker.fetch(request, accessEnv)).status, 401);
@@ -277,6 +298,9 @@ test('mail content routes are read-only, private, and preserve the signed sync A
   const list = await worker.fetch(new Request('https://mail.example.com/cmail/api/messages'), workerEnv);
   assert.equal((await list.json()).items[0].id, id);
   assert.equal(list.headers.get('cache-control'), 'private, no-store');
+  const threadIndex = await worker.fetch(new Request('https://mail.example.com/cmail/api/thread-index'), workerEnv);
+  assert.equal(threadIndex.headers.get('cache-control'), 'private, no-store'); assert.equal((await threadIndex.json()).items[0].id,id);
+  assert.equal((await worker.fetch(new Request('https://mail.example.com/cmail/api/thread-index', { method:'POST' }), workerEnv)).status,405);
   assert.equal((await worker.fetch(new Request('https://mail.example.com/cmail/api/messages', { method: 'POST' }), workerEnv)).status, 405);
   assert.equal((await worker.fetch(new Request('https://mail.example.com/api/mail/queue/pull', { method: 'POST', body: '{}' }), workerEnv)).status, 401);
   const body = '{}'; const timestamp = new Date().toISOString();

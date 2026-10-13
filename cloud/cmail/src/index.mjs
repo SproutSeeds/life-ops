@@ -89,7 +89,9 @@ export function createWorker(checkAccess = authorize) {
       let path;
       let parameters;
       let download = false;
-      if (url.pathname === `${PREFIX}/api/messages`) {
+      if (url.pathname === `${PREFIX}/api/thread-index`) {
+        path = '/archive/thread-index'; parameters = { cursor: url.searchParams.get('cursor') || '' };
+      } else if (url.pathname === `${PREFIX}/api/messages`) {
         path = '/archive/list';
         parameters = Object.fromEntries(['query', 'mailbox', 'cursor', 'after', 'before', 'limit', 'view'].map((key) => [key, url.searchParams.get(key) || '']));
       } else {

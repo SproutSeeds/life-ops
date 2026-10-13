@@ -33,7 +33,8 @@ for (const [index, [from, subject, text]] of [
   ['Jordan Lee <jordan@example.com>', 'Interview details and what to expect', 'Hi Cody,\n\nLooking forward to our conversation tomorrow. We’ll discuss the Orchard project with Rowan.\n\nPlease bring any questions you have for the team.\n\nBest,\nJordan\n\nSample message — no real interview information.'],
 ].entries()) {
   const mailbox = index === 3 ? 'team@example.com' : 'preview@example.com';
-  const raw = `From: ${from}\r\nTo: ${mailbox}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`;
+  const threadHeaders = index === 1 ? 'Message-ID: <sample-project-1@example.com>\r\nDate: Mon, 12 Oct 2026 10:00:00 +0000\r\n' : '';
+  const raw = `From: ${from}\r\nTo: ${mailbox}\r\nSubject: ${subject}\r\n${threadHeaders}Content-Type: text/plain; charset=utf-8\r\n\r\n${text}`;
   await queue.enqueue({ headers: { from, to: mailbox, subject }, envelope_to: mailbox, raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date(Date.now() - (3 - index) * 3600000).toISOString() });
 }
 const worker = createWorker(async () => ({ ok: true, email: 'preview@example.com' }));
@@ -44,12 +45,25 @@ for (let i = 0; i < 123; i++) {
   const { id } = await queue.enqueue({ headers: { from: 'updates@example.com', to: 'preview@example.com', subject }, envelope_to: 'preview@example.com', raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date().toISOString() });
   if (i % 3 === 0) await queue.setReadStatus({ id, read: true });
 }
+for (const [index, [from, text]] of [
+  ['Sam Rivera <sam@example.com>', 'Thanks, Alex. Let’s bring the café sketches.\n\nSam'],
+  ['Alex Chen <alex@example.com>', 'Confirmed for Thursday.\n\nOn Monday, Sam wrote:\n> Thanks, Alex. Let’s bring the café sketches.\n\nAlex'],
+].entries()) {
+  const subject='Re: A few thoughts on the project';
+  const raw=`From: ${from}\r\nTo: preview@example.com\r\nSubject: ${subject}\r\nMessage-ID: <sample-project-${index+2}@example.com>\r\nIn-Reply-To: <sample-project-${index+1}@example.com>\r\nReferences: <sample-project-1@example.com>${index ? ' <sample-project-2@example.com>' : ''}\r\nDate: Mon, 12 Oct 2026 ${11+index}:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`;
+  await queue.enqueue({ headers:{from,subject}, envelope_to:'preview@example.com',raw_base64:Buffer.from(raw).toString('base64'),received_at:new Date().toISOString() });
+}
 http.createServer(async (incoming, outgoing) => {
   const chunks = []; for await (const chunk of incoming) chunks.push(chunk);
   const response = await worker.fetch(new Request(`http://127.0.0.1:8788${incoming.url}`, {
     method: incoming.method, headers: incoming.headers,
     body: ['GET', 'HEAD'].includes(incoming.method) ? undefined : Buffer.concat(chunks),
   }), env);
+  let body = Buffer.from(await response.arrayBuffer());
+  // Simulate a rejected clipboard write in this isolated preview only.
+  if (process.env.CMAIL_PREVIEW_DENY_CLIPBOARD === '1' && incoming.url === '/cmail/app.js') {
+    body = Buffer.from(body.toString().replace('navigator.clipboard.writeText(text)', 'Promise.reject(new Error("Preview clipboard denied"))'));
+  }
   outgoing.writeHead(response.status, Object.fromEntries(response.headers));
-  outgoing.end(Buffer.from(await response.arrayBuffer()));
+  outgoing.end(body);
 }).listen(8788, '127.0.0.1', () => console.log('Local sample mailbox: http://127.0.0.1:8788/cmail/'));

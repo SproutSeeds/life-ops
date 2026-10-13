@@ -1,3 +1,5 @@
+import { conversationNodes, formatMessage, formatThread } from './thread.mjs';
+
 const $ = (id) => document.getElementById(id);
 let cursor = null;
 let selectedId = null;
@@ -25,6 +27,18 @@ let failed = 0;
 let loadController = null;
 let signingOut = false;
 const knownMailboxes = new Set();
+let conversationGeneration = 0;
+let conversationController = null;
+let conversationMessages = [];
+let threadIndexCache = null;
+
+function resetConversation() {
+  conversationGeneration += 1; conversationController?.abort(); conversationController = null;
+  conversationMessages = []; $('threadMessages').replaceChildren();
+  $('copyThread').disabled = true; $('threadStatus').textContent = '';
+  $('retryThread').hidden = true;
+  $('copyFallback').close(); $('copyText').value = '';
+}
 
 function addMailboxes(addresses) {
   for (const value of addresses) {
@@ -44,6 +58,7 @@ function updateInboxLabel() {
   $('inboxTitle').title = mailbox || 'All connected addresses';
 }
 function closeMessage() {
+  resetConversation();
   readingGeneration += 1; selectedId = null; selectedMessage = null; document.body.classList.remove('reading');
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
   $('message').hidden = true; $('readerPlaceholder').hidden = false;
@@ -294,8 +309,8 @@ async function applyBulkAction(action) {
     }
   }
 }
-function renderBody(text) {
-  const target = $('messageBody'); target.replaceChildren();
+function renderBody(text, target = $('messageBody')) {
+  target.replaceChildren();
   const matches = String(text).matchAll(/https?:\/\/[^\s<>"\u0000-\u001f]+/g);
   let offset = 0;
   for (const match of matches) {
@@ -305,6 +320,86 @@ function renderBody(text) {
     offset = match.index + match[0].length;
   }
   target.append(document.createTextNode(text.slice(offset)));
+}
+
+async function copyText(text, button, label) {
+  const id = selectedId; const original = button.textContent;
+  button.disabled = true; button.textContent = 'Copying…';
+  try {
+    // Invoke immediately from the click so Safari retains user activation.
+    await navigator.clipboard.writeText(text);
+    if (!signingOut && selectedId === id) actionStatus(`${label} copied.`);
+  } catch {
+    if (!signingOut && selectedId === id) {
+      $('copyText').value = text; $('copyFallback').showModal(); $('copyText').focus(); $('copyText').select();
+    }
+  } finally {
+    button.textContent = original;
+    button.disabled = button.id === 'copyThread' ? !conversationMessages.length : false;
+  }
+}
+
+function renderConversation() {
+  $('threadMessages').replaceChildren();
+  const others = conversationMessages.filter(message => message.id !== selectedId);
+  if (!others.length) return;
+  addText($('threadMessages'), 'h3', 'thread-heading', 'Other messages in this conversation');
+  for (const message of others) {
+    const card = addText($('threadMessages'), 'article', 'thread-message', '');
+    const heading = addText(card, 'div', 'thread-message-heading', '');
+    const sender = addText(heading, 'div', '', '');
+    addText(sender, 'strong', '', mailboxAddress(message.from));
+    addText(sender, 'time', '', dateLabel(message.date, true));
+    const copy = addText(heading, 'button', 'quiet copy-message', 'Copy message'); copy.type = 'button';
+    copy.setAttribute('aria-label', `Copy message from ${mailboxAddress(message.from)}`);
+    copy.addEventListener('click', () => copyText(formatMessage(message), copy, 'Message'));
+    const detail = addText(card, 'details', '', '');
+    addText(detail, 'summary', '', message.subject);
+    const body = addText(detail, 'div', 'message-body', ''); renderBody(message.text, body);
+  }
+}
+
+async function loadConversation(message) {
+  resetConversation();
+  const generation = conversationGeneration;
+  conversationController = new AbortController(); const { signal } = conversationController;
+  const current = () => !signingOut && selectedId === message.id && generation === conversationGeneration;
+  $('threadStatus').textContent = 'Finding conversation…';
+  try {
+    let index = threadIndexCache;
+    if (!index || index.total !== totalStored) {
+      const nodes = []; let next = null; let scanned = 0; let failed = 0; let total = totalStored;
+      do {
+        const page = await api(`thread-index${next ? `?cursor=${encodeURIComponent(next)}` : ''}`, signal);
+        if (!current()) return;
+        nodes.push(...page.items); scanned += page.scanned; failed += page.failed; total = Number(page.total_stored); next = page.next_cursor;
+        $('threadStatus').textContent = `Finding conversation… ${scanned.toLocaleString()} / ${total.toLocaleString()}`;
+      } while (next);
+      if (failed) throw new Error('Some mail could not be checked. Copy message is available; retry to prepare the complete conversation.');
+      index = { nodes, total }; threadIndexCache = index;
+    }
+    // The opened message may have arrived just after the archive scan started.
+    const nodes = index.nodes.filter(node => node.id !== message.id);
+    nodes.push(message);
+    const conversation = conversationNodes(nodes, message.id);
+    const messages = new Map([[message.id, message]]);
+    const needed = conversation.nodes.filter(node => node.id !== message.id);
+    for (let offset = 0; offset < needed.length; offset += 3) {
+      const group = await Promise.all(needed.slice(offset, offset + 3).map(node => api(`messages/${node.id}`, signal)));
+      if (!current()) return;
+      for (const item of group) messages.set(item.id, item);
+      $('threadStatus').textContent = `Loading conversation… ${messages.size} / ${conversation.nodes.length}`;
+    }
+    if (!current()) return;
+    conversationMessages = conversation.nodes.map(node => messages.get(node.id));
+    renderConversation(); $('copyThread').disabled = false;
+    const count = conversationMessages.length;
+    $('threadStatus').textContent = `${count} ${count === 1 ? 'message' : 'messages'} available in C-mail${count > 1 ? ' · Copied oldest first' : ''}.${conversation.missing ? ' Some referenced messages are not in C-mail; quoted history is kept.' : ''}`;
+  } catch (error) {
+    if (!current() || error.name === 'AbortError') return;
+    $('threadStatus').textContent = 'The complete conversation could not be loaded. You can still copy this message.';
+    $('retryThread').hidden = false; $('copyThread').disabled = true;
+  }
 }
 async function openMessage(id) {
   if (signingOut || bulkBusy) return;
@@ -330,11 +425,12 @@ async function openMessage(id) {
     document.body.classList.add('reading'); document.querySelector('.reader').scrollTop = 0; connected('Cloud inbox');
     const item = items.find(item => item.id === id); if (item) item.read = message.read;
     renderList(); updateReadControl();
+    loadConversation(message);
     if (!message.read) await setReadState(id, true);
   } catch (error) { if (generation === readingGeneration) { notice(error.message); connected('Connection interrupted'); } }
 }
 $('searchForm').addEventListener('submit', (event) => { event.preventDefault(); load(true); });
-$('refresh').addEventListener('click', () => load(true));
+$('refresh').addEventListener('click', () => { threadIndexCache = null; load(true); if (selectedMessage) loadConversation(selectedMessage); });
 $('mailbox').addEventListener('change', switchInbox);
 $('mailView').addEventListener('change', switchInbox);
 function applyDates() { if (bulkBusy) return; $('dateFilters').open = false; $('dateSummary').textContent = $('after').value || $('before').value ? 'Dates •' : 'Dates'; closeMessage(); load(true); }
@@ -363,11 +459,17 @@ $('pageSize').addEventListener('change', () => {
   if (!exhausted && items.length < pageSize + 1) load();
 });
 $('toggleRead').addEventListener('click', () => { if (selectedMessage) setReadState(selectedMessage.id, !selectedMessage.read); });
+$('copyMessage').addEventListener('click', () => { if (selectedMessage) copyText(formatMessage(selectedMessage), $('copyMessage'), 'Message'); });
+$('copyThread').addEventListener('click', () => { if (conversationMessages.length) copyText(formatThread(conversationMessages), $('copyThread'), 'Thread'); });
+$('retryThread').addEventListener('click', () => { threadIndexCache = null; if (selectedMessage) loadConversation(selectedMessage); });
+$('closeCopy').addEventListener('click', () => $('copyFallback').close());
+$('selectCopyText').addEventListener('click', () => { $('copyText').focus(); $('copyText').select(); });
 $('stopSearch').addEventListener('click', () => loadController?.abort());
 $('signOut').addEventListener('click', (event) => {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   signingOut = true; requestGeneration += 1; readingGeneration += 1; loadController?.abort();
   clearTimeout(actionStatusTimer);
+  conversationController?.abort(); conversationGeneration += 1; conversationMessages = []; threadIndexCache = null;
   // Clear rendered mail before leaving, including any page kept in browser history.
   document.body.replaceChildren(); document.title = 'Signing out · C-mail';
 });

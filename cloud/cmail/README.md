@@ -18,6 +18,12 @@ Each row has a checkbox independent of the button that opens it. Select messages
 
 Opening a message adds its archive ID to the URL fragment. This gives each message a bookmarkable link that still requires owner sign-in and survives a page reload.
 
+The reader has **Copy message** and **Copy thread** buttons. Each additional response appears below the selected message with its own **Copy message** button. Copies contain plain text with subject, sender, recipients, date, and the complete body, including quoted history. **Copy thread** orders available messages oldest first and removes duplicate deliveries with the same Message-ID. Attachment files are not included in clipboard text.
+
+Conversations are linked using `Message-ID`, `In-Reply-To`, and `References` headers across all connected addresses, including archived and desktop-acknowledged messages. Matching subjects alone never join unrelated messages. Only messages retained in C-mail are available; missing referenced messages are noted, and quoted history is preserved. Loading other responses does not mark them read.
+
+The owner-only `/cmail/api/thread-index` endpoint scans at most 40 encrypted records per request and returns only reply metadata. The browser keeps the completed index in memory until Refresh or a changed archive count; no plaintext index or mail body is persisted in browser storage. **Copy thread** becomes available after discovery and message loading complete. An incomplete scan offers Retry and leaves **Copy message** available. Clipboard writes happen directly on the button click for Safari compatibility; if copying is blocked, a dialog provides selectable text for manual copying.
+
 ## Existing service compatibility
 
 `src/legacy-worker.mjs` is generated from `life_ops.cloudflare_email._worker_source` at Life Ops commit `6ff0e1c`. It retains the inbound email handler, encryption format, record keys, `primary` object name, and signed `/api/mail/queue/*` API. The active deployment inspected before this change was `3b8232d5`; its only observed protocol-helper difference is an older constant-time signature comparison implementation.
@@ -37,6 +43,8 @@ npx wrangler deploy --dry-run
 ```
 
 Node 20 or newer is required. `node scripts/preview.mjs` starts an isolated sample inbox on `127.0.0.1:8788/cmail/` for visual QA. The preview's sample data and authentication stub are not included in the production bundle.
+
+The preview includes a three-message conversation separated by more than one scan page. Run `CMAIL_PREVIEW_DENY_CLIPBOARD=1 node scripts/preview.mjs` to simulate a rejected clipboard write and verify the manual-copy dialog.
 
 ## Private access
 

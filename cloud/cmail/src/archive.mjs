@@ -44,7 +44,7 @@ export class ArchiveInputError extends Error {}
 export class MailQueue extends LegacyMailQueue {
   async fetch(request) {
     const path = new URL(request.url).pathname;
-    if (!['/archive/list', '/archive/message', '/archive/read-status', '/archive/actions'].includes(path)) return super.fetch(request);
+    if (!['/archive/list', '/archive/message', '/archive/read-status', '/archive/actions', '/archive/thread-index'].includes(path)) return super.fetch(request);
     if (request.method !== 'POST') return Response.json({ error: 'method_not_allowed' }, { status: 405 });
     try {
       const parameters = await request.json();
@@ -52,6 +52,7 @@ export class MailQueue extends LegacyMailQueue {
         ? await this.listArchive(parameters)
         : path === '/archive/read-status' ? await this.setReadStatus(parameters)
         : path === '/archive/actions' ? await this.applyAction(parameters)
+        : path === '/archive/thread-index' ? await this.listThreadIndex(parameters)
         : await this.readArchiveMessage(parameters);
       return Response.json(result, { status: result ? 200 : 404 });
     } catch (error) {
@@ -70,6 +71,32 @@ export class MailQueue extends LegacyMailQueue {
       : null);
     if (!envelope) throw new Error('missing_archive_payload');
     return decryptArchivePayload({ masterKey: this.env.LIFE_OPS_MASTER_KEY, purpose: PURPOSE, envelope });
+  }
+
+  async listThreadIndex({ cursor = '' } = {}) {
+    if (typeof cursor !== 'string' || (cursor && !ID_PATTERN.test(cursor))) throw new ArchiveInputError();
+    const options = { prefix: RECORD_PREFIX, reverse: true, limit: SCAN_LIMIT + 1 };
+    if (cursor) options.end = `${RECORD_PREFIX}${cursor}`;
+    const entries = [...(await this.state.storage.list(options)).values()];
+    const items = []; let scanned = 0; let failed = 0; let lastId = null;
+    for (const record of entries.slice(0, SCAN_LIMIT)) {
+      scanned += 1; lastId = record.id;
+      try {
+        const payload = await this.loadPayload(record);
+        // Production captures all envelope headers. Older imports may keep
+        // only a subset, so parse the original MIME message when necessary.
+        const parsed = header(payload, 'message-id') ? null : await PostalMime.parse(fromBase64(payload.raw_base64));
+        items.push({
+          id: record.id, received_at: record.received_at,
+          date: parsed?.date || header(payload, 'date') || record.received_at,
+          message_id: parsed?.messageId || header(payload, 'message-id'),
+          in_reply_to: parsed?.inReplyTo || header(payload, 'in-reply-to'),
+          references: parsed?.references || header(payload, 'references'),
+        });
+      } catch { failed += 1; }
+    }
+    const meta = await this.state.storage.get('meta') || {};
+    return { items, scanned, failed, next_cursor: scanned < entries.length ? lastId : null, total_stored: Number(meta.total_stored || 0) };
   }
 
   async listArchive(parameters = {}) {
@@ -209,6 +236,8 @@ export class MailQueue extends LegacyMailQueue {
       mailbox: String(payload.envelope_to || ''),
       text: parsed.text || plainTextFromHtml(parsed.html) || '(This message has no text body.)',
       message_id: parsed.messageId || '',
+      in_reply_to: parsed.inReplyTo || '',
+      references: parsed.references || '',
       attachments: attachments.map((file, index) => ({
         index,
         filename: file.filename || `attachment-${index + 1}`,

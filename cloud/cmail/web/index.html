@@ -35,12 +35,14 @@
     <section class="reader" aria-label="Message reader">
       <div id="readerPlaceholder" class="reader-placeholder"><div class="envelope">✉</div><p class="eyebrow">A LITTLE SPACE TO FOCUS</p><h2>Your mail, wherever you are.</h2><p>Select a message to read it.<br>Your inbox no longer needs your home computer.</p><span class="private-badge">PRIVATE · SIGN-IN REQUIRED</span></div>
       <article id="message" hidden>
-        <div class="reader-toolbar"><button id="back" class="quiet" type="button" aria-label="Close message">← <span>Inbox</span></button><button id="toggleRead" class="quiet" type="button">Mark unread</button><a id="downloadRaw" class="quiet" href="#">Download email ↗</a></div>
+        <div class="reader-toolbar"><button id="back" class="quiet" type="button" aria-label="Close message">← <span>Inbox</span></button><button id="copyMessage" class="quiet" type="button" title="Copy this message, including its headers and quoted history">Copy message</button><button id="copyThread" class="quiet" type="button" title="Copy all available messages in this conversation, oldest first" disabled>Copy thread</button><button id="toggleRead" class="quiet" type="button">Mark unread</button><a id="downloadRaw" class="quiet" href="#">Download email ↗</a></div>
+        <div class="conversation-status"><span id="threadStatus" role="status"></span><button id="retryThread" class="quiet" type="button" hidden>Retry</button></div>
         <div id="readerNotice" class="notice" role="status" hidden></div>
-        <div class="message-content"><p class="eyebrow" id="messageMailbox"></p><h2 id="messageSubject"></h2><div class="message-sender"><span class="avatar" id="senderAvatar">M</span><div><strong id="messageFrom"></strong><span id="messageTo"></span></div><time id="messageDate"></time></div><div id="attachments" class="attachments"></div><div id="messageBody" class="message-body"></div></div>
+        <div class="message-content"><p class="eyebrow" id="messageMailbox"></p><h2 id="messageSubject"></h2><div class="message-sender"><span class="avatar" id="senderAvatar">M</span><div><strong id="messageFrom"></strong><span id="messageTo"></span></div><time id="messageDate"></time></div><div id="attachments" class="attachments"></div><div id="messageBody" class="message-body"></div><div id="threadMessages"></div></div>
       </article>
     </section>
   </div>
   <div id="actionStatus" class="action-status" role="status" hidden></div>
+  <dialog id="copyFallback" class="copy-dialog"><h2>Copy email text</h2><p>Automatic copying is unavailable. Select the text below, then use Copy on your device.</p><textarea id="copyText" readonly aria-label="Email text to copy"></textarea><div><button id="selectCopyText" class="control" type="button">Select text</button><button id="closeCopy" class="control" type="button">Close</button></div></dialog>
 </body>
 </html>
