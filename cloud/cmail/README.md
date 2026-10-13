@@ -50,6 +50,20 @@ The header includes a visible Sign out link on desktop and mobile. It uses Cloud
 
 Cloudflare may require activating Zero Trust Free before Access can be configured. Its checkout can require accepting terms and authorizing usage-based charges despite a $0 base price. Complete that account-level approval before proceeding; deployment alone must never remove authentication to work around it.
 
+### Login appearance
+
+The hosted sign-in page uses C-mail branding, configured in **Zero Trust → Reusable components → Custom pages → Access login page**. This is an organization-wide appearance setting; C-mail was the only Access application when it was applied.
+
+| Setting | Value |
+| --- | --- |
+| Organization name | `C-mail` |
+| Logo URL | `https://raw.githubusercontent.com/SproutSeeds/life-ops/e7e3a3b7c7a192c3762e18e084e03cd3a88c04b0/cloud/cmail/web/icon-192.png` |
+| Header | Your mail, wherever you are. |
+| Message | A private space for your connected mail.<br>Sign in with your authorized account to continue. |
+| Background | `#0d1411` |
+
+The logo is a public, commit-pinned copy of the existing app icon so it loads before authentication. These settings do not change the owner policy, identity providers, session duration, or Worker authentication. The hosted page retains the Cloudflare Access heading and its provider button; the available customization controls do not offer a fully unbranded form. See [Cloudflare login page customization](https://developers.cloudflare.com/cloudflare-one/reusable-components/custom-pages/access-login-page/).
+
 ## Deploy and verify
 
 1. Record the active Worker version and confirm the existing namespace binding. Use the same Cloudflare account and existing Worker name; do not create a replacement namespace.
