@@ -2,11 +2,15 @@
 
 The public entry point is [cmail.frg.earth](https://cmail.frg.earth/). It requires owner sign-in and opens the inbox at the domain root. The existing Worker's `/cmail/` address and bookmarked message links continue to work.
 
-This adds a private, read-only inbox to the existing Cloudflare email-ingest Worker. It reads encrypted messages already held in the `primary` MailQueue Durable Object, including messages acknowledged by the desktop sync process. It does not acknowledge, delete, requeue, forward, or send mail.
+This adds a private cloud inbox to the existing Cloudflare email-ingest Worker. It reads encrypted messages already held in the `primary` MailQueue Durable Object, including messages acknowledged by the desktop sync process. Message contents remain read-only. The inbox can save read/unread status, but does not acknowledge delivery, delete, requeue, forward, or send mail.
 
 The browser can search senders, subjects, recipients, and decoded message bodies, filter by recipient mailbox and received date, page through older messages, read decoded message bodies, and download attachments or the original `.eml`. Its manifest supports installation as a web app on macOS and iPhone. Mail bodies are not cached for offline use. Only mail delivered to this Cloudflare Worker is available; Gmail/Fastmail account synchronization and cloud sending are separate follow-up work.
 
 Use the **Inbox** dropdown above the message list on desktop or phone to select an address, or choose **All inboxes** for the combined view. Search and date filters apply within the selected inbox. Switching inboxes closes the previous message, and the selected address is retained in the page URL for reloads and bookmarks. An individual inbox loads recent matches first and can page through older messages; searches still scan the full archive.
+
+With no message open, compact rows use the full width next to the sidebar. Opening a message restores the split reader; closing it expands the list again. **Per page** offers 20, 50 (default), or 100 messages, with Previous/Next navigation. This display preference is remembered in that browser. Search still scans beyond the visible page and displays its matches in pages.
+
+Unread rows have a bright dot, heavier text, and a highlighted background. Opening a message saves it as read; the reader's **Mark unread / Mark read** control reverses the state. Flags are stored in separate `cmail-read:<archive id>` records in the existing Durable Object and carry across devices after refresh. Archived messages without a flag start unread: the archive's delivery acknowledgement is not read history, and no old desktop read history is inferred. Content and delivery records remain unchanged.
 
 Opening a message adds its archive ID to the URL fragment. This gives each message a bookmarkable link that still requires owner sign-in and survives a page reload.
 
@@ -51,6 +55,8 @@ Keep the mailbox list in sync when adding or removing email routes. It is return
 
 The Worker independently verifies the Access JWT signature, issuer, audience, expiry, required identity claims, and owner email. Missing configuration or an invalid token fails closed, including through alternate Worker URLs. All inbox responses use `Cache-Control: private, no-store`; message HTML is converted to text, and remote images/scripts are never rendered.
 
+The only mail-state write route is `POST /cmail/api/messages/<archive id>/read-status` with a boolean `read` value. It requires the same owner authentication, an exact same-origin `Origin` header, and JSON content. GET requests and cross-origin writes cannot change flags. Downloads and message GETs do not change read status; the UI explicitly posts after opening a message successfully.
+
 The header includes a visible Sign out link on desktop and mobile. It uses Cloudflare's `/cdn-cgi/access/logout` endpoint and clears rendered mail before leaving. Cloudflare revokes the user's Access session across applications, clears the current hostname's authorization cookie immediately, and stops accepting previously issued tokens within 20–30 seconds. Returning through browser history reloads the protected page rather than restoring a stale inbox. An existing Access session can sign the owner in automatically; that does not make the inbox public. See [Cloudflare session management](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/).
 
 Cloudflare may require activating Zero Trust Free before Access can be configured. Its checkout can require accepting terms and authorizing usage-based charges despite a $0 base price. Complete that account-level approval before proceeding; deployment alone must never remove authentication to work around it.
@@ -80,7 +86,7 @@ The logo is a public, commit-pinned copy of the existing app icon so it loads be
 7. Confirm the old signed queue endpoint remains usable. Cloud reads must not change pending or acknowledged counts.
 8. Verify owner sign-in and anonymous denial at `https://cmail.frg.earth/` and its `/cmail/api/messages` path, then save the custom domain to the Mac Dock or iPhone Home Screen.
 
-Search scans bounded pages of archive records, automatically continuing through older pages while displaying progress and matches as they arrive. Stop pauses the scan; Continue search resumes it. A new search cancels the previous request. Only a completed scan may report no matches; interrupted or corrupt reads are identified as incomplete. Matching includes decoded plain text and HTML message bodies, without indexing binary attachments or creating a plaintext search index. Searches can take time on a large encrypted archive. Dates use the cloud receipt date in UTC.
+Search scans bounded pages of archive records, automatically continuing through older pages while displaying progress and matches as they arrive. Stop pauses the scan; Continue resumes it. A new search cancels the previous request. Only a completed scan may report no matches; interrupted or corrupt reads are identified as incomplete. Matching includes decoded plain text and HTML message bodies, without indexing binary attachments or creating a plaintext search index. Searches can take time on a large encrypted archive. Dates use the cloud receipt date in UTC. The API accepts a bounded result limit while scanning at most 40 stored records per request; the browser fills the selected page across scan batches and retains a lookahead match for navigation.
 
 ## Follow-up migration
 

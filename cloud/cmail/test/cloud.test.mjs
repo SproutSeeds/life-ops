@@ -57,6 +57,45 @@ test('search paginates older archives without missing or duplicating matches', a
   assert(ids[0] > ids.at(-1));
 });
 
+test('requested page sizes respect bounded scans and retain every message across cursors', async () => {
+  const { legacy, archive } = setup();
+  for (let i = 1; i <= 127; i++) await legacy.enqueue(fixture(`Page fixture ${i}`, i));
+  for (const size of [20, 50, 100]) {
+    const pages = []; let cursor; let done = false; let page = [];
+    while (!done) {
+      const result = await archive.listArchive({ limit: size - page.length, cursor });
+      assert(result.scanned <= 40);
+      page.push(...result.items.map(item => item.id)); cursor = result.next_cursor; done = !cursor;
+      if (page.length === size || done) { pages.push(page); page = []; }
+    }
+    assert.equal(pages[0].length, size);
+    assert.equal(pages.flat().length, 127);
+    assert.equal(new Set(pages.flat()).size, 127);
+    assert.deepEqual(pages.flat(), [...pages.flat()].sort().reverse());
+  }
+  for (const limit of [0, -1, 101, 1.5, 'invalid']) await assert.rejects(archive.listArchive({ limit }));
+});
+
+test('read status persists independently of archived contents and delivery acknowledgements', async () => {
+  const { state, legacy, archive } = setup();
+  const old = await legacy.enqueue(fixture('Previously synced', 1));
+  await legacy.ack({ ids: [old.id] });
+  const pending = await legacy.enqueue(fixture('Still pending', 2));
+  const snapshot = structuredClone([...state.storage.values]);
+  assert.equal((await archive.readArchiveMessage({ id: old.id })).read, false);
+  assert((await archive.listArchive()).items.every(item => item.read === false));
+  await archive.setReadStatus({ id: old.id, read: true });
+  const restored = new MailQueue(state, env);
+  assert.equal((await restored.readArchiveMessage({ id: old.id })).read, true);
+  assert.equal((await restored.listArchive()).items.find(item => item.id === old.id).read, true);
+  await restored.setReadStatus({ id: old.id, read: false });
+  assert.equal((await archive.readArchiveMessage({ id: old.id })).read, false);
+  assert.deepEqual([...state.storage.values].filter(([key]) => !key.startsWith('cmail-read:')), snapshot);
+  assert.equal((await legacy.pull({})).items[0].id, pending.id);
+  await assert.rejects(archive.setReadStatus({ id: old.id, read: 'true' }));
+  assert.equal(await archive.setReadStatus({ id: 'mail_9999999999999999', read: true }), null);
+});
+
 test('empty filtered pages retain a cursor; mailbox and date filters apply', async () => {
   const { legacy, archive } = setup();
   await legacy.enqueue(fixture('Needed older email', 0));
@@ -174,7 +213,7 @@ test('authenticated inbox choices include configured addresses even before mail 
   assert.equal((await worker.fetch(new Request('https://mail.example.com/cmail/api/session', { method: 'POST' }), config)).status, 405);
 });
 
-test('cloud routes are read-only, private, and preserve the signed sync API', async () => {
+test('mail content routes are read-only, private, and preserve the signed sync API', async () => {
   const { legacy, archive } = setup();
   const { id } = await legacy.enqueue(fixture('Welcome', 1));
   const worker = createWorker(async () => ({ ok: true, email: 'owner@example.com' }));
@@ -191,4 +230,30 @@ test('cloud routes are read-only, private, and preserve the signed sync API', as
   assert.equal(sync.status, 200); assert.equal((await sync.json()).items[0].id, id);
   const health = await worker.fetch(new Request('https://mail.example.com/healthz'), workerEnv);
   assert.equal((await health.json()).archive_encryption_enabled, true);
+});
+
+test('read-state writes require the owner, same origin, POST, and a boolean JSON value', async () => {
+  const { legacy, archive, state } = setup();
+  const { id } = await legacy.enqueue(fixture('Read state', 1));
+  const worker = createWorker(authorize);
+  const workerEnv = { ...env, ...accessEnv, MAIL_QUEUE: { getByName: () => ({ fetch: (url, options) => archive.fetch(new Request(url, options)) }) } };
+  const ownerToken = await token();
+  const url = `https://mail.example.com/cmail/api/messages/${id}/read-status`;
+  const headers = { 'Cf-Access-Jwt-Assertion': ownerToken, Origin: 'https://mail.example.com', 'Content-Type': 'application/json' };
+  const write = (changes = {}) => new Request(url, { method: 'POST', headers, body: '{"read":true}', ...changes });
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Cf-Access-Jwt-Assertion': '' } }), workerEnv)).status, 401);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Cf-Access-Jwt-Assertion': await token({ email: 'other@example.com' }) } }), workerEnv)).status, 403);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, Origin: 'https://other.example.com' } }), workerEnv)).status, 403);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, Origin: '' } }), workerEnv)).status, 403);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Content-Type': 'text/plain' } }), workerEnv)).status, 400);
+  assert.equal((await worker.fetch(write({ body: '{"read":"true"}' }), workerEnv)).status, 400);
+  assert.equal((await worker.fetch(new Request(url, { headers }), workerEnv)).status, 405);
+  assert.equal(await state.storage.get(`cmail-read:${id}`), undefined);
+  const changed = await worker.fetch(write(), workerEnv);
+  assert.equal(changed.status, 200); assert.deepEqual(await changed.json(), { id, read: true });
+  assert.equal(changed.headers.get('cache-control'), 'private, no-store');
+  const listed = await worker.fetch(new Request('https://mail.example.com/cmail/api/messages?limit=1', { headers }), workerEnv);
+  const items = (await listed.json()).items; assert.equal(items.length, 1); assert.equal(items[0].read, true);
+  assert.equal((await worker.fetch(write({ body: '{"read":false}' }), workerEnv)).status, 200);
+  assert.equal(await state.storage.get(`cmail-read:${id}`), false);
 });

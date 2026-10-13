@@ -28,19 +28,22 @@
       <div class="profile"><span class="avatar">C</span><div><strong>Private workspace</strong><span id="accountEmail">Signing in…</span></div></div>
     </aside>
     <main class="inbox" aria-label="Inbox">
-      <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1 id="inboxTitle">All inboxes</h1></div><span class="read-only">Read only</span></div>
+      <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1 id="inboxTitle">All inboxes</h1></div><span class="unread-legend"><span class="unread-dot"></span> Unread</span></div>
+      <div class="inbox-filters">
       <div class="inbox-switcher"><label for="mailbox">INBOX</label><select id="mailbox" aria-label="Choose inbox" aria-describedby="mailboxStatus"><option value="">All inboxes</option></select><p id="mailboxStatus" role="status">Loading inbox list…</p></div>
       <form id="searchForm" class="search-form"><label class="search-label" for="search">⌕</label><input type="search" id="search" placeholder="Search all mail" aria-label="Search messages, senders, and subjects"><button type="submit" aria-label="Search">↵</button></form>
+      </div>
       <details class="date-filters"><summary>Filter by date</summary><div><label>From<input type="date" id="after"></label><label>Through<input type="date" id="before"></label><button id="applyDates" type="button">Apply</button></div></details>
       <div class="list-meta"><span id="listLabel" role="status">Latest messages</span><span id="resultCount"></span><button id="stopSearch" type="button" hidden>Stop</button></div>
       <div id="notice" class="notice" role="status" hidden></div>
       <div id="messages" class="messages" aria-live="polite"><div class="empty-list">Opening your inbox…</div></div>
-      <button id="loadMore" class="load-more" type="button" hidden>Load older messages</button>
+      <nav class="pagination" aria-label="Message pages"><label class="page-size">Per page <select id="pageSize" aria-label="Messages per page"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select></label><span id="pageLabel" role="status">Page 1</span><button id="previousPage" type="button" disabled aria-label="Previous page">← <span>Previous</span></button><button id="nextPage" type="button" disabled aria-label="Next page"><span>Next</span> →</button><button id="continueLoad" type="button" hidden>Continue</button></nav>
     </main>
     <section class="reader" aria-label="Message reader">
       <div id="readerPlaceholder" class="reader-placeholder"><div class="envelope">✉</div><p class="eyebrow">A LITTLE SPACE TO FOCUS</p><h2>Your mail, wherever you are.</h2><p>Select a message to read it.<br>Your inbox no longer needs your home computer.</p><span class="private-badge">PRIVATE · SIGN-IN REQUIRED</span></div>
       <article id="message" hidden>
-        <div class="reader-toolbar"><button id="back" class="quiet" type="button">← <span>Inbox</span></button><a id="downloadRaw" class="quiet" href="#">Download email ↗</a></div>
+        <div class="reader-toolbar"><button id="back" class="quiet" type="button" aria-label="Close message">← <span>Inbox</span></button><button id="toggleRead" class="quiet" type="button">Mark unread</button><a id="downloadRaw" class="quiet" href="#">Download email ↗</a></div>
+        <div id="readerNotice" class="notice" role="status" hidden></div>
         <div class="message-content"><p class="eyebrow" id="messageMailbox"></p><h2 id="messageSubject"></h2><div class="message-sender"><span class="avatar" id="senderAvatar">M</span><div><strong id="messageFrom"></strong><span id="messageTo"></span></div><time id="messageDate"></time></div><div id="attachments" class="attachments"></div><div id="messageBody" class="message-body"></div></div>
       </article>
     </section>

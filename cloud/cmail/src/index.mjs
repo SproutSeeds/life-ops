@@ -36,6 +36,30 @@ export function createWorker(checkAccess = authorize) {
       }
       const access = await checkAccess(request, env);
       if (!access.ok) return json({ error: access.error }, access.status);
+      const readStatusMatch = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})\/read-status$/);
+      if (readStatusMatch) {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        if (request.headers.get('Origin') !== url.origin || request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+          return json({ error: 'invalid_origin' }, 403);
+        }
+        if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+          return json({ error: 'invalid_request' }, 400);
+        }
+        let body;
+        try {
+          const text = await request.text();
+          if (text.length > 128) return json({ error: 'invalid_request' }, 400);
+          body = JSON.parse(text);
+        } catch { return json({ error: 'invalid_request' }, 400); }
+        if (typeof body?.read !== 'boolean') return json({ error: 'invalid_request' }, 400);
+        try {
+          const result = await env.MAIL_QUEUE.getByName('primary').fetch('https://mail-queue.internal/archive/read-status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: readStatusMatch[1], read: body.read }),
+          });
+          return json(await result.json(), result.status);
+        } catch { return json({ error: 'read_status_unavailable' }, 503); }
+      }
       if (request.method !== 'GET') return json({ error: 'read_only' }, 405);
       if (url.pathname === PREFIX) return response('', undefined, 302, { Location: `${PREFIX}/` });
       if (publicRoot || url.pathname === `${PREFIX}/`) {
@@ -66,7 +90,7 @@ export function createWorker(checkAccess = authorize) {
       let download = false;
       if (url.pathname === `${PREFIX}/api/messages`) {
         path = '/archive/list';
-        parameters = Object.fromEntries(['query', 'mailbox', 'cursor', 'after', 'before'].map((key) => [key, url.searchParams.get(key) || '']));
+        parameters = Object.fromEntries(['query', 'mailbox', 'cursor', 'after', 'before', 'limit'].map((key) => [key, url.searchParams.get(key) || '']));
       } else {
         const match = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})(?:\/(raw|attachments\/\d+))?$/);
         if (!match) return json({ error: 'not_found' }, 404);

@@ -29,13 +29,18 @@ for (const [index, [from, subject, text]] of [
 }
 const worker = createWorker(async () => ({ ok: true, email: 'preview@example.com' }));
 // Put the sample conversation beyond the first archive scan to exercise search.
-for (let i = 0; i < 45; i++) {
+for (let i = 0; i < 123; i++) {
   const subject = `Routine update ${i + 1}`;
   const raw = `From: updates@example.com\r\nTo: preview@example.com\r\nSubject: ${subject}\r\nContent-Type: text/plain\r\n\r\nA recent sample update.`;
-  await queue.enqueue({ headers: { from: 'updates@example.com', to: 'preview@example.com', subject }, envelope_to: 'preview@example.com', raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date().toISOString() });
+  const { id } = await queue.enqueue({ headers: { from: 'updates@example.com', to: 'preview@example.com', subject }, envelope_to: 'preview@example.com', raw_base64: Buffer.from(raw).toString('base64'), received_at: new Date().toISOString() });
+  if (i % 3 === 0) await queue.setReadStatus({ id, read: true });
 }
 http.createServer(async (incoming, outgoing) => {
-  const response = await worker.fetch(new Request(`http://127.0.0.1:8788${incoming.url}`, { method: incoming.method }), env);
+  const chunks = []; for await (const chunk of incoming) chunks.push(chunk);
+  const response = await worker.fetch(new Request(`http://127.0.0.1:8788${incoming.url}`, {
+    method: incoming.method, headers: incoming.headers,
+    body: ['GET', 'HEAD'].includes(incoming.method) ? undefined : Buffer.concat(chunks),
+  }), env);
   outgoing.writeHead(response.status, Object.fromEntries(response.headers));
   outgoing.end(Buffer.from(await response.arrayBuffer()));
 }).listen(8788, '127.0.0.1', () => console.log('Local sample mailbox: http://127.0.0.1:8788/cmail/'));

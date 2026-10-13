@@ -5,6 +5,7 @@ const RECORD_PREFIX = 'mail:';
 const ID_PATTERN = /^mail_\d{16}$/;
 const SCAN_LIMIT = 40;
 const PAGE_LIMIT = 20;
+const READ_PREFIX = 'cmail-read:';
 const PURPOSE = 'cloudflare-mail-archive-v1';
 
 function header(payload, name) {
@@ -41,12 +42,13 @@ export class ArchiveInputError extends Error {}
 export class MailQueue extends LegacyMailQueue {
   async fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path !== '/archive/list' && path !== '/archive/message') return super.fetch(request);
+    if (!['/archive/list', '/archive/message', '/archive/read-status'].includes(path)) return super.fetch(request);
     if (request.method !== 'POST') return Response.json({ error: 'method_not_allowed' }, { status: 405 });
     try {
       const parameters = await request.json();
       const result = path === '/archive/list'
         ? await this.listArchive(parameters)
+        : path === '/archive/read-status' ? await this.setReadStatus(parameters)
         : await this.readArchiveMessage(parameters);
       return Response.json(result, { status: result ? 200 : 404 });
     } catch (error) {
@@ -73,7 +75,9 @@ export class MailQueue extends LegacyMailQueue {
     const cursor = String(parameters.cursor || '');
     const after = String(parameters.after || '');
     const before = String(parameters.before || '');
+    const limit = parameters.limit === undefined || parameters.limit === '' ? PAGE_LIMIT : Number(parameters.limit);
     if (query.length > 200 || mailbox.length > 254 ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
         (cursor && !ID_PATTERN.test(cursor)) ||
         [after, before].some((value) => value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))))) {
       throw new ArchiveInputError();
@@ -100,6 +104,7 @@ export class MailQueue extends LegacyMailQueue {
           to: decodeWords(header(payload, 'to')) || String(payload.envelope_to || ''),
           mailbox: String(payload.envelope_to || ''),
           subject: decodeWords(header(payload, 'subject')) || '(No subject)',
+          read: (await this.state.storage.get(`${READ_PREFIX}${record.id}`)) === true,
         };
         if (mailbox && item.mailbox.toLowerCase() !== mailbox) continue;
         if (query && ![item.subject, item.from, item.to, item.mailbox].some((value) => value.toLowerCase().includes(query))) {
@@ -108,7 +113,7 @@ export class MailQueue extends LegacyMailQueue {
           if (!text.toLowerCase().includes(query)) continue;
         }
         items.push(item);
-        if (items.length === PAGE_LIMIT) break;
+        if (items.length === limit) break;
       } catch {
         // Surface incomplete reads while allowing intact messages to be recovered.
         failed += 1;
@@ -123,6 +128,15 @@ export class MailQueue extends LegacyMailQueue {
       total_stored: Number(meta.total_stored || 0),
       read_only: true,
     };
+  }
+
+  async setReadStatus({ id, read } = {}) {
+    if (!ID_PATTERN.test(String(id || '')) || typeof read !== 'boolean') throw new ArchiveInputError();
+    if (!await this.state.storage.get(`${RECORD_PREFIX}${id}`)) return null;
+    // Reading in C-mail is independent of desktop delivery acknowledgements.
+    // Keep message contents, queue entries, and encryption metadata untouched.
+    await this.state.storage.put(`${READ_PREFIX}${id}`, read);
+    return { id, read };
   }
 
   async readArchiveMessage({ id, attachment, raw = false } = {}) {
@@ -143,6 +157,7 @@ export class MailQueue extends LegacyMailQueue {
     }
     return {
       id,
+      read: (await this.state.storage.get(`${READ_PREFIX}${id}`)) === true,
       received_at: record.received_at,
       date: parsed.date || record.received_at,
       subject: parsed.subject || '(No subject)',

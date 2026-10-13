@@ -4,7 +4,18 @@ let selectedId = null;
 let requestGeneration = 0;
 let readingGeneration = 0;
 let loading = false;
-let shown = 0;
+let items = [];
+let pageIndex = 0;
+let pageSize = 50;
+try { const saved = Number(localStorage.getItem('cmail.page-size')); if ([20,50,100].includes(saved)) pageSize = saved; } catch {}
+let exhausted = false;
+let interrupted = false;
+let activeFilters = null;
+let totalStored = 0;
+let selectedMessage = null;
+let renderedIds = '';
+const pendingReadIds = new Set();
+const readStateOverrides = new Map();
 let scanned = 0;
 let failed = 0;
 let loadController = null;
@@ -30,7 +41,7 @@ function updateInboxLabel() {
     : `${knownMailboxes.size} ${knownMailboxes.size === 1 ? 'address' : 'addresses'} · One combined inbox`;
 }
 function closeMessage() {
-  readingGeneration += 1; selectedId = null; document.body.classList.remove('reading');
+  readingGeneration += 1; selectedId = null; selectedMessage = null; document.body.classList.remove('reading');
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
   $('message').hidden = true; $('readerPlaceholder').hidden = false;
   document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
@@ -45,8 +56,8 @@ function switchInbox() {
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 function connected(value) { $('connectionText').textContent = value; }
-async function api(path, signal) {
-  const result = await fetch(`/cmail/api/${path}`, { cache: 'no-store', redirect: 'manual', signal });
+async function api(path, signal, options = {}) {
+  const result = await fetch(`/cmail/api/${path}`, { ...options, cache: 'no-store', redirect: 'manual', signal });
   if (result.type === 'opaqueredirect' || [401,403].includes(result.status)) {
     throw new Error('Your session has expired. Reload this page to sign in again.');
   }
@@ -72,85 +83,132 @@ function addText(parent, tag, className, value) {
   const element = document.createElement(tag); element.className = className; element.textContent = value;
   parent.append(element); return element;
 }
+function applyRowState(row, item) {
+  row.classList.toggle('unread', !item.read);
+  row.classList.toggle('selected', item.id === selectedId);
+  row.dataset.read = String(Boolean(item.read));
+  row.setAttribute('aria-label', `${item.read ? 'Read' : 'Unread'}: ${senderLabel(item.from)} — ${item.subject}`);
+}
 function appendRow(item) {
   const row = document.createElement('button'); row.type = 'button'; row.className = 'message-row'; row.dataset.id = item.id;
-  if (item.id === selectedId) row.classList.add('selected');
-  const top = document.createElement('div'); top.className = 'row-top';
-  addText(top, 'span', 'row-sender', senderLabel(item.from)); addText(top, 'time', 'row-date', dateLabel(item.received_at)); row.append(top);
-  addText(row, 'div', 'row-subject', item.subject); addText(row, 'div', 'row-mailbox', item.mailbox);
+  const indicator = addText(row, 'span', 'read-indicator', ''); indicator.setAttribute('aria-hidden', 'true');
+  addText(row, 'span', 'row-sender', senderLabel(item.from));
+  const subject = addText(row, 'span', 'row-subject', item.subject); subject.title = item.subject;
+  addText(row, 'span', 'row-mailbox', item.mailbox);
+  addText(row, 'time', 'row-date', dateLabel(item.received_at));
+  applyRowState(row, item);
   row.addEventListener('click', () => openMessage(item.id)); $('messages').append(row);
 }
-async function load(reset = false) {
-  if (signingOut) return;
-  if (loading && !reset) return;
-  if (reset) {
-    requestGeneration += 1; loadController?.abort(); cursor = null; shown = 0; scanned = 0; failed = 0;
-    $('messages').replaceChildren(); notice('');
+function isSearching() { return Boolean(activeFilters?.query || activeFilters?.after || activeFilters?.before); }
+function renderList() {
+  const start = pageIndex * pageSize;
+  const visible = items.slice(start, start + pageSize);
+  const ids = visible.map(item => item.id).join(',');
+  if (ids !== renderedIds || !visible.length) {
+    $('messages').replaceChildren(); renderedIds = ids;
+    visible.forEach(appendRow);
+    if (!visible.length) {
+      const text = loading ? (isSearching() ? 'Searching your mail… Results will appear as they are found.' : 'Loading messages for this inbox…')
+        : interrupted ? 'Loading has not finished. Choose Continue to keep looking.'
+        : failed ? 'Some messages could not be loaded. Results may be incomplete.'
+        : isSearching() ? 'No messages match these filters.'
+        : $('mailbox').value ? 'No messages have arrived for this address yet.' : 'No messages have arrived yet.';
+      addText($('messages'), 'div', 'empty-list', text);
+    }
+  } else {
+    document.querySelectorAll('.message-row').forEach((row, index) => applyRowState(row, visible[index]));
   }
+  const knownTotal = exhausted ? items.length : !isSearching() && !activeFilters?.mailbox && !failed && totalStored ? totalStored : null;
+  $('resultCount').textContent = visible.length ? `${(start + 1).toLocaleString()}–${(start + visible.length).toLocaleString()}${knownTotal === null ? ' shown' : ` of ${knownTotal.toLocaleString()}`}` : '0 shown';
+  const pageCount = knownTotal === null ? null : Math.max(1, Math.ceil(knownTotal / pageSize));
+  $('pageLabel').textContent = `Page ${pageIndex + 1}${pageCount === null ? '' : ` of ${pageCount}`}`;
+  $('previousPage').disabled = pageIndex === 0;
+  const cachedNext = items.length > start + pageSize;
+  $('nextPage').disabled = !cachedNext && (exhausted || loading || interrupted);
+  $('continueLoad').hidden = !interrupted || loading;
+  $('stopSearch').hidden = !loading;
+}
+async function load(reset = false) {
+  if (signingOut || (loading && !reset)) return;
+  if (reset) {
+    requestGeneration += 1; loadController?.abort(); cursor = null; items = []; pageIndex = 0;
+    scanned = 0; failed = 0; exhausted = false; interrupted = false;
+    readStateOverrides.clear();
+    activeFilters = { query: $('search').value.trim(), mailbox: $('mailbox').value, after: $('after').value, before: $('before').value };
+    renderedIds = ''; $('messages').replaceChildren(); $('messages').scrollTop = 0; notice('');
+  }
+  if (exhausted) { renderList(); return; }
   const generation = requestGeneration;
-  loadController = new AbortController();
-  const { signal } = loadController;
-  loading = true; $('loadMore').disabled = true; $('refresh').disabled = true;
-  const query = $('search').value.trim();
-  const mailbox = $('mailbox').value;
-  const parameters = new URLSearchParams({ query, mailbox, after: $('after').value, before: $('before').value });
-  const searching = Boolean(query || $('after').value || $('before').value);
-  const startingShown = shown;
-  let interrupted = false;
+  loadController = new AbortController(); const { signal } = loadController;
+  const searching = isSearching();
+  const parameters = new URLSearchParams(activeFilters);
+  loading = true; interrupted = false; $('refresh').disabled = true;
   connected(searching ? 'Searching mail' : 'Loading mail');
-  $('listLabel').textContent = searching ? (mailbox ? 'Searching this inbox…' : 'Searching all inboxes…') : 'Loading messages…';
-  $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
-  $('stopSearch').hidden = false;
-  $('loadMore').hidden = true;
+  $('listLabel').textContent = searching ? 'Searching your mail…' : 'Loading messages…';
+  renderList();
   try {
     do {
-      if (cursor) parameters.set('cursor', cursor);
-      else parameters.delete('cursor');
+      if (cursor) parameters.set('cursor', cursor); else parameters.delete('cursor');
+      // One extra match tells us whether another visible page exists.
+      const target = (pageIndex + 1) * pageSize + 1;
+      parameters.set('limit', String(searching ? pageSize : Math.min(100, Math.max(1, target - items.length))));
       const result = await api(`messages?${parameters}`, signal);
       if (generation !== requestGeneration || signingOut) return;
-      document.querySelector('.empty-list')?.remove();
-      addMailboxes(result.items.map((item) => item.mailbox));
-      result.items.forEach(appendRow); shown += result.items.length; cursor = result.next_cursor;
-      scanned += result.scanned; failed += result.failed;
-      $('total').textContent = new Intl.NumberFormat().format(result.total_stored);
-      $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
-      if (searching) $('listLabel').textContent = `Searching ${scanned.toLocaleString()} / ${Number(result.total_stored).toLocaleString()}`;
-      else $('listLabel').textContent = 'Latest messages';
-      if (failed) notice('Some messages could not be searched. Results may be incomplete.');
-      if (!shown && searching && cursor) addText($('messages'), 'div', 'empty-list', 'Searching older messages… Results will appear here as they are found.');
-      else if (!searching && shown === startingShown && cursor) {
-        $('listLabel').textContent = 'Looking for messages…';
-        addText($('messages'), 'div', 'empty-list', 'Looking through older mail for this inbox…');
-      }
-    } while (cursor && (searching || shown === startingShown));
-    if (searching) $('listLabel').textContent = failed ? 'Search finished with errors' : 'Search complete';
-    if (!shown) {
-      document.querySelector('.empty-list')?.remove();
-      addText($('messages'), 'div', 'empty-list', failed ? 'No matches found in the readable messages. Some messages could not be searched.'
-        : searching ? 'No messages match these filters.' : mailbox ? 'No messages have arrived for this address yet.' : 'No messages have arrived yet.');
-    }
+      addMailboxes(result.items.map(item => item.mailbox));
+      for (const item of result.items) if (readStateOverrides.has(item.id)) item.read = readStateOverrides.get(item.id);
+      items.push(...result.items); cursor = result.next_cursor; exhausted = !cursor;
+      scanned += result.scanned; failed += result.failed; totalStored = Number(result.total_stored);
+      $('total').textContent = totalStored.toLocaleString();
+      $('listLabel').textContent = searching ? `Searching ${scanned.toLocaleString()} / ${totalStored.toLocaleString()}` : 'Latest messages';
+      if (failed) notice('Some messages could not be loaded. Results may be incomplete.');
+      renderList();
+    } while (cursor && (searching || items.length < (pageIndex + 1) * pageSize + 1));
+    if (exhausted) pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(items.length / pageSize) - 1));
+    $('listLabel').textContent = searching ? (failed ? 'Search finished with errors' : 'Search complete') : 'Latest messages';
     connected('Cloud inbox');
   } catch (error) {
     if (generation !== requestGeneration || signingOut) return;
     interrupted = true;
     if (error.name === 'AbortError') {
-      $('listLabel').textContent = searching ? 'Search paused' : 'Loading paused'; connected(searching ? 'Search paused' : 'Loading paused');
+      $('listLabel').textContent = searching ? 'Search paused' : 'Loading paused'; connected('Paused');
     } else {
-      notice(error.message); connected('Connection interrupted');
-      if (searching) $('listLabel').textContent = 'Search interrupted';
-    }
-    if (!shown) {
-      document.querySelector('.empty-list')?.remove();
-      addText($('messages'), 'div', 'empty-list', searching
-        ? 'The search has not finished. Choose “Continue search” to keep looking.'
-        : error.name === 'AbortError' ? 'Loading paused. Choose “Continue loading” to keep looking.' : 'Mail could not be loaded. Please try Refresh.');
+      notice(error.message); connected('Connection interrupted'); $('listLabel').textContent = 'Loading interrupted';
     }
   } finally {
     if (generation === requestGeneration && !signingOut) {
-      loading = false; $('loadMore').disabled = false; $('refresh').disabled = false; $('stopSearch').hidden = true;
-      $('loadMore').hidden = !cursor && !interrupted;
-      $('loadMore').textContent = searching ? 'Continue search' : interrupted ? 'Continue loading' : 'Load older messages';
+      loading = false; $('refresh').disabled = false; renderList();
     }
+  }
+}
+function changePage(delta) {
+  pageIndex = Math.max(0, pageIndex + delta); closeMessage(); $('messages').scrollTop = 0; renderList();
+  if (!exhausted && items.length < (pageIndex + 1) * pageSize + 1) load();
+}
+function updateReadControl() {
+  if (!selectedMessage) return;
+  $('toggleRead').disabled = pendingReadIds.has(selectedMessage.id);
+  $('toggleRead').textContent = pendingReadIds.has(selectedMessage.id) ? 'Saving…' : selectedMessage.read ? 'Mark unread' : 'Mark read';
+}
+async function setReadState(id, read) {
+  if (pendingReadIds.has(id) || signingOut) return;
+  pendingReadIds.add(id); updateReadControl();
+  if (selectedId === id) { $('readerNotice').hidden = true; $('readerNotice').textContent = ''; }
+  try {
+    const result = await api(`messages/${id}/read-status`, undefined, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ read }),
+    });
+    if (signingOut) return;
+    readStateOverrides.set(id, result.read);
+    const item = items.find(item => item.id === id); if (item) item.read = result.read;
+    if (selectedMessage?.id === id) selectedMessage.read = result.read;
+    renderList();
+  } catch {
+    if (!signingOut && selectedId === id) {
+      $('readerNotice').textContent = 'Read status could not be saved. Use the read/unread button to try again.';
+      $('readerNotice').hidden = false;
+    }
+  } finally {
+    pendingReadIds.delete(id); if (!signingOut) updateReadControl();
   }
 }
 function renderBody(text) {
@@ -172,7 +230,8 @@ async function openMessage(id) {
   try {
     const message = await api(`messages/${encodeURIComponent(id)}`);
     if (generation !== readingGeneration) return;
-    selectedId = id;
+    selectedId = id; selectedMessage = message;
+    $('readerNotice').hidden = true; $('readerNotice').textContent = '';
     window.history.replaceState(null, '', `#${id}`);
     document.querySelectorAll('.message-row').forEach((row) => row.classList.toggle('selected', row.dataset.id === id));
     $('messageSubject').textContent = message.subject; $('messageMailbox').textContent = message.mailbox;
@@ -186,13 +245,26 @@ async function openMessage(id) {
     });
     renderBody(message.text); $('readerPlaceholder').hidden = true; $('message').hidden = false;
     document.body.classList.add('reading'); document.querySelector('.reader').scrollTop = 0; connected('Cloud inbox');
+    const item = items.find(item => item.id === id); if (item) item.read = message.read;
+    renderList(); updateReadControl();
+    if (!message.read) await setReadState(id, true);
   } catch (error) { if (generation === readingGeneration) { notice(error.message); connected('Connection interrupted'); } }
 }
 $('searchForm').addEventListener('submit', (event) => { event.preventDefault(); load(true); });
 $('refresh').addEventListener('click', () => load(true));
 $('mailbox').addEventListener('change', switchInbox);
 $('applyDates').addEventListener('click', () => load(true));
-$('loadMore').addEventListener('click', () => load());
+$('previousPage').addEventListener('click', () => changePage(-1));
+$('nextPage').addEventListener('click', () => changePage(1));
+$('continueLoad').addEventListener('click', () => load());
+$('pageSize').value = String(pageSize);
+$('pageSize').addEventListener('change', () => {
+  pageSize = Number($('pageSize').value); pageIndex = 0;
+  try { localStorage.setItem('cmail.page-size', String(pageSize)); } catch {}
+  closeMessage(); $('messages').scrollTop = 0; renderList();
+  if (!exhausted && items.length < pageSize + 1) load();
+});
+$('toggleRead').addEventListener('click', () => { if (selectedMessage) setReadState(selectedMessage.id, !selectedMessage.read); });
 $('stopSearch').addEventListener('click', () => loadController?.abort());
 $('signOut').addEventListener('click', (event) => {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
