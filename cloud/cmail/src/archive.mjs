@@ -102,7 +102,11 @@ export class MailQueue extends LegacyMailQueue {
           subject: decodeWords(header(payload, 'subject')) || '(No subject)',
         };
         if (mailbox && item.mailbox.toLowerCase() !== mailbox) continue;
-        if (query && ![item.subject, item.from, item.to, item.mailbox].some((value) => value.toLowerCase().includes(query))) continue;
+        if (query && ![item.subject, item.from, item.to, item.mailbox].some((value) => value.toLowerCase().includes(query))) {
+          const parsed = await PostalMime.parse(fromBase64(payload.raw_base64));
+          const text = `${parsed.text || ''}\n${plainTextFromHtml(parsed.html)}`;
+          if (!text.toLowerCase().includes(query)) continue;
+        }
         items.push(item);
         if (items.length === PAGE_LIMIT) break;
       } catch {

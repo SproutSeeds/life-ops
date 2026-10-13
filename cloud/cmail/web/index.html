@@ -18,6 +18,7 @@
     <a class="brand" href="/cmail/" aria-label="C-mail inbox"><span class="brandmark">C</span><span>C-mail<span class="brand-dot">.</span></span></a>
     <span class="connection"><span class="status-dot"></span><span id="connectionText">Connecting</span></span>
     <button id="refresh" class="quiet" type="button">↻ <span>Refresh</span></button>
+    <a id="signOut" class="sign-out" href="/cdn-cgi/access/logout">Sign out</a>
   </header>
   <div class="workspace">
     <aside class="sidebar">
@@ -29,9 +30,9 @@
     </aside>
     <main class="inbox" aria-label="Inbox">
       <div class="inbox-heading"><div><p class="eyebrow">CONNECTED MAIL</p><h1>Inbox</h1></div><span class="read-only">Read only</span></div>
-      <form id="searchForm" class="search-form"><label class="search-label" for="search">⌕</label><input type="search" id="search" placeholder="Search sender or subject" aria-label="Search sender or subject"><button type="submit" aria-label="Search">↵</button></form>
+      <form id="searchForm" class="search-form"><label class="search-label" for="search">⌕</label><input type="search" id="search" placeholder="Search all mail" aria-label="Search messages, senders, and subjects"><button type="submit" aria-label="Search">↵</button></form>
       <details class="date-filters"><summary>Filter by date</summary><div><label>From<input type="date" id="after"></label><label>Through<input type="date" id="before"></label><button id="applyDates" type="button">Apply</button></div></details>
-      <div class="list-meta"><span id="listLabel">Latest messages</span><span id="resultCount"></span></div>
+      <div class="list-meta"><span id="listLabel" role="status">Latest messages</span><span id="resultCount"></span><button id="stopSearch" type="button" hidden>Stop</button></div>
       <div id="notice" class="notice" role="status" hidden></div>
       <div id="messages" class="messages" aria-live="polite"><div class="empty-list">Opening your inbox…</div></div>
       <button id="loadMore" class="load-more" type="button" hidden>Load older messages</button>

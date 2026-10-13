@@ -20,7 +20,7 @@ class Storage {
 const masterKey = Buffer.alloc(32, 19).toString('base64url');
 const env = { LIFE_OPS_MASTER_KEY: masterKey, LIFE_OPS_MAIL_INGEST_SECRET: 'test-fixture-key' };
 function fixture(subject, sequence, overrides = {}) {
-  const raw = `From: Jordan <jordan@example.com>\r\nTo: owner@example.com\r\nSubject: ${subject}\r\nMessage-ID: <message-${sequence}@example.com>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlease join https://meet.example.com/interview at 11 AM.\r\n`;
+  const raw = `From: Jordan <jordan@example.com>\r\nTo: owner@example.com\r\nSubject: ${subject}\r\nMessage-ID: <message-${sequence}@example.com>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlease join https://meet.example.com/conversation at 11 AM.\r\n`;
   return { headers: { from: 'Jordan <jordan@example.com>', to: 'owner@example.com', subject }, envelope_from: 'jordan@example.com', envelope_to: 'owner@example.com', received_at: '2026-10-01T14:00:00Z', raw_base64: Buffer.from(raw).toString('base64'), ...overrides };
 }
 function setup() {
@@ -37,7 +37,7 @@ test('previously acknowledged mail remains readable without changing queue or en
   const results = await archive.listArchive({ query: 'INTERVIEW' });
   assert.deepEqual(results.items.map((item) => item.id), [old.id]);
   const message = await archive.readArchiveMessage({ id: old.id });
-  assert.match(message.text, /https:\/\/meet.example.com\/interview/);
+  assert.match(message.text, /https:\/\/meet.example.com\/conversation/);
   assert.equal(message.from.address, 'jordan@example.com');
   assert.equal((await legacy.pull({})).items[0].id, pending.id);
   assert.deepEqual([...state.storage.values], snapshot);
@@ -76,6 +76,24 @@ test('encoded headers are searchable and a malformed archive does not hide intac
   await state.storage.put(`mail:${bad.id}`, record);
   const page = await archive.listArchive({ query: 'interview' });
   assert.equal(page.items[0].subject, 'Interview ✓'); assert.equal(page.failed, 1);
+});
+
+test('search finds names inside encoded text and HTML bodies beyond the first scan without changing stored mail', async () => {
+  const { state, legacy, archive } = setup();
+  const headers = 'From: calendar@example.com\r\nTo: owner@example.com\r\nSubject: Conversation details\r\nMIME-Version: 1.0\r\n';
+  const text = `${headers}Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.from('Your conversation is with Rowan about the Orchard project.').toString('base64')}\r\n`;
+  const html = `${headers}Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>You will meet Row=61n to discuss the Orchard project.</p>`;
+  const textMessage = await legacy.enqueue(fixture('Conversation details', 1, { raw_base64: Buffer.from(text).toString('base64') }));
+  const htmlMessage = await legacy.enqueue(fixture('Conversation details', 2, { raw_base64: Buffer.from(html).toString('base64') }));
+  await legacy.ack({ ids: [textMessage.id, htmlMessage.id] });
+  for (let i = 3; i < 48; i++) await legacy.enqueue(fixture(`Recent update ${i}`, i));
+  const snapshot = structuredClone([...state.storage.values]);
+  const first = await archive.listArchive({ query: 'RoWaN' });
+  assert.equal(first.items.length, 0); assert(first.next_cursor);
+  const second = await archive.listArchive({ query: 'RoWaN', cursor: first.next_cursor });
+  assert.deepEqual(second.items.map((item) => item.id), [htmlMessage.id, textMessage.id]);
+  assert.equal(second.next_cursor, null); assert.equal(second.failed, 0);
+  assert.deepEqual([...state.storage.values], snapshot);
 });
 
 test('calendar attachment contents and exact raw messages can be recovered', async () => {

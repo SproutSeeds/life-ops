@@ -5,11 +5,15 @@ let requestGeneration = 0;
 let readingGeneration = 0;
 let loading = false;
 let shown = 0;
+let scanned = 0;
+let failed = 0;
+let loadController = null;
+let signingOut = false;
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 function connected(value) { $('connectionText').textContent = value; }
-async function api(path) {
-  const result = await fetch(`/cmail/api/${path}`, { cache: 'no-store', redirect: 'manual' });
+async function api(path, signal) {
+  const result = await fetch(`/cmail/api/${path}`, { cache: 'no-store', redirect: 'manual', signal });
   if (result.type === 'opaqueredirect' || [401,403].includes(result.status)) {
     throw new Error('Your session has expired. Reload this page to sign in again.');
   }
@@ -44,31 +48,67 @@ function appendRow(item) {
   row.addEventListener('click', () => openMessage(item.id)); $('messages').append(row);
 }
 async function load(reset = false) {
+  if (signingOut) return;
   if (loading && !reset) return;
-  if (reset) { requestGeneration += 1; cursor = null; shown = 0; $('messages').replaceChildren(); notice(''); }
+  if (reset) {
+    requestGeneration += 1; loadController?.abort(); cursor = null; shown = 0; scanned = 0; failed = 0;
+    $('messages').replaceChildren(); notice('');
+  }
   const generation = requestGeneration;
-  loading = true; $('loadMore').disabled = true; $('refresh').disabled = true; connected('Loading mail');
+  loadController = new AbortController();
+  const { signal } = loadController;
+  loading = true; $('loadMore').disabled = true; $('refresh').disabled = true;
   const query = $('search').value.trim();
   const parameters = new URLSearchParams({ query, mailbox: $('mailbox').value.trim(), after: $('after').value, before: $('before').value });
-  if (cursor) parameters.set('cursor', cursor);
+  const searching = [...parameters.values()].some(Boolean);
+  let interrupted = false;
+  connected(searching ? 'Searching mail' : 'Loading mail');
+  $('listLabel').textContent = searching ? 'Searching all mail…' : 'Latest messages';
+  $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
+  $('stopSearch').hidden = !searching;
+  $('loadMore').hidden = true;
   try {
-    const result = await api(`messages?${parameters}`);
-    if (generation !== requestGeneration) return;
-    document.querySelector('.empty-list')?.remove();
-    result.items.forEach(appendRow); shown += result.items.length; cursor = result.next_cursor;
-    $('total').textContent = new Intl.NumberFormat().format(result.total_stored);
-    $('resultCount').textContent = `${shown} shown`; $('listLabel').textContent = query ? 'Search results' : 'Latest messages';
-    $('loadMore').hidden = !cursor; $('loadMore').textContent = query ? 'Search older messages' : 'Load older messages';
-    if (result.failed) notice('Some messages could not be opened. Other messages are still available.');
-    if (!shown) addText($('messages'), 'div', 'empty-list', cursor
-      ? 'No matches in this part of your inbox. Choose “Search older messages” to keep looking.'
-      : 'No messages match these filters.');
+    do {
+      if (cursor) parameters.set('cursor', cursor);
+      else parameters.delete('cursor');
+      const result = await api(`messages?${parameters}`, signal);
+      if (generation !== requestGeneration || signingOut) return;
+      document.querySelector('.empty-list')?.remove();
+      result.items.forEach(appendRow); shown += result.items.length; cursor = result.next_cursor;
+      scanned += result.scanned; failed += result.failed;
+      $('total').textContent = new Intl.NumberFormat().format(result.total_stored);
+      $('resultCount').textContent = searching ? `${shown} found` : `${shown} shown`;
+      if (searching) $('listLabel').textContent = `Searching ${scanned.toLocaleString()} / ${Number(result.total_stored).toLocaleString()}`;
+      if (failed) notice('Some messages could not be searched. Results may be incomplete.');
+      if (!shown && searching && cursor) addText($('messages'), 'div', 'empty-list', 'Searching older messages… Results will appear here as they are found.');
+    } while (searching && cursor);
+    if (searching) $('listLabel').textContent = failed ? 'Search finished with errors' : 'Search complete';
+    if (!shown) {
+      document.querySelector('.empty-list')?.remove();
+      addText($('messages'), 'div', 'empty-list', failed ? 'No matches found in the readable messages. Some messages could not be searched.' : 'No messages match these filters.');
+    }
     connected('Cloud inbox');
   } catch (error) {
-    if (generation !== requestGeneration) return;
-    notice(error.message); connected('Connection interrupted');
+    if (generation !== requestGeneration || signingOut) return;
+    interrupted = true;
+    if (error.name === 'AbortError') {
+      $('listLabel').textContent = 'Search paused'; connected('Search paused');
+    } else {
+      notice(error.message); connected('Connection interrupted');
+      if (searching) $('listLabel').textContent = 'Search interrupted';
+    }
+    if (!shown) {
+      document.querySelector('.empty-list')?.remove();
+      addText($('messages'), 'div', 'empty-list', searching
+        ? 'The search has not finished. Choose “Continue search” to keep looking.'
+        : 'Mail could not be loaded. Please try Refresh.');
+    }
   } finally {
-    if (generation === requestGeneration) { loading = false; $('loadMore').disabled = false; $('refresh').disabled = false; }
+    if (generation === requestGeneration && !signingOut) {
+      loading = false; $('loadMore').disabled = false; $('refresh').disabled = false; $('stopSearch').hidden = true;
+      $('loadMore').hidden = !cursor && !(searching && interrupted);
+      $('loadMore').textContent = searching ? 'Continue search' : 'Load older messages';
+    }
   }
 }
 function renderBody(text) {
@@ -84,6 +124,7 @@ function renderBody(text) {
   target.append(document.createTextNode(text.slice(offset)));
 }
 async function openMessage(id) {
+  if (signingOut) return;
   const generation = ++readingGeneration;
   notice(''); connected('Opening message');
   try {
@@ -110,6 +151,14 @@ $('refresh').addEventListener('click', () => load(true));
 $('mailbox').addEventListener('change', () => load(true));
 $('applyDates').addEventListener('click', () => load(true));
 $('loadMore').addEventListener('click', () => load());
+$('stopSearch').addEventListener('click', () => loadController?.abort());
+$('signOut').addEventListener('click', (event) => {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  signingOut = true; requestGeneration += 1; readingGeneration += 1; loadController?.abort();
+  // Clear rendered mail before leaving, including any page kept in browser history.
+  document.body.replaceChildren(); document.title = 'Signing out · C-mail';
+});
+window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 $('back').addEventListener('click', () => {
   readingGeneration += 1; selectedId = null; document.body.classList.remove('reading');
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
@@ -117,8 +166,13 @@ $('back').addEventListener('click', () => {
   document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
 });
 $('allMail').addEventListener('click', () => { $('search').value = ''; $('mailbox').value = ''; $('after').value = ''; $('before').value = ''; load(true); });
-api('session').then((session) => { $('accountEmail').textContent = session.email; }).catch((error) => notice(error.message));
+api('session').then((session) => {
+  if (signingOut) return;
+  $('accountEmail').textContent = session.email;
+  $('signOut').title = `Sign out ${session.email}`;
+}).catch((error) => { if (!signingOut) notice(error.message); });
 function openLinkedMessage() {
+  if (signingOut) return;
   const linked = window.location.hash.match(/^#(mail_\d{16})$/);
   if (linked) return openMessage(linked[1]);
 }
