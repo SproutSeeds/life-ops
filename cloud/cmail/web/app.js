@@ -12,6 +12,10 @@ let exhausted = false;
 let interrupted = false;
 let activeFilters = null;
 let totalStored = 0;
+let totalView = null;
+let bulkBusy = false;
+let actionStatusTimer;
+const checkedIds = new Set();
 let selectedMessage = null;
 let renderedIds = '';
 const pendingReadIds = new Set();
@@ -34,11 +38,10 @@ function addMailboxes(addresses) {
 }
 function updateInboxLabel() {
   const mailbox = $('mailbox').value;
-  $('inboxTitle').textContent = mailbox ? 'Inbox' : 'All inboxes';
-  $('allMail').classList.toggle('active', !mailbox);
-  $('search').placeholder = mailbox ? 'Search this inbox' : 'Search all inboxes';
-  $('mailboxStatus').textContent = mailbox ? 'Showing mail sent to this address.'
-    : `${knownMailboxes.size} ${knownMailboxes.size === 1 ? 'address' : 'addresses'} · One combined inbox`;
+  const view = $('mailView').value;
+  $('inboxTitle').textContent = view === 'archive' ? 'Archive' : view === 'all' ? 'All mail' : mailbox ? 'Inbox' : 'All inboxes';
+  $('search').placeholder = view === 'archive' ? 'Search archive' : view === 'all' ? 'Search all mail' : mailbox ? 'Search this inbox' : 'Search all inboxes';
+  $('inboxTitle').title = mailbox || 'All connected addresses';
 }
 function closeMessage() {
   readingGeneration += 1; selectedId = null; selectedMessage = null; document.body.classList.remove('reading');
@@ -47,15 +50,22 @@ function closeMessage() {
   document.querySelectorAll('.message-row').forEach((row) => row.classList.remove('selected'));
 }
 function switchInbox() {
+  if (bulkBusy) return;
   const url = new URL(window.location.href);
   if ($('mailbox').value) url.searchParams.set('mailbox', $('mailbox').value);
   else url.searchParams.delete('mailbox');
+  if ($('mailView').value !== 'inbox') url.searchParams.set('view', $('mailView').value);
+  else url.searchParams.delete('view');
   url.hash = ''; window.history.replaceState(null, '', url);
   closeMessage(); updateInboxLabel(); load(true);
 }
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
-function connected(value) { $('connectionText').textContent = value; }
+function actionStatus(message) {
+  clearTimeout(actionStatusTimer); $('actionStatus').textContent = message; $('actionStatus').hidden = !message;
+  if (message) actionStatusTimer = setTimeout(() => { $('actionStatus').hidden = true; }, 5000);
+}
+function connected(value) { $('connectionText').textContent = value; $('connection').title = value; }
 async function api(path, signal, options = {}) {
   const result = await fetch(`/cmail/api/${path}`, { ...options, cache: 'no-store', redirect: 'manual', signal });
   if (result.type === 'opaqueredirect' || [401,403].includes(result.status)) {
@@ -87,18 +97,44 @@ function applyRowState(row, item) {
   row.classList.toggle('unread', !item.read);
   row.classList.toggle('selected', item.id === selectedId);
   row.dataset.read = String(Boolean(item.read));
-  row.setAttribute('aria-label', `${item.read ? 'Read' : 'Unread'}: ${senderLabel(item.from)} — ${item.subject}`);
+  row.classList.toggle('checked', checkedIds.has(item.id));
+  const checkbox = row.querySelector('input'); checkbox.checked = checkedIds.has(item.id); checkbox.disabled = bulkBusy;
+  row.querySelector('.message-open').setAttribute('aria-label', `${item.read ? 'Read' : 'Unread'}: ${senderLabel(item.from)} — ${item.subject}`);
 }
 function appendRow(item) {
-  const row = document.createElement('button'); row.type = 'button'; row.className = 'message-row'; row.dataset.id = item.id;
-  const indicator = addText(row, 'span', 'read-indicator', ''); indicator.setAttribute('aria-hidden', 'true');
-  addText(row, 'span', 'row-sender', senderLabel(item.from));
-  const subject = addText(row, 'span', 'row-subject', item.subject); subject.title = item.subject;
-  addText(row, 'span', 'row-mailbox', item.mailbox);
-  addText(row, 'time', 'row-date', dateLabel(item.received_at));
+  const row = document.createElement('div'); row.className = 'message-row'; row.dataset.id = item.id;
+  const label = addText(row, 'label', 'row-check', '');
+  const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+  checkbox.setAttribute('aria-label', `Select: ${senderLabel(item.from)} — ${item.subject}`); label.append(checkbox);
+  checkbox.addEventListener('change', () => { if (checkbox.checked) checkedIds.add(item.id); else checkedIds.delete(item.id); renderList(); });
+  const open = addText(row, 'button', 'message-open', ''); open.type = 'button';
+  const indicator = addText(open, 'span', 'read-indicator', ''); indicator.setAttribute('aria-hidden', 'true');
+  addText(open, 'span', 'row-sender', senderLabel(item.from));
+  const subject = addText(open, 'span', 'row-subject', item.subject); subject.title = item.subject;
+  addText(open, 'span', 'row-mailbox', item.mailbox);
+  addText(open, 'time', 'row-date', dateLabel(item.received_at));
   applyRowState(row, item);
-  row.addEventListener('click', () => openMessage(item.id)); $('messages').append(row);
+  open.addEventListener('click', () => openMessage(item.id)); $('messages').append(row);
 }
+function closeActions() { $('actionsMenu').hidden = true; $('actionsButton').setAttribute('aria-expanded', 'false'); }
+function updateSelection() {
+  const visible = items.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
+  const count = checkedIds.size;
+  $('selectPage').checked = visible.length > 0 && visible.every(item => checkedIds.has(item.id));
+  $('selectPage').indeterminate = count > 0 && !$('selectPage').checked;
+  $('selectPage').disabled = !visible.length || bulkBusy;
+  $('selectionCount').textContent = `${count} selected`; $('selectionCount').hidden = !count;
+  $('clearSelection').hidden = !count; $('clearSelection').disabled = bulkBusy;
+  document.body.classList.toggle('has-selection', count > 0);
+  $('actionsButton').disabled = !count || loading || bulkBusy || [...checkedIds].some(id => pendingReadIds.has(id));
+  $('actionsButton').textContent = bulkBusy ? 'Saving…' : 'Actions ⌄';
+  $('actionsButton').title = loading ? 'Wait for loading to finish, or choose Stop.' : 'Actions for checked messages';
+  document.querySelector('[data-action="archive"]').hidden = $('mailView').value === 'archive';
+  document.querySelector('[data-action="unarchive"]').hidden = $('mailView').value === 'inbox';
+  for (const id of ['mailbox','mailView','pageSize','search','after','before','applyDates','clearDates']) $(id).disabled = bulkBusy;
+  $('refresh').disabled = bulkBusy || loading;
+}
+function clearSelection() { checkedIds.clear(); closeActions(); renderList(); }
 function isSearching() { return Boolean(activeFilters?.query || activeFilters?.after || activeFilters?.before); }
 function renderList() {
   const start = pageIndex * pageSize;
@@ -112,29 +148,33 @@ function renderList() {
         : interrupted ? 'Loading has not finished. Choose Continue to keep looking.'
         : failed ? 'Some messages could not be loaded. Results may be incomplete.'
         : isSearching() ? 'No messages match these filters.'
-        : $('mailbox').value ? 'No messages have arrived for this address yet.' : 'No messages have arrived yet.';
+        : $('mailView').value === 'archive' ? 'No archived messages in this view.'
+        : 'No messages in this inbox.';
       addText($('messages'), 'div', 'empty-list', text);
     }
   } else {
     document.querySelectorAll('.message-row').forEach((row, index) => applyRowState(row, visible[index]));
   }
-  const knownTotal = exhausted ? items.length : !isSearching() && !activeFilters?.mailbox && !failed && totalStored ? totalStored : null;
+  const knownTotal = exhausted ? items.length : !isSearching() && !activeFilters?.mailbox && !failed ? totalView : null;
   $('resultCount').textContent = visible.length ? `${(start + 1).toLocaleString()}–${(start + visible.length).toLocaleString()}${knownTotal === null ? ' shown' : ` of ${knownTotal.toLocaleString()}`}` : '0 shown';
   const pageCount = knownTotal === null ? null : Math.max(1, Math.ceil(knownTotal / pageSize));
   $('pageLabel').textContent = `Page ${pageIndex + 1}${pageCount === null ? '' : ` of ${pageCount}`}`;
-  $('previousPage').disabled = pageIndex === 0;
+  $('previousPage').disabled = pageIndex === 0 || bulkBusy;
   const cachedNext = items.length > start + pageSize;
-  $('nextPage').disabled = !cachedNext && (exhausted || loading || interrupted);
+  $('nextPage').disabled = bulkBusy || (!cachedNext && (exhausted || loading || interrupted));
   $('continueLoad').hidden = !interrupted || loading;
   $('stopSearch').hidden = !loading;
+  updateSelection();
 }
 async function load(reset = false) {
-  if (signingOut || (loading && !reset)) return;
+  if (signingOut || bulkBusy || (loading && !reset)) return;
   if (reset) {
     requestGeneration += 1; loadController?.abort(); cursor = null; items = []; pageIndex = 0;
     scanned = 0; failed = 0; exhausted = false; interrupted = false;
+    totalView = null; checkedIds.clear(); closeActions();
+    actionStatus('');
     readStateOverrides.clear();
-    activeFilters = { query: $('search').value.trim(), mailbox: $('mailbox').value, after: $('after').value, before: $('before').value };
+    activeFilters = { query: $('search').value.trim(), mailbox: $('mailbox').value, view: $('mailView').value, after: $('after').value, before: $('before').value };
     renderedIds = ''; $('messages').replaceChildren(); $('messages').scrollTop = 0; notice('');
   }
   if (exhausted) { renderList(); return; }
@@ -158,7 +198,7 @@ async function load(reset = false) {
       for (const item of result.items) if (readStateOverrides.has(item.id)) item.read = readStateOverrides.get(item.id);
       items.push(...result.items); cursor = result.next_cursor; exhausted = !cursor;
       scanned += result.scanned; failed += result.failed; totalStored = Number(result.total_stored);
-      $('total').textContent = totalStored.toLocaleString();
+      totalView = Number(result.total_view);
       $('listLabel').textContent = searching ? `Searching ${scanned.toLocaleString()} / ${totalStored.toLocaleString()}` : 'Latest messages';
       if (failed) notice('Some messages could not be loaded. Results may be incomplete.');
       renderList();
@@ -181,17 +221,19 @@ async function load(reset = false) {
   }
 }
 function changePage(delta) {
+  if (bulkBusy) return;
+  checkedIds.clear(); closeActions();
   pageIndex = Math.max(0, pageIndex + delta); closeMessage(); $('messages').scrollTop = 0; renderList();
   if (!exhausted && items.length < (pageIndex + 1) * pageSize + 1) load();
 }
 function updateReadControl() {
   if (!selectedMessage) return;
-  $('toggleRead').disabled = pendingReadIds.has(selectedMessage.id);
+  $('toggleRead').disabled = bulkBusy || pendingReadIds.has(selectedMessage.id);
   $('toggleRead').textContent = pendingReadIds.has(selectedMessage.id) ? 'Saving…' : selectedMessage.read ? 'Mark unread' : 'Mark read';
 }
 async function setReadState(id, read) {
-  if (pendingReadIds.has(id) || signingOut) return;
-  pendingReadIds.add(id); updateReadControl();
+  if (pendingReadIds.has(id) || signingOut || bulkBusy) return;
+  pendingReadIds.add(id); updateReadControl(); updateSelection();
   if (selectedId === id) { $('readerNotice').hidden = true; $('readerNotice').textContent = ''; }
   try {
     const result = await api(`messages/${id}/read-status`, undefined, {
@@ -208,7 +250,48 @@ async function setReadState(id, read) {
       $('readerNotice').hidden = false;
     }
   } finally {
-    pendingReadIds.delete(id); if (!signingOut) updateReadControl();
+    pendingReadIds.delete(id); if (!signingOut) { updateReadControl(); updateSelection(); }
+  }
+}
+async function applyBulkAction(action) {
+  if (!checkedIds.size || $('actionsButton').disabled || signingOut) return;
+  const ids = [...checkedIds];
+  bulkBusy = true; readingGeneration += 1; closeActions(); renderList(); updateReadControl(); notice('');
+  let succeeded = false;
+  try {
+    const result = await api('messages/actions', undefined, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, action }),
+    });
+    if (signingOut) return;
+    for (const state of result.items) {
+      const item = items.find(item => item.id === state.id);
+      if (item) {
+        const archiveDelta = Number(state.archived) - Number(Boolean(item.archived));
+        if (totalView !== null && activeFilters.view !== 'all') totalView += activeFilters.view === 'archive' ? archiveDelta : -archiveDelta;
+        Object.assign(item, state);
+      }
+      readStateOverrides.set(state.id, state.read);
+      if (selectedMessage?.id === state.id) Object.assign(selectedMessage, state);
+    }
+    if (action === 'archive' || action === 'unarchive') {
+      items = items.filter(item => activeFilters.view === 'all' || item.archived === (activeFilters.view === 'archive'));
+      if (ids.includes(selectedId)) closeMessage();
+      pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(items.length / pageSize) - 1));
+    }
+    checkedIds.clear(); succeeded = true;
+  } catch (error) {
+    const detail = error.message.startsWith('Your ') ? error.message : 'Check your connection and try again.';
+    if (!signingOut) notice(`Could not confirm the action. Your selection is kept so you can retry. ${detail}`);
+  } finally {
+    bulkBusy = false;
+    if (!signingOut) {
+      renderList(); updateReadControl();
+      if (succeeded) {
+        const label = { read: 'Marked read', unread: 'Marked unread', archive: 'Archived', unarchive: 'Moved to inbox' }[action];
+        actionStatus(`${label}: ${ids.length} ${ids.length === 1 ? 'message' : 'messages'}.`);
+        if (!exhausted && !interrupted && items.length < (pageIndex + 1) * pageSize + 1) load();
+      }
+    }
   }
 }
 function renderBody(text) {
@@ -224,7 +307,7 @@ function renderBody(text) {
   target.append(document.createTextNode(text.slice(offset)));
 }
 async function openMessage(id) {
-  if (signingOut) return;
+  if (signingOut || bulkBusy) return;
   const generation = ++readingGeneration;
   notice(''); connected('Opening message');
   try {
@@ -253,12 +336,27 @@ async function openMessage(id) {
 $('searchForm').addEventListener('submit', (event) => { event.preventDefault(); load(true); });
 $('refresh').addEventListener('click', () => load(true));
 $('mailbox').addEventListener('change', switchInbox);
-$('applyDates').addEventListener('click', () => load(true));
+$('mailView').addEventListener('change', switchInbox);
+function applyDates() { if (bulkBusy) return; $('dateFilters').open = false; $('dateSummary').textContent = $('after').value || $('before').value ? 'Dates •' : 'Dates'; closeMessage(); load(true); }
+$('applyDates').addEventListener('click', applyDates);
+$('clearDates').addEventListener('click', () => { $('after').value = ''; $('before').value = ''; applyDates(); });
+$('selectPage').addEventListener('change', () => {
+  const checked = $('selectPage').checked;
+  for (const item of items.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize)) if (checked) checkedIds.add(item.id); else checkedIds.delete(item.id);
+  renderList();
+});
+$('clearSelection').addEventListener('click', clearSelection);
+$('actionsButton').addEventListener('click', () => { const open = $('actionsMenu').hidden; $('actionsMenu').hidden = !open; $('actionsButton').setAttribute('aria-expanded', String(open)); if (open) $('dateFilters').open = false; });
+document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => applyBulkAction(button.dataset.action)));
+document.addEventListener('click', event => { if (!event.target.closest('.bulk-menu')) closeActions(); if (!event.target.closest('.date-filters')) $('dateFilters').open = false; });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeActions(); $('dateFilters').open = false; } });
 $('previousPage').addEventListener('click', () => changePage(-1));
 $('nextPage').addEventListener('click', () => changePage(1));
 $('continueLoad').addEventListener('click', () => load());
 $('pageSize').value = String(pageSize);
 $('pageSize').addEventListener('change', () => {
+  if (bulkBusy) return;
+  checkedIds.clear(); closeActions();
   pageSize = Number($('pageSize').value); pageIndex = 0;
   try { localStorage.setItem('cmail.page-size', String(pageSize)); } catch {}
   closeMessage(); $('messages').scrollTop = 0; renderList();
@@ -269,15 +367,14 @@ $('stopSearch').addEventListener('click', () => loadController?.abort());
 $('signOut').addEventListener('click', (event) => {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   signingOut = true; requestGeneration += 1; readingGeneration += 1; loadController?.abort();
+  clearTimeout(actionStatusTimer);
   // Clear rendered mail before leaving, including any page kept in browser history.
   document.body.replaceChildren(); document.title = 'Signing out · C-mail';
 });
 window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 $('back').addEventListener('click', closeMessage);
-$('allMail').addEventListener('click', () => { $('search').value = ''; $('mailbox').value = ''; $('after').value = ''; $('before').value = ''; switchInbox(); });
 api('session').then((session) => {
   if (signingOut) return;
-  $('accountEmail').textContent = session.email;
   $('signOut').title = `Sign out ${session.email}`;
   addMailboxes(session.mailboxes || []);
 }).catch((error) => { if (!signingOut) notice(error.message); });
@@ -288,6 +385,8 @@ function openLinkedMessage() {
 }
 window.addEventListener('hashchange', openLinkedMessage);
 const initialMailbox = new URLSearchParams(window.location.search).get('mailbox') || '';
+const initialView = new URLSearchParams(window.location.search).get('view');
+if (['inbox','archive','all'].includes(initialView)) $('mailView').value = initialView;
 if (initialMailbox) { addMailboxes([initialMailbox]); $('mailbox').value = initialMailbox.trim().toLowerCase(); }
 updateInboxLabel();
 load(true).then(openLinkedMessage);

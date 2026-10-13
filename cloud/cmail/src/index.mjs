@@ -37,7 +37,8 @@ export function createWorker(checkAccess = authorize) {
       const access = await checkAccess(request, env);
       if (!access.ok) return json({ error: access.error }, access.status);
       const readStatusMatch = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})\/read-status$/);
-      if (readStatusMatch) {
+      const bulkAction = url.pathname === `${PREFIX}/api/messages/actions`;
+      if (readStatusMatch || bulkAction) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
         if (request.headers.get('Origin') !== url.origin || request.headers.get('Sec-Fetch-Site') === 'cross-site') {
           return json({ error: 'invalid_origin' }, 403);
@@ -48,17 +49,17 @@ export function createWorker(checkAccess = authorize) {
         let body;
         try {
           const text = await request.text();
-          if (text.length > 128) return json({ error: 'invalid_request' }, 400);
+          if (text.length > (bulkAction ? 8192 : 128)) return json({ error: 'invalid_request' }, 400);
           body = JSON.parse(text);
         } catch { return json({ error: 'invalid_request' }, 400); }
-        if (typeof body?.read !== 'boolean') return json({ error: 'invalid_request' }, 400);
+        if (readStatusMatch && typeof body?.read !== 'boolean') return json({ error: 'invalid_request' }, 400);
         try {
-          const result = await env.MAIL_QUEUE.getByName('primary').fetch('https://mail-queue.internal/archive/read-status', {
+          const result = await env.MAIL_QUEUE.getByName('primary').fetch(`https://mail-queue.internal/archive/${bulkAction ? 'actions' : 'read-status'}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: readStatusMatch[1], read: body.read }),
+            body: JSON.stringify(bulkAction ? { ids: body?.ids, action: body?.action } : { id: readStatusMatch[1], read: body.read }),
           });
           return json(await result.json(), result.status);
-        } catch { return json({ error: 'read_status_unavailable' }, 503); }
+        } catch { return json({ error: 'mail_state_unavailable' }, 503); }
       }
       if (request.method !== 'GET') return json({ error: 'read_only' }, 405);
       if (url.pathname === PREFIX) return response('', undefined, 302, { Location: `${PREFIX}/` });
@@ -90,7 +91,7 @@ export function createWorker(checkAccess = authorize) {
       let download = false;
       if (url.pathname === `${PREFIX}/api/messages`) {
         path = '/archive/list';
-        parameters = Object.fromEntries(['query', 'mailbox', 'cursor', 'after', 'before', 'limit'].map((key) => [key, url.searchParams.get(key) || '']));
+        parameters = Object.fromEntries(['query', 'mailbox', 'cursor', 'after', 'before', 'limit', 'view'].map((key) => [key, url.searchParams.get(key) || '']));
       } else {
         const match = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})(?:\/(raw|attachments\/\d+))?$/);
         if (!match) return json({ error: 'not_found' }, 404);

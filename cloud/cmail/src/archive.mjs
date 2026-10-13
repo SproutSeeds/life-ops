@@ -6,6 +6,8 @@ const ID_PATTERN = /^mail_\d{16}$/;
 const SCAN_LIMIT = 40;
 const PAGE_LIMIT = 20;
 const READ_PREFIX = 'cmail-read:';
+const ARCHIVED_PREFIX = 'cmail-archived:';
+const ARCHIVED_COUNT = 'cmail-archived-count';
 const PURPOSE = 'cloudflare-mail-archive-v1';
 
 function header(payload, name) {
@@ -42,13 +44,14 @@ export class ArchiveInputError extends Error {}
 export class MailQueue extends LegacyMailQueue {
   async fetch(request) {
     const path = new URL(request.url).pathname;
-    if (!['/archive/list', '/archive/message', '/archive/read-status'].includes(path)) return super.fetch(request);
+    if (!['/archive/list', '/archive/message', '/archive/read-status', '/archive/actions'].includes(path)) return super.fetch(request);
     if (request.method !== 'POST') return Response.json({ error: 'method_not_allowed' }, { status: 405 });
     try {
       const parameters = await request.json();
       const result = path === '/archive/list'
         ? await this.listArchive(parameters)
         : path === '/archive/read-status' ? await this.setReadStatus(parameters)
+        : path === '/archive/actions' ? await this.applyAction(parameters)
         : await this.readArchiveMessage(parameters);
       return Response.json(result, { status: result ? 200 : 404 });
     } catch (error) {
@@ -75,8 +78,10 @@ export class MailQueue extends LegacyMailQueue {
     const cursor = String(parameters.cursor || '');
     const after = String(parameters.after || '');
     const before = String(parameters.before || '');
+    const view = String(parameters.view || 'inbox');
     const limit = parameters.limit === undefined || parameters.limit === '' ? PAGE_LIMIT : Number(parameters.limit);
     if (query.length > 200 || mailbox.length > 254 ||
+        !['inbox', 'archive', 'all'].includes(view) ||
         !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
         (cursor && !ID_PATTERN.test(cursor)) ||
         [after, before].some((value) => value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))))) {
@@ -96,6 +101,8 @@ export class MailQueue extends LegacyMailQueue {
       const date = String(record.received_at || '').slice(0, 10);
       if ((after && date < after) || (before && date > before)) continue;
       try {
+        const archived = (await this.state.storage.get(`${ARCHIVED_PREFIX}${record.id}`)) === true;
+        if ((view === 'inbox' && archived) || (view === 'archive' && !archived)) continue;
         const payload = await this.loadPayload(record);
         const item = {
           id: record.id,
@@ -105,6 +112,7 @@ export class MailQueue extends LegacyMailQueue {
           mailbox: String(payload.envelope_to || ''),
           subject: decodeWords(header(payload, 'subject')) || '(No subject)',
           read: (await this.state.storage.get(`${READ_PREFIX}${record.id}`)) === true,
+          archived,
         };
         if (mailbox && item.mailbox.toLowerCase() !== mailbox) continue;
         if (query && ![item.subject, item.from, item.to, item.mailbox].some((value) => value.toLowerCase().includes(query))) {
@@ -120,12 +128,15 @@ export class MailQueue extends LegacyMailQueue {
       }
     }
     const meta = await this.state.storage.get('meta') || {};
+    const archivedCount = Number(await this.state.storage.get(ARCHIVED_COUNT) || 0);
+    const totalStored = Number(meta.total_stored || 0);
     return {
       items,
       next_cursor: scanned < entries.length ? lastId : null,
       scanned,
       failed,
-      total_stored: Number(meta.total_stored || 0),
+      total_stored: totalStored,
+      total_view: view === 'all' ? totalStored : view === 'archive' ? archivedCount : Math.max(0, totalStored - archivedCount),
       read_only: true,
     };
   }
@@ -137,6 +148,35 @@ export class MailQueue extends LegacyMailQueue {
     // Keep message contents, queue entries, and encryption metadata untouched.
     await this.state.storage.put(`${READ_PREFIX}${id}`, read);
     return { id, read };
+  }
+
+  async applyAction({ ids, action } = {}) {
+    if (!Array.isArray(ids) || !ids.length || ids.length > 100 ||
+        ids.some(id => typeof id !== 'string' || !ID_PATTERN.test(id)) ||
+        new Set(ids).size !== ids.length || !['read', 'unread', 'archive', 'unarchive'].includes(action)) {
+      throw new ArchiveInputError();
+    }
+    // Commit the complete selection and its count together. Never modify the
+    // encrypted messages, delivery acknowledgements, or legacy queue metadata.
+    return this.state.storage.transaction(async (tx) => {
+      for (const id of ids) if (!await tx.get(`${RECORD_PREFIX}${id}`)) return null;
+      let archivedCount = Number(await tx.get(ARCHIVED_COUNT) || 0);
+      const items = [];
+      for (const id of ids) {
+        let read = (await tx.get(`${READ_PREFIX}${id}`)) === true;
+        let archived = (await tx.get(`${ARCHIVED_PREFIX}${id}`)) === true;
+        if (action === 'read' || action === 'unread') {
+          read = action === 'read'; await tx.put(`${READ_PREFIX}${id}`, read);
+        } else {
+          const next = action === 'archive';
+          if (next !== archived) archivedCount += next ? 1 : -1;
+          archived = next; await tx.put(`${ARCHIVED_PREFIX}${id}`, archived);
+        }
+        items.push({ id, read, archived });
+      }
+      if (action === 'archive' || action === 'unarchive') await tx.put(ARCHIVED_COUNT, Math.max(0, archivedCount));
+      return { items };
+    });
   }
 
   async readArchiveMessage({ id, attachment, raw = false } = {}) {
@@ -158,6 +198,7 @@ export class MailQueue extends LegacyMailQueue {
     return {
       id,
       read: (await this.state.storage.get(`${READ_PREFIX}${id}`)) === true,
+      archived: (await this.state.storage.get(`${ARCHIVED_PREFIX}${id}`)) === true,
       received_at: record.received_at,
       date: parsed.date || record.received_at,
       subject: parsed.subject || '(No subject)',

@@ -11,6 +11,10 @@ class Storage {
   async get(key) { return structuredClone(this.values.get(key)); }
   async put(key, value) { this.values.set(key, structuredClone(value)); }
   async delete(key) { return this.values.delete(key); }
+  async transaction(callback) {
+    const tx = new Storage(); tx.values = structuredClone(this.values);
+    const result = await callback(tx); this.values = tx.values; return result;
+  }
   async list({ prefix = '', end, start, reverse = false, limit = Infinity } = {}) {
     let entries = [...this.values.entries()].filter(([key]) => key.startsWith(prefix) && (!end || key < end) && (!start || key >= start)).sort(([a], [b]) => a.localeCompare(b));
     if (reverse) entries.reverse();
@@ -94,6 +98,58 @@ test('read status persists independently of archived contents and delivery ackno
   assert.equal((await legacy.pull({})).items[0].id, pending.id);
   await assert.rejects(archive.setReadStatus({ id: old.id, read: 'true' }));
   assert.equal(await archive.setReadStatus({ id: 'mail_9999999999999999', read: true }), null);
+});
+
+test('bulk actions change only selected flags, preserve delivery, and support reversible archive views', async () => {
+  const { state, legacy, archive } = setup();
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push((await legacy.enqueue(fixture(`Bulk fixture ${i}`, i))).id);
+  await legacy.ack({ ids: [ids[0]] });
+  const original = structuredClone([...state.storage.values]);
+  const selection = ids.slice(0, 2);
+  let result = await archive.applyAction({ ids: selection, action: 'read' });
+  assert(result.items.every(item => item.read && !item.archived));
+  assert.equal((await archive.readArchiveMessage({ id: ids[2] })).read, false);
+  await archive.applyAction({ ids: selection, action: 'archive' });
+  // Retrying the same request does not double-count archived messages.
+  await archive.applyAction({ ids: selection, action: 'archive' });
+  const restored = new MailQueue(state, env);
+  const inbox = await restored.listArchive();
+  assert.deepEqual(inbox.items.map(item => item.id), [ids[2]]); assert.equal(inbox.total_view, 1);
+  const archived = await restored.listArchive({ view: 'archive' });
+  assert.deepEqual(archived.items.map(item => item.id), selection.toReversed()); assert.equal(archived.total_view, 2);
+  assert(archived.items.every(item => item.archived && item.read));
+  assert.equal((await restored.listArchive({ view: 'all' })).total_view, 3);
+  assert.equal((await restored.listArchive({ view: 'archive', mailbox: 'absent@example.com' })).items.length, 0);
+  assert.equal((await restored.listArchive({ query: 'Bulk fixture 0' })).items.length, 0);
+  assert.equal((await restored.listArchive({ view: 'archive', query: 'Bulk fixture 0' })).items[0].id, ids[0]);
+  await restored.applyAction({ ids: selection, action: 'unread' });
+  assert((await restored.listArchive({ view: 'archive' })).items.every(item => !item.read && item.archived));
+  await restored.applyAction({ ids: selection, action: 'unarchive' });
+  await restored.applyAction({ ids: selection, action: 'unarchive' });
+  assert.equal((await restored.listArchive()).total_view, 3);
+  assert.equal((await restored.listArchive({ view: 'archive' })).items.length, 0);
+  assert.deepEqual([...state.storage.values].filter(([key]) => !key.startsWith('cmail-')), original);
+  assert.equal((await legacy.pull({})).items.length, 2);
+});
+
+test('bulk selection is bounded and invalid or missing IDs cannot partly change messages', async () => {
+  const { state, legacy, archive } = setup();
+  const ids = [];
+  for (let i = 0; i < 101; i++) ids.push((await legacy.enqueue(fixture(`Bounded ${i}`, i))).id);
+  const snapshot = structuredClone([...state.storage.values]);
+  for (const params of [
+    { ids: [], action: 'read' }, { ids, action: 'archive' }, { ids: [ids[0],ids[0]], action: 'read' },
+    { ids: [ids[0],'invalid'], action: 'read' }, { ids: [ids[0]], action: 'delete' },
+  ]) await assert.rejects(archive.applyAction(params));
+  assert.equal(await archive.applyAction({ ids: [ids[0], 'mail_9999999999999999'], action: 'archive' }), null);
+  assert.deepEqual([...state.storage.values], snapshot);
+  await archive.applyAction({ ids: ids.slice(0,100), action: 'archive' });
+  let cursor; const found = [];
+  do { const page = await archive.listArchive({ view: 'archive', cursor, limit: 100 }); found.push(...page.items.map(item => item.id)); cursor = page.next_cursor; } while (cursor);
+  assert.equal(found.length, 100); assert.equal(new Set(found).size, 100);
+  assert.equal((await archive.listArchive()).items[0].id, ids[100]);
+  await assert.rejects(archive.listArchive({ view: 'invalid' }));
 });
 
 test('empty filtered pages retain a cursor; mailbox and date filters apply', async () => {
@@ -256,4 +312,28 @@ test('read-state writes require the owner, same origin, POST, and a boolean JSON
   const items = (await listed.json()).items; assert.equal(items.length, 1); assert.equal(items[0].read, true);
   assert.equal((await worker.fetch(write({ body: '{"read":false}' }), workerEnv)).status, 200);
   assert.equal(await state.storage.get(`cmail-read:${id}`), false);
+});
+
+test('bulk action HTTP routes enforce owner authentication, origin, method, and complete selection validation', async () => {
+  const { legacy, archive, state } = setup();
+  const { id } = await legacy.enqueue(fixture('Bulk endpoint', 1));
+  const worker = createWorker(authorize);
+  const workerEnv = { ...env, ...accessEnv, MAIL_QUEUE: { getByName: () => ({ fetch: (url, options) => archive.fetch(new Request(url, options)) }) } };
+  const headers = { 'Cf-Access-Jwt-Assertion': await token(), Origin: 'https://mail.example.com', 'Content-Type': 'application/json' };
+  const url = 'https://mail.example.com/cmail/api/messages/actions';
+  const write = (changes = {}) => new Request(url, { method: 'POST', headers, body: JSON.stringify({ ids: [id], action: 'archive' }), ...changes });
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Cf-Access-Jwt-Assertion': '' } }), workerEnv)).status, 401);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Cf-Access-Jwt-Assertion': await token({ email: 'other@example.com' }) } }), workerEnv)).status, 403);
+  for (const overrides of [{ Origin: '' }, { Origin: 'https://other.example.com' }, { 'Sec-Fetch-Site': 'cross-site' }]) assert.equal((await worker.fetch(write({ headers: { ...headers, ...overrides } }), workerEnv)).status, 403);
+  assert.equal((await worker.fetch(write({ headers: { ...headers, 'Content-Type': 'text/plain' } }), workerEnv)).status, 400);
+  assert.equal((await worker.fetch(new Request(url, { headers }), workerEnv)).status, 405);
+  for (const body of ['null', '{', '{"ids":[],"action":"archive"}', JSON.stringify({ ids:[id], action:'delete' }), ' '.repeat(8193)]) assert.equal((await worker.fetch(write({ body }), workerEnv)).status, 400);
+  assert.equal(await state.storage.get(`cmail-archived:${id}`), undefined);
+  const changed = await worker.fetch(write(), workerEnv);
+  assert.equal(changed.status, 200); assert.equal(changed.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual((await changed.json()).items, [{ id, read: false, archived: true }]);
+  const response = await worker.fetch(new Request('https://mail.example.com/cmail/api/messages?view=archive', { headers }), workerEnv);
+  assert.equal((await response.json()).items[0].id, id);
+  assert.equal((await worker.fetch(write({ body: JSON.stringify({ ids:[id], action:'unarchive' }) }), workerEnv)).status, 200);
+  assert.equal(await state.storage.get(`cmail-archived:${id}`), false);
 });

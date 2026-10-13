@@ -6,6 +6,15 @@ const storage = {
   async get(key) { return structuredClone(records.get(key)); },
   async put(key, value) { records.set(key, structuredClone(value)); },
   async delete(key) { records.delete(key); },
+  async transaction(callback) {
+    const copy = structuredClone(records);
+    const result = await callback({
+      async get(key) { return structuredClone(copy.get(key)); },
+      async put(key, value) { copy.set(key, structuredClone(value)); },
+    });
+    records.clear(); for (const [key, value] of copy) records.set(key, value);
+    return result;
+  },
   async list({ prefix = '', end, reverse, limit = Infinity } = {}) {
     let list = [...records].filter(([key]) => key.startsWith(prefix) && (!end || key < end)).sort(([a], [b]) => a.localeCompare(b));
     if (reverse) list.reverse(); return new Map(list.slice(0, limit));
