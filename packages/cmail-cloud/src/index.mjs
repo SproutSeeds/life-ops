@@ -1,5 +1,7 @@
 import baseWorker, { MailQueue as BaseQueue, createWorker, sha256Hex, encryptArchivePayload, storeArchiveEnvelope, verifyLifeOpsRequest, PostalMime } from './production-base.mjs';
 import { SUPPORT_MAILBOX, SYNC_STATE, normalizePayload, sourceKey, decodeRaw, syncReceived } from './resend.mjs';
+import { handleReply } from './reply.mjs';
+import { withReplies } from './reply-http.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -92,6 +94,7 @@ export class MailQueue extends BaseQueue {
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path.startsWith('/reply/')) return handleReply(this, request);
     if (!path.startsWith('/resend/')) return super.fetch(request);
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     let input;
@@ -174,4 +177,4 @@ export function withResend(worker = baseWorker) {
 }
 
 export { createWorker };
-export default withResend();
+export default withReplies(withResend());

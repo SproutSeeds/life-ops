@@ -33,6 +33,8 @@ def unauthenticated(url, method="GET"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require-scheduled", action="store_true")
+    parser.add_argument("--require-replies", action="store_true")
+    parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     key = credentials.resolve_secret(name="CLOUDFLARE_API_TOKEN")
     request = urllib.request.Request(BASE, headers={"Authorization": "Bearer " + key})
@@ -53,6 +55,12 @@ def main():
     mailboxes = next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_MAILBOXES").split(",")
     assert "support@bindmysoul.com" in mailboxes
     assert next(b for b in settings["bindings"] if b["name"] == "RESEND_RECEIVING_API_KEY")["type"] == "secret_text"
+    if args.require_replies:
+        for name in ["CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY"]:
+            assert next(b for b in settings["bindings"] if b["name"] == name)["type"] == "secret_text"
+        identities = json.loads(next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_SEND_IDENTITIES"))
+        assert set(identities) == set(mailboxes)
+        assert identities["support@bindmysoul.com"]["key"] == "support"
     protected = {"website": unauthenticated("https://cmail.frg.earth/"),
                  "worker_mail_api": unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/session"),
                  "signed_admin": unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/api/mail/resend/status", "POST")}
@@ -67,7 +75,8 @@ def main():
     result = {"checked_at": datetime.now(timezone.utc).isoformat(), "version": deployment["versions"][0]["version_id"],
               "source_sha256": actual, "existing_namespace_verified": True, "mailboxes": mailboxes,
               "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue}
-    target = Path("data/qa/cmail-bindmysoul-2026-10-17/production-verification.json")
+    target = args.receipt_dir / "production-verification.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded(result) + b"\n")
     print(json.dumps(result, indent=2))
     if args.require_scheduled and not result["scheduled_verified"]:

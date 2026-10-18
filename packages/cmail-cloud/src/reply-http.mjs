@@ -1,0 +1,56 @@
+import { authorize } from './production-base.mjs';
+import { replyScript, replyStyles } from './reply-ui.mjs';
+
+const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+
+export function withReplies(worker, checkAccess = authorize) {
+  return {
+    ...worker,
+    async fetch(request, env, context) {
+      const url = new URL(request.url);
+      const message = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})\/reply$/);
+      const status = url.pathname.match(/^\/cmail\/api\/replies\/([a-f0-9-]{36})$/);
+      const asset = ['/cmail/reply.js', '/cmail/reply.css'].includes(url.pathname);
+      if (message || status || asset) {
+        const access = await checkAccess(request, env);
+        if (!access.ok) return json({ error: access.error }, access.status);
+        if (asset) {
+          if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+          return new Response(url.pathname.endsWith('.js') ? replyScript : replyStyles, { headers: {
+            'Content-Type': url.pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8',
+            'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+          } });
+        }
+        let path, input;
+        if (status && request.method === 'GET') { path = '/reply/status'; input = { request_id: status[1] }; }
+        else if (message && request.method === 'GET') { path = '/reply/prepare'; input = { id: message[1] }; }
+        else if (message && request.method === 'POST') {
+          if (request.headers.get('Origin') !== url.origin || request.headers.get('Sec-Fetch-Site') === 'cross-site' || request.headers.get('X-Cmail-Action') !== 'reply') return json({ error: 'invalid_origin' }, 403);
+          if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return json({ error: 'invalid_reply' }, 400);
+          try {
+            const body = await request.text();
+            if (body.length > 650000) return json({ error: 'invalid_reply' }, 413);
+            const parsed = JSON.parse(body);
+            input = { id: message[1], request_id: parsed.request_id, text: parsed.text };
+          } catch { return json({ error: 'invalid_reply' }, 400); }
+          path = '/reply/send';
+        } else return json({ error: 'method_not_allowed' }, 405);
+        try {
+          return await env.MAIL_QUEUE.getByName('primary').fetch('https://mail-queue.internal' + path, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+          });
+        } catch { return json({ error: 'reply_unavailable' }, 503); }
+      }
+      const response = await worker.fetch(request, env, context);
+      if (!response.ok) return response;
+      if ((url.pathname === '/' || url.pathname === '/cmail/') && response.headers.get('Content-Type')?.includes('text/html')) {
+        const html = (await response.text()).replace('</head>', '<link rel="stylesheet" href="/cmail/reply.css"><script src="/cmail/reply.js" defer></script></head>');
+        return new Response(html, response);
+      }
+      if (url.pathname === '/cmail/api/session') {
+        return json({ ...await response.json(), read_only: false, reply_enabled: true });
+      }
+      return response;
+    },
+  };
+}

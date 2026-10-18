@@ -1,8 +1,12 @@
-# C-mail cloud receiving repair
+# C-mail cloud receiving and replies
 
 Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
 website's existing encrypted Durable Object archive.
+
+The message reader also supports authenticated plaintext replies. Click Reply,
+write above the visible signature, then click Send. From, To and conversation
+headers come from the original message and verified mailbox configuration.
 
 ## Source provenance
 
@@ -15,8 +19,8 @@ October 17, 2026 America/Chicago. Its original SHA-256 was
 The recovered bundle retains the deployed website, authentication, MIME parser,
 cryptography, attachments, threading, and Cloudflare mail receiver. Two small
 adapters expose its existing primitives and allow archive listing through an
-original-date index. Readable new behavior lives in `src/index.mjs` and
-`src/resend.mjs`. Recovering the original unbundled UI remains desirable; this
+original-date index. Readable new behavior lives in `src/index.mjs`,
+`src/resend.mjs`, and `src/reply*.mjs`. Recovering the original unbundled UI remains desirable; this
 package is the reproducible source for the deployed repair.
 
 ## Receiving and storage
@@ -54,6 +58,37 @@ status response. Provider bodies, credentials, and download URLs stay out of
 diagnostics. Operators should inspect `last_scheduled_success_at` as well as
 `status`; the UI's existing “Cloud inbox” badge denotes archive availability.
 
+## Replies
+
+- The inline composer displays the existing sender signature for editing. Drafts
+  survive Cancel, Escape, Back and reload within the same browser tab, using
+  session storage. Sign out clears those tab drafts. Sending requires an explicit
+  click; opening a message, preparing a reply and checking status never send.
+- Access protects the assets and API. Sending additionally requires a matching
+  Origin, a custom action header and JSON. The server derives From/To/subject
+  from the archived MIME; client-supplied recipients or credentials are ignored.
+- Bind My Soul uses its existing sending key in `CMAIL_SUPPORT_SEND_KEY`. The
+  other five inboxes use their existing account's `CMAIL_RESEND_API_KEY`.
+  `CMAIL_SEND_IDENTITIES` carries the allowed From addresses and signatures;
+  private signature content is populated from local configuration at deployment.
+- Before sending, the exact request is encrypted into the existing archive
+  storage. Its UUID and Resend idempotency key remain stable across uncertain
+  retries, including concurrent submissions. Ambiguous requests older than
+  23 hours stop for review before the provider's 24-hour key expiration.
+- Provider acceptance is saved before creating the encrypted sent copy.
+  An archive failure can retry without another provider send. Confirmed copies
+  appear in the conversation and Archive, marked read. API acceptance is not
+  recipient-delivery confirmation. No delivery webhook was introduced.
+- Replies currently support plaintext, one reply recipient group derived from
+  Reply-To/From, and the existing conversation headers. Attachments, Reply all,
+  new-message composition, and cross-device draft sync are separate features.
+- Cloud replies remain in the cloud archive and do not modify local follow-up
+  classifications or enter the legacy inbound-delivery queue.
+
+Public endpoints: GET/POST `/cmail/api/messages/:id/reply` prepares/sends;
+GET `/cmail/api/replies/:request_id` reads a receipt. The internal Durable Object
+routes are not exposed through the signed administrative API.
+
 ## Verification and operations
 
 From the Life Ops repository root:
@@ -73,6 +108,12 @@ test, install `miniflare@4.20260730.0` in an external temporary directory and ru
 It checks an upgrade of an existing SQLite Durable Object, native outbound
 fetch with a provider fixture, a 7 MB encrypted MIME round trip, authentication,
 ordering, deduplication, and preservation of the local delivery queue.
+`scripts/reply-runtime-smoke.mjs` takes the same Miniflare module path and checks
+the real runtime's outbound path against a network-isolated fake provider,
+including concurrent double-submit, durable receipts and sent conversation
+headers. Add `--serve` for the synthetic browser fixture on port 9346. Its
+authentication bypass lives only in `test/reply-worker.mjs`; deployment uploads
+only `src/*.mjs`.
 
 Explicit production operations:
 
@@ -81,6 +122,8 @@ PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deplo
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py --apply
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py --replay
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --schedule --expected-version CURRENT_VERSION
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-replies --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-reply-2026-10-17
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --receipt-dir data/qa/cmail-reply-2026-10-17
 ```
 
 The deployer checks the current version and exact existing namespace before
@@ -99,4 +142,6 @@ recreating storage, changing the encryption key, or undoing local mail state.
 
 Provider references: [Resend receiving list](https://resend.com/docs/api-reference/emails/list-received-emails),
 [received email retrieval](https://resend.com/docs/api-reference/emails/retrieve-received-email),
+[sending API](https://resend.com/docs/api-reference/emails/send-email),
+[send idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys),
 [Cloudflare multipart deployment metadata](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/).

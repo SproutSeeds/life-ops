@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from life_ops import credentials, resend_integration
+from life_ops import credentials, resend_integration, mail_identities
 
 ACCOUNT = "fc1756d941215d08d5e3257df5324481"
 WORKER = "life-ops-email-ingest"
@@ -59,11 +59,14 @@ def current():
     return settings, deployment
 
 
-def deploy(settings):
+def deploy(settings, *, enable_replies=False):
     bindings = []
+    reply_names = {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}
     for binding in settings["bindings"]:
         name = binding["name"]
         if name == "RESEND_RECEIVING_API_KEY":
+            continue
+        if enable_replies and name in reply_names:
             continue
         if name == "CMAIL_MAILBOXES":
             addresses = list(dict.fromkeys([*binding.get("text", "").split(","), SUPPORT]))
@@ -74,11 +77,34 @@ def deploy(settings):
     if not config.get("admin_api_key"):
         raise RuntimeError("Existing Resend receiving credential unavailable")
     bindings.append({"type": "secret_text", "name": "RESEND_RECEIVING_API_KEY", "text": config["admin_api_key"]})
+    if enable_replies:
+        primary = resend_integration._load_resend_config(Path.home() / ".lifeops/config/resend.json")
+        if not primary.get("api_key") or not config.get("api_key"):
+            raise RuntimeError("Existing outbound credentials unavailable")
+        bindings.extend([
+            {"type": "secret_text", "name": "CMAIL_RESEND_API_KEY", "text": primary["api_key"]},
+            {"type": "secret_text", "name": "CMAIL_SUPPORT_SEND_KEY", "text": config["api_key"]},
+        ])
+        addresses = next(b["text"] for b in bindings if b["name"] == "CMAIL_MAILBOXES").split(",")
+        identities = {}
+        for address in addresses:
+            domain = address.split("@")[-1]
+            if domain not in {"frg.earth", "codacli.com", "deckfound.com", "bindmysoul.com"}:
+                raise RuntimeError("Unverified sending domain in mailbox configuration")
+            identity = next((item for item in mail_identities.MAIL_IDENTITIES.values() if item.address == address), None)
+            signature = identity.signature_text if identity else ""
+            if address == SUPPORT:
+                signature = config.get("default_signature_text") or signature
+            elif domain == "frg.earth" and identity:
+                signature = primary.get("default_signature_text") or signature
+            identities[address] = {"from": identity.from_email if identity else address,
+                                   "signature": signature, "key": "support" if domain == "bindmysoul.com" else "primary"}
+        bindings.append({"type": "plain_text", "name": "CMAIL_SEND_IDENTITIES", "text": json.dumps(identities)})
     metadata = {
         "main_module": "index.mjs", "bindings": bindings,
         "compatibility_date": settings["compatibility_date"],
         "compatibility_flags": settings.get("compatibility_flags", []),
-        "annotations": {"workers/message": "Restore Bind My Soul receiving, encrypted history and chronological archive"},
+        "annotations": {"workers/message": "Add authenticated C-mail replies with durable send receipts" if enable_replies else "Deploy verified C-mail cloud source"},
     }
     for field in ["usage_model", "placement", "tail_consumers", "logpush", "observability", "limits"]:
         if field in settings:
@@ -102,6 +128,7 @@ def main():
     mode.add_argument("--deploy", action="store_true")
     mode.add_argument("--schedule", action="store_true")
     parser.add_argument("--expected-version")
+    parser.add_argument("--enable-replies", action="store_true", help="Reuse existing per-account sending credentials and identity signatures")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     settings, deployment = current()
@@ -119,13 +146,15 @@ def main():
     before_path = args.receipt_dir / f"production-before-{stamp}.json"
     before_path.write_bytes(encoded(before) + b"\n")
     if args.deploy:
-        result = deploy(settings)
+        result = deploy(settings, enable_replies=args.enable_replies)
     else:
         desired = list(dict.fromkeys([*(item["cron"] for item in schedules), "*/2 * * * *"]))
         result = api("/schedules", method="PUT", data=encoded([{"cron": cron} for cron in desired]), content_type="application/json")
     after_settings, after_deployment = current()
     for old in settings["bindings"]:
         if old["name"] in {"CMAIL_MAILBOXES", "RESEND_RECEIVING_API_KEY"}:
+            continue
+        if args.enable_replies and old["name"] in {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}:
             continue
         actual = next((b for b in after_settings["bindings"] if b["name"] == old["name"]), None)
         if actual != old:
