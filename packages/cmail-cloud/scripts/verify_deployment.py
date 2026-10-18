@@ -34,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require-scheduled", action="store_true")
     parser.add_argument("--require-replies", action="store_true")
+    parser.add_argument("--require-index", action="store_true")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     key = credentials.resolve_secret(name="CLOUDFLARE_API_TOKEN")
@@ -70,11 +71,18 @@ def main():
         return cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path=path, payload={})
     sync = signed("/api/mail/resend/status")
     queue = signed("/api/mail/queue/status")
+    index = None
+    if args.require_index:
+        assert next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_FAST_READS") == "1"
+        index = signed("/api/mail/performance/status")
+        assert index["ready"] and index["indexed"] == queue["total_stored"]
+        protected["conversation_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/messages/mail_0000000000002472/conversation")
+        assert protected["conversation_api"] == 302
     scheduled_at = sync.get("last_scheduled_success_at")
     scheduled_fresh = bool(scheduled_at) and (datetime.now(timezone.utc) - datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))).total_seconds() < 300
     result = {"checked_at": datetime.now(timezone.utc).isoformat(), "version": deployment["versions"][0]["version_id"],
               "source_sha256": actual, "existing_namespace_verified": True, "mailboxes": mailboxes,
-              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue}
+              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index}
     target = args.receipt_dir / "production-verification.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded(result) + b"\n")

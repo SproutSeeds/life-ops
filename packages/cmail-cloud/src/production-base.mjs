@@ -6367,4 +6367,4 @@ export {
 };
 
 // Recovery adapter: expose existing primitives without altering the deployed application.
-export { sha256Hex, encryptArchivePayload, storeArchiveEnvelope, verifyLifeOpsRequest, PostalMime, authorize };
+export { sha256Hex, encryptArchivePayload, decryptArchivePayload, storeArchiveEnvelope, verifyLifeOpsRequest, PostalMime, authorize, plainTextFromHtml };

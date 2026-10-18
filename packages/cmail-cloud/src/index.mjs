@@ -2,18 +2,23 @@ import baseWorker, { MailQueue as BaseQueue, createWorker, sha256Hex, encryptArc
 import { SUPPORT_MAILBOX, SYNC_STATE, normalizePayload, sourceKey, decodeRaw, syncReceived } from './resend.mjs';
 import { handleReply } from './reply.mjs';
 import { withReplies } from './reply-http.mjs';
+import { MailIndex } from './mail-index.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
   ['/api/mail/resend/status', '/resend/status'],
   ['/api/mail/archive/import', '/resend/import'],
   ['/api/mail/archive/verify', '/resend/verify'],
+  ['/api/mail/performance/status', '/performance/status'],
+  ['/api/mail/performance/backfill', '/performance/backfill'],
+  ['/api/mail/performance/probe', '/performance/probe'],
 ]);
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
 export class MailQueue extends BaseQueue {
   constructor(state, env) {
     super(state, env);
+    this.views = new MailIndex(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
 
@@ -56,8 +61,10 @@ export class MailQueue extends BaseQueue {
   async enqueue(input, { archiveOnly = false, read = false, archived = false } = {}) {
     await this.indexReady;
     const payload = await normalizePayload(input);
+    if (!payload.received_at) payload.received_at = new Date().toISOString();
     const fingerprint = payload.payload_hash;
     const source = sourceKey(payload);
+    const prepared = await this.views.prepare(payload);
     return this.state.storage.transaction(async (storage) => {
       const existingId = source && await storage.get(source) || await storage.get(`dedupe:${fingerprint}`);
       if (existingId) {
@@ -88,12 +95,32 @@ export class MailQueue extends BaseQueue {
       await storage.put(`dedupe:${fingerprint}`, id);
       if (source) await storage.put(source, id);
       await storage.put('meta', { ...meta, next_seq: seq, total_stored: Number(meta.total_stored || 0) + 1, total_acknowledged: Number(meta.total_acknowledged || 0) + (archiveOnly ? 1 : 0) });
+      await this.views.put(storage, { id, received_at: receivedAt }, prepared, archived);
       return { stored: true, duplicate: false, id, seq, sha256: fingerprint };
     });
   }
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (this.env.CMAIL_FAST_READS === '1' && path === '/archive/list') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      try { return json(await this.views.list(await request.json())); }
+      catch (error) { return json({ error: error.status ? error.message : 'mail_temporarily_unavailable' }, error.status || 503); }
+    }
+    if (path.startsWith('/performance/') || path === '/archive/conversation') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      try {
+        const input = await request.json();
+        if (path === '/performance/status') return json(await this.views.readiness());
+        if (path === '/performance/backfill') {
+          this.backfillPromise ||= this.views.backfill(input).finally(() => { this.backfillPromise = null; });
+          return json(await this.backfillPromise);
+        }
+        if (path === '/performance/probe') return json(await this.performanceProbe(input));
+        const result = await this.views.conversation(input);
+        return json(result, result ? 200 : 404);
+      } catch (error) { return json({ error: error.status ? error.message : 'index_unavailable' }, error.status || 503); }
+    }
     if (path.startsWith('/reply/')) return handleReply(this, request);
     if (!path.startsWith('/resend/')) return super.fetch(request);
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -137,6 +164,58 @@ export class MailQueue extends BaseQueue {
       return json({ items });
     }
     return json({ error: 'not_found' }, 404);
+  }
+
+  async listArchive(parameters) {
+    return this.env.CMAIL_FAST_READS === '1' ? this.views.list(parameters) : super.listArchive(parameters);
+  }
+  async listThreadIndex(parameters = {}) {
+    if (this.env.CMAIL_FAST_READS !== '1') return super.listThreadIndex(parameters);
+    // Older open tabs still request this route until their next reload. They
+    // receive compact indexed metadata, never another raw-archive scan.
+    const page = await this.views.list({ cursor: parameters.cursor, view: 'all', limit: 100 });
+    return { ...page, items: page.items.map(({ id, received_at, date, message_id, in_reply_to, references }) => ({ id, received_at, date, message_id, in_reply_to, references })) };
+  }
+  async readArchiveMessage(parameters = {}) {
+    if (this.env.CMAIL_FAST_READS !== '1' || parameters.raw || parameters.attachment !== undefined) return super.readArchiveMessage(parameters);
+    return await this.views.message(parameters.id) || super.readArchiveMessage(parameters);
+  }
+  async applyAction({ ids, action } = {}) {
+    if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id) => !/^mail_\d{16}$/.test(id)) || new Set(ids).size !== ids.length || !['read', 'unread', 'archive', 'unarchive'].includes(action)) return super.applyAction({ ids, action });
+    return this.state.storage.transaction(async (tx) => {
+      for (const id of ids) if (!await tx.get(`mail:${id}`)) return null;
+      let count = Number(await tx.get('cmail-archived-count') || 0);
+      const items = [];
+      for (const id of ids) {
+        let read = await tx.get(`cmail-read:${id}`) === true, archived = await tx.get(`cmail-archived:${id}`) === true;
+        if (action === 'read' || action === 'unread') { read = action === 'read'; await tx.put(`cmail-read:${id}`, read); }
+        else {
+          const next = action === 'archive'; count += Number(next) - Number(archived);
+          await this.views.moveArchive(tx, id, archived, next); archived = next;
+          await tx.put(`cmail-archived:${id}`, archived);
+        }
+        items.push({ id, read, archived });
+      }
+      await tx.put('cmail-archived-count', Math.max(0, count));
+      return { items };
+    });
+  }
+  async performanceProbe({ operation = 'list', legacy = false, parameters = {} } = {}) {
+    if (!['list', 'conversation', 'message'].includes(operation)) throw Object.assign(new Error('invalid_request'), { status: 400 });
+    const metrics = { get_calls: 0, list_calls: 0, keys_read: 0, raw_payload_loads: 0 };
+    const storage = this.state.storage;
+    const facade = Object.create(this);
+    facade.state = { storage: {
+      async get(key) { metrics.get_calls++; metrics.keys_read += Array.isArray(key) ? key.length : 1; return storage.get(key); },
+      async list(options) { metrics.list_calls++; const rows = await storage.list(options); metrics.keys_read += rows.size; return rows; },
+    } };
+    facade.loadPayload = async (record) => { if (record.id?.startsWith('mail_')) metrics.raw_payload_loads++; return BaseQueue.prototype.loadPayload.call(facade, record); };
+    const views = new MailIndex(facade);
+    const started = performance.now();
+    const result = legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
+      : await (operation === 'list' ? views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
+    return { operation, legacy, milliseconds: Math.round((performance.now() - started) * 100) / 100, ...metrics,
+      items: result?.items?.length ?? (result ? 1 : 0), scanned: result?.scanned ?? null, more: Boolean(result?.next_cursor), total: result?.total_stored ?? result?.total ?? null };
   }
 }
 

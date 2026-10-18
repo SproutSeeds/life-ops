@@ -3,14 +3,14 @@ import { encodeRaw } from '../src/resend.mjs';
 
 export class Storage {
   constructor(entries = []) { this.data = new Map(entries); this.tail = Promise.resolve(); }
-  async get(key) { return structuredClone(this.data.get(key)); }
+  async get(key) { return Array.isArray(key) ? new Map(key.filter((k) => this.data.has(k)).map((k) => [k, structuredClone(this.data.get(k))])) : structuredClone(this.data.get(key)); }
   async put(key, value) {
     if (typeof key === 'object') { for (const [name, item] of Object.entries(key)) this.data.set(name, structuredClone(item)); }
     else this.data.set(key, structuredClone(value));
   }
   async delete(key) { this.data.delete(key); }
-  async list({ prefix = '', end, reverse = false, limit = Infinity } = {}) {
-    let rows = [...this.data].filter(([key]) => key.startsWith(prefix) && (!end || key < end)).sort(([a], [b]) => a.localeCompare(b));
+  async list({ prefix = '', start, end, reverse = false, limit = Infinity } = {}) {
+    let rows = [...this.data].filter(([key]) => key.startsWith(prefix) && (!start || key >= start) && (!end || key < end)).sort(([a], [b]) => a.localeCompare(b));
     if (reverse) rows.reverse();
     return new Map(structuredClone(rows.slice(0, limit)));
   }

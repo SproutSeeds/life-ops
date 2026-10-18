@@ -17,13 +17,22 @@ fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'PO
 }, { headers: { 'Content-Type': 'application/json' } }).persist();
 const mf = new Miniflare({ name: 'cmail-reply-fixture', host: '127.0.0.1', port: serve ? 9346 : 0,
   modules: true, modulesRoot: root, scriptPath: root + 'test/reply-worker.mjs', compatibilityDate: '2026-03-27',
-  bindings, fetchMock, durableObjects: { MAIL_QUEUE: { className: 'MailQueue', useSQLite: true } },
+  bindings: { ...bindings, ...(process.argv.includes('--fast') ? { CMAIL_FAST_READS: '1' } : {}) }, fetchMock, durableObjects: { MAIL_QUEUE: { className: 'MailQueue', useSQLite: true } },
 });
 try {
   const namespace = await mf.getDurableObjectNamespace('MAIL_QUEUE');
   const stub = namespace.get(namespace.idFromName('primary'));
   const call = (path, input) => stub.fetch('https://internal' + path, { method: 'POST', body: JSON.stringify(input) });
   const original = await (await call('/enqueue', payload())).json();
+  if (process.argv.includes('--fast')) {
+    const indexed = await (await call('/performance/status', {})).json();
+    assert.equal(indexed.ready, true);
+    const thread = await (await mf.dispatchFetch(`http://127.0.0.1:9346/cmail/api/messages/${original.id}/conversation`)).json();
+    assert.equal(thread.total, 1);
+    const probe = await (await call('/performance/probe', { parameters: { mailbox: support, limit: 50 } })).json();
+    assert.equal(probe.raw_payload_loads, 0); assert.equal(probe.list_calls, 1);
+    console.log(JSON.stringify({ indexed_runtime_probe: probe }));
+  }
   const origin = 'http://127.0.0.1:9346';
   const path = `/cmail/api/messages/${original.id}/reply`;
   const prepared = await (await mf.dispatchFetch(origin + path)).json();

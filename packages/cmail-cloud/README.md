@@ -1,4 +1,4 @@
-# C-mail cloud receiving and replies
+# C-mail cloud receiving, replies and indexed reading
 
 Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
@@ -17,11 +17,11 @@ October 17, 2026 America/Chicago. Its original SHA-256 was
 `65da80cbc79ee9de38140ac160f4047917c4f1653699288038d3344d8f425cc1`.
 
 The recovered bundle retains the deployed website, authentication, MIME parser,
-cryptography, attachments, threading, and Cloudflare mail receiver. Two small
-adapters expose its existing primitives and allow archive listing through an
-original-date index. Readable new behavior lives in `src/index.mjs`,
-`src/resend.mjs`, and `src/reply*.mjs`. Recovering the original unbundled UI remains desirable; this
-package is the reproducible source for the deployed repair.
+cryptography, attachments, and Cloudflare mail receiver. Adapters expose its
+existing primitives. Readable behavior lives in `src/index.mjs`, `src/resend.mjs`,
+`src/reply*.mjs`, and `src/mail-index.mjs`. `src/web-app.mjs` is the recovered
+browser application with indexed pagination and direct conversation loading.
+This package is the reproducible source for the deployed repairs.
 
 ## Receiving and storage
 
@@ -89,6 +89,57 @@ Public endpoints: GET/POST `/cmail/api/messages/:id/reply` prepares/sends;
 GET `/cmail/api/replies/:request_id` reads a receipt. The internal Durable Object
 routes are not exposed through the signed administrative API.
 
+## Indexed reading
+
+`CMAIL_FAST_READS=1` enables the indexed API and browser application. New arrivals
+commit encrypted summaries and compact text projections in the same transaction
+as the original encrypted MIME. Original records, attachment bytes, IDs and
+read/archive flags remain authoritative. Mailbox identities and thread-header
+tokens are hashed in lookup keys; summary/body content remains encrypted.
+
+- Inbox pages use a mailbox/view/date prefix, stable date-and-ID cursors and
+  exact counts. They read only the requested page plus one lookahead entry,
+  without decrypting unrelated mail or attachment bytes. Recent mail appears
+  first; a selected deep link loads alongside the inbox.
+- GET `/cmail/api/messages/:id/conversation` follows indexed Message-ID,
+  In-Reply-To and References relationships, including siblings with a missing
+  parent. It returns only that conversation's metadata, deduplicated and newest
+  first. The client no longer downloads the whole archive's thread index.
+- History initially shows up to 20 other message headers. Expanding a message
+  loads its text; Show older messages extends the list. Copy thread explicitly
+  loads the related bodies in batches of three and copies oldest first.
+- Read flags are fetched fresh; archive/unarchive atomically moves the sorted
+  entries and counters. Server caches contain immutable projections only and
+  are bounded by both entries and estimated bytes (4 MiB per cache). Overlapping
+  cold requests preserve correct cache accounting and independent results.
+- Explicit full-text searches inspect at most 100 projected messages per API
+  request in the selected mailbox/view/date range. The client continues until
+  the requested results page plus lookahead is filled, or the range ends.
+  Rare/no-match searches can still traverse the selected range; normal inbox
+  and conversation loading never perform this search. Stop/Continue remain
+  available. Search bodies omit MIME attachments.
+
+Storage reads/writes are batched in groups of at most 128 keys. Diagnostic
+`get_calls`, `list_calls` and `keys_read` describe logical storage API work,
+not physical disk accesses or billable database operations. Cached runtime
+clocks can report zero elapsed milliseconds; use browser timings for UX.
+
+Signed POST administrative routes:
+
+| Route | Purpose |
+| --- | --- |
+| `/api/mail/performance/status` | Compare indexed count with original archive count |
+| `/api/mail/performance/backfill` | Resume an additive, idempotent bounded index build |
+| `/api/mail/performance/probe` | Compare cold indexed and legacy read work without returning mail content |
+
+Enable the feature in two stages: deploy index-capable writers while preserving
+the existing read flag, run the bounded backfill, then enable fast reads only
+when counts match. This keeps new arrivals indexed during the build. The
+deployer refuses initial activation while the index is incomplete. On a code
+rollback, keep original storage and the additive index; an older writer can
+create unindexed arrivals, so resume backfill before reactivation. Backfill
+revisits higher IDs missed by a prior saved cursor without duplicating counts.
+
 ## Verification and operations
 
 From the Life Ops repository root:
@@ -111,7 +162,8 @@ ordering, deduplication, and preservation of the local delivery queue.
 `scripts/reply-runtime-smoke.mjs` takes the same Miniflare module path and checks
 the real runtime's outbound path against a network-isolated fake provider,
 including concurrent double-submit, durable receipts and sent conversation
-headers. Add `--serve` for the synthetic browser fixture on port 9346. Its
+headers. Add `--fast` to exercise indexed reads and `--serve` for the synthetic
+browser fixture on port 9346. Its
 authentication bypass lives only in `test/reply-worker.mjs`; deployment uploads
 only `src/*.mjs`.
 
@@ -124,6 +176,10 @@ PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --schedule --expected-version CURRENT_VERSION
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-replies --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-reply-2026-10-17
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --receipt-dir data/qa/cmail-reply-2026-10-17
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --apply
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-fast-reads --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-performance-2026-10-18
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --probe
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --receipt-dir data/qa/cmail-performance-2026-10-18
 ```
 
 The deployer checks the current version and exact existing namespace before

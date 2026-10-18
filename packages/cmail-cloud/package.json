@@ -3,5 +3,5 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test test/*.test.mjs", "check": "node --check src/index.mjs && node --check src/resend.mjs && node --check src/reply.mjs && node --check src/reply-http.mjs && node --check src/reply-ui.mjs" }
+  "scripts": { "test": "node --test test/*.test.mjs", "check": "node --check src/index.mjs && node --check src/resend.mjs && node --check src/reply.mjs && node --check src/reply-http.mjs && node --check src/reply-ui.mjs && node --check src/mail-index.mjs && node --check src/web-app.mjs" }
 }

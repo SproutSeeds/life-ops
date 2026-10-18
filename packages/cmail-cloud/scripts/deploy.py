@@ -59,11 +59,13 @@ def current():
     return settings, deployment
 
 
-def deploy(settings, *, enable_replies=False):
+def deploy(settings, *, enable_replies=False, enable_fast_reads=False):
     bindings = []
     reply_names = {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}
     for binding in settings["bindings"]:
         name = binding["name"]
+        if enable_fast_reads and name == "CMAIL_FAST_READS":
+            continue
         if name == "RESEND_RECEIVING_API_KEY":
             continue
         if enable_replies and name in reply_names:
@@ -100,6 +102,8 @@ def deploy(settings, *, enable_replies=False):
             identities[address] = {"from": identity.from_email if identity else address,
                                    "signature": signature, "key": "support" if domain == "bindmysoul.com" else "primary"}
         bindings.append({"type": "plain_text", "name": "CMAIL_SEND_IDENTITIES", "text": json.dumps(identities)})
+    if enable_fast_reads:
+        bindings.append({"type": "plain_text", "name": "CMAIL_FAST_READS", "text": "1"})
     metadata = {
         "main_module": "index.mjs", "bindings": bindings,
         "compatibility_date": settings["compatibility_date"],
@@ -129,6 +133,7 @@ def main():
     mode.add_argument("--schedule", action="store_true")
     parser.add_argument("--expected-version")
     parser.add_argument("--enable-replies", action="store_true", help="Reuse existing per-account sending credentials and identity signatures")
+    parser.add_argument("--enable-fast-reads", action="store_true", help="Activate verified mailbox and conversation indexes after backfill")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     settings, deployment = current()
@@ -146,7 +151,13 @@ def main():
     before_path = args.receipt_dir / f"production-before-{stamp}.json"
     before_path.write_bytes(encoded(before) + b"\n")
     if args.deploy:
-        result = deploy(settings, enable_replies=args.enable_replies)
+        if args.enable_fast_reads:
+            from life_ops import cloudflare_email
+            secret = credentials.resolve_secret(name="LIFE_OPS_MAIL_INGEST_SECRET")
+            readiness = cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path="/api/mail/performance/status", payload={})
+            if not readiness.get("ready"):
+                raise RuntimeError("Archive indexes must be complete before activation")
+        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads)
     else:
         desired = list(dict.fromkeys([*(item["cron"] for item in schedules), "*/2 * * * *"]))
         result = api("/schedules", method="PUT", data=encoded([{"cron": cron} for cron in desired]), content_type="application/json")
@@ -155,6 +166,8 @@ def main():
         if old["name"] in {"CMAIL_MAILBOXES", "RESEND_RECEIVING_API_KEY"}:
             continue
         if args.enable_replies and old["name"] in {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}:
+            continue
+        if args.enable_fast_reads and old["name"] == "CMAIL_FAST_READS":
             continue
         actual = next((b for b in after_settings["bindings"] if b["name"] == old["name"]), None)
         if actual != old:

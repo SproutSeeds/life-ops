@@ -1,5 +1,6 @@
 import { authorize } from './production-base.mjs';
 import { replyScript, replyStyles } from './reply-ui.mjs';
+import { appScript } from './web-app.mjs';
 
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -11,6 +12,14 @@ export function withReplies(worker, checkAccess = authorize) {
       const message = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})\/reply$/);
       const status = url.pathname.match(/^\/cmail\/api\/replies\/([a-f0-9-]{36})$/);
       const asset = ['/cmail/reply.js', '/cmail/reply.css'].includes(url.pathname);
+      const conversation = url.pathname.match(/^\/cmail\/api\/messages\/(mail_\d{16})\/conversation$/);
+      if (conversation || env.CMAIL_FAST_READS === '1' && url.pathname === '/cmail/app.js') {
+        const access = await checkAccess(request, env);
+        if (!access.ok) return json({ error: access.error }, access.status);
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        if (!conversation) return new Response(appScript, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+        return env.MAIL_QUEUE.getByName('primary').fetch('https://mail-queue.internal/archive/conversation', { method: 'POST', body: JSON.stringify({ id: conversation[1] }) });
+      }
       if (message || status || asset) {
         const access = await checkAccess(request, env);
         if (!access.ok) return json({ error: access.error }, access.status);
