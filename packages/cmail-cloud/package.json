@@ -1,0 +1,7 @@
+{
+  "name": "@sproutseeds/cmail-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs", "check": "node --check src/index.mjs && node --check src/resend.mjs" }
+}
