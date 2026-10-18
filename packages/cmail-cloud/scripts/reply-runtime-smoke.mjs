@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { bindings, payload, uuid, support } from '../test/reply-fixture.mjs';
 const { Miniflare, createFetchMock } = await import(process.argv[2]);
 const serve = process.argv.includes('--serve');
+const sent = process.argv.includes('--sent');
 const root = fileURLToPath(new URL('../', import.meta.url));
 const fetchMock = createFetchMock(); fetchMock.disableNetConnect();
 const calls = [];
@@ -17,7 +18,7 @@ fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'PO
 }, { headers: { 'Content-Type': 'application/json' } }).persist();
 const mf = new Miniflare({ name: 'cmail-reply-fixture', host: '127.0.0.1', port: serve ? 9346 : 0,
   modules: true, modulesRoot: root, scriptPath: root + 'test/reply-worker.mjs', compatibilityDate: '2026-03-27',
-  bindings: { ...bindings, ...(process.argv.includes('--fast') ? { CMAIL_FAST_READS: '1' } : {}) }, fetchMock, durableObjects: { MAIL_QUEUE: { className: 'MailQueue', useSQLite: true } },
+  bindings: { ...bindings, ...(process.argv.includes('--fast') || sent ? { CMAIL_FAST_READS: '1' } : {}), ...(sent ? { CMAIL_SENT_ENABLED: '1' } : {}) }, fetchMock, durableObjects: { MAIL_QUEUE: { className: 'MailQueue', useSQLite: true } },
 });
 try {
   const namespace = await mf.getDurableObjectNamespace('MAIL_QUEUE');
@@ -50,6 +51,23 @@ try {
   assert.equal((await (await send()).json()).state, 'sent'); assert.equal(calls.length, 1);
   const html = await (await mf.dispatchFetch(origin + '/cmail/')).text();
   assert.match(html, /reply.js/);
+  if (sent) {
+    assert.match(html, /<option value="sent">Sent<\/option>/);
+    const page = await (await mf.dispatchFetch(origin + '/cmail/api/messages?view=sent')).json();
+    assert.equal(page.total_view, 1); assert.equal(page.items[0].id, results[0].archive_id);
+    const thread = await (await mf.dispatchFetch(origin + `/cmail/api/messages/${page.items[0].id}/conversation`)).json();
+    assert.equal(thread.total, 2); assert(thread.items.some((item) => item.id === original.id));
+    const standalone = payload({ direction: 'outbound', subject: 'Standalone sent fixture', references: '', replyTo: '' });
+    standalone.raw_base64 = Buffer.from(Buffer.from(standalone.raw_base64, 'base64').toString().replace('<original@example.test>', '<standalone@example.test>')).toString('base64');
+    await call('/resend/import', { ...standalone, provider: 'resend-sent-history' });
+    const two = await (await mf.dispatchFetch(origin + '/cmail/api/messages?view=sent')).json();
+    assert.equal(two.total_view, 2);
+    const standaloneRow = two.items.find((item) => item.subject === 'Standalone sent fixture');
+    assert.equal((await (await mf.dispatchFetch(origin + `/cmail/api/messages/${standaloneRow.id}/conversation`)).json()).total, 1);
+    const probe = await (await call('/performance/probe', { parameters: { view: 'sent' } })).json();
+    assert.equal(probe.raw_payload_loads, 0); assert.equal(probe.list_calls, 1);
+    console.log(JSON.stringify({ sent_runtime: true, standalone_and_mixed_threads: true, probe }));
+  }
   console.log(JSON.stringify({ passed: true, runtime: 'workerd with SQLite Durable Objects', checks: ['native provider send fixture', 'concurrent double-submit sends once', 'durable receipt replay', 'encrypted sent archive', 'reply context', 'thread headers', 'HTML integration'], provider_calls: calls.length }));
   if (serve) {
     console.log(JSON.stringify({ browser_fixture_url: String(await mf.ready) + 'cmail/?mailbox=' + encodeURIComponent(support) + '#' + original.id, network: 'all external connections disabled; fake mail only' }));

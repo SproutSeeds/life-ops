@@ -53,11 +53,12 @@ export function withReplies(worker, checkAccess = authorize) {
       const response = await worker.fetch(request, env, context);
       if (!response.ok) return response;
       if ((url.pathname === '/' || url.pathname === '/cmail/') && response.headers.get('Content-Type')?.includes('text/html')) {
-        const html = (await response.text()).replace('</head>', '<link rel="stylesheet" href="/cmail/reply.css"><script src="/cmail/reply.js" defer></script></head>');
+        let html = (await response.text()).replace('</head>', '<link rel="stylesheet" href="/cmail/reply.css"><script src="/cmail/reply.js" defer></script></head>');
+        if (env.CMAIL_SENT_ENABLED === '1') html = html.replace('<option value="archive">Archive</option>', '<option value="sent">Sent</option><option value="archive">Archive</option>');
         return new Response(html, response);
       }
       if (url.pathname === '/cmail/api/session') {
-        return json({ ...await response.json(), read_only: false, reply_enabled: true });
+        return json({ ...await response.json(), read_only: false, reply_enabled: true, sent_enabled: env.CMAIL_SENT_ENABLED === '1' });
       }
       return response;
     },

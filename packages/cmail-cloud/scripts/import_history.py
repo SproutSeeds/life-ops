@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import format_datetime, parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime, getaddresses
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from life_ops import cloudflare_email, credentials, mail_ui, mail_vault, store
 
 SUPPORT = "support@bindmysoul.com"
+SENT_MAILBOXES = {SUPPORT, "cody@frg.earth", "info@frg.earth", "cody@codacli.com", "clawdad@frg.earth", "support@deckfound.com"}
 WORKER = "https://life-ops-email-ingest.frg-life-ops.workers.dev"
 DEFAULT_DB = Path.home() / ".lifeops/data/cmail_runtime.db"
 ROOTS = [Path.home() / ".lifeops/data/attachments", Path("data/attachments")]
@@ -38,8 +39,9 @@ def encoded(value):
 
 def vault_read(relative_path, expected_hash=""):
     for root in ROOTS:
-        if (root / relative_path).is_file():
-            raw = mail_vault.read_encrypted_vault_file(vault_root=root, relative_path=relative_path)
+        path = mail_vault._resolve_vault_path(vault_root=root, relative_path=relative_path)
+        if path.is_file():
+            raw = mail_vault.read_encrypted_vault_file(vault_root=root, relative_path=relative_path) if path.name.endswith(mail_vault.ENCRYPTED_VAULT_SUFFIX) else path.read_bytes()
             if expected_hash and sha(raw) != expected_hash:
                 raise ValueError("Local artifact hash mismatch")
             return raw
@@ -107,11 +109,12 @@ def facts(raw):
             "date": str(parsed.get("Date", "")), "attachments": attachments}
 
 
-def inventory(db):
+def inventory(db, *, sent_all=False):
     connection = sqlite3.connect(f"file:{db.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
-    rows = [dict(row) for row in connection.execute("SELECT * FROM communications WHERE mail_identity='bind_my_soul' ORDER BY id")]
+    selection = "source='resend_email' AND status='sent' AND deleted_at IS NULL" if sent_all else "mail_identity='bind_my_soul'"
+    rows = [dict(row) for row in connection.execute("SELECT * FROM communications WHERE " + selection + " ORDER BY id")]
     viewed = store.get_viewed_mail_message_keys(connection)
     connection.close()
     snapshot = sha(encoded(rows))
@@ -122,6 +125,7 @@ def inventory(db):
             continue
         saved = vault_read(row["raw_relative_path"], row["raw_sha256"])
         inbound = row["source"] == "resend_inbound"
+        mailbox = SUPPORT
         if inbound:
             raw = saved
             date = BytesParser(policy=policy.default).parsebytes(raw, headersonly=True).get("Date")
@@ -131,13 +135,20 @@ def inventory(db):
         else:
             if row["status"] != "sent":
                 raise ValueError("Unsent delivery record cannot be imported as sent history")
-            raw, received = sent_mime(row, json.loads(saved))
+            receipt = json.loads(saved)
+            if sent_all:
+                senders = getaddresses([receipt["request"]["from"]])
+                if len(senders) != 1 or senders[0][1].lower() not in SENT_MAILBOXES:
+                    excluded.append({"local_id": row["id"], "reason": "sender_not_in_connected_mailboxes"})
+                    continue
+                mailbox = senders[0][1].lower()
+            raw, received = sent_mime(row, receipt)
             provider = "resend-sent-history"
             provenance = "reconstructed-from-saved-delivery"
-        if not row["message_id"] or not row["external_id"]:
+        if (not row["message_id"] and not sent_all) or not row["external_id"]:
             raise ValueError(f"Missing preserved identity for local record {row['id']}")
         read = not inbound or any(key in viewed for key in mail_ui._communication_row_read_keys(row))
-        payload = {"provider": provider, "external_id": row["external_id"], "envelope_to": SUPPORT,
+        payload = {"provider": provider, "external_id": row["external_id"], "envelope_to": mailbox,
                    "envelope_from": row["external_from"], "direction": "inbound" if inbound else "outbound",
                    "received_at": received.isoformat().replace("+00:00", "Z"), "raw_base64": base64.b64encode(raw).decode(),
                    "payload_hash": sha(raw), "read": read, "archived": not inbound,
@@ -145,11 +156,14 @@ def inventory(db):
         expected = {"local_id": row["id"], "source": row["source"], "provenance": provenance,
                     "source_sha256": row["raw_sha256"], "received_at": payload["received_at"],
                     "direction": payload["direction"], "read": read, "archived": not inbound, **facts(raw)}
-        if expected["message_id"] != row["message_id"].strip():
+        if sent_all:
+            expected["mailbox"] = mailbox
+        if expected["message_id"] != (row["message_id"] or "").strip():
             raise ValueError(f"Message-ID differs from preserved row {row['id']}")
         entries.append((payload, expected))
     return entries, {"local_rows_sha256": snapshot, "excluded": excluded,
                      "counts": dict(Counter(item[1]["direction"] for item in entries)),
+                     **({"mailboxes": dict(Counter(item[1]["mailbox"] for item in entries))} if sent_all else {}),
                      "inbound_unread": sum(not e[1]["read"] for e in entries if e[1]["direction"] == "inbound"),
                      "attachments": sum(len(e[1]["attachments"]) for e in entries),
                      "items": [e[1] for e in entries]}
@@ -171,7 +185,7 @@ def verify(entries, receipts):
             for field in ["sha256", "bytes", "message_id", "direction", "read", "archived"]:
                 if result.get(field) != expected[field]:
                     raise AssertionError(f"Cloud {field} mismatch for local record {expected['local_id']}")
-            if result.get("mailbox") != SUPPORT:
+            if result.get("mailbox") != expected.get("mailbox", SUPPORT):
                 raise AssertionError("Cloud mailbox mismatch")
             if timestamp(result["date"]) != timestamp(expected["date"]):
                 raise AssertionError("Cloud message date mismatch")
@@ -187,9 +201,10 @@ def main():
     mode.add_argument("--verify", action="store_true")
     mode.add_argument("--replay", action="store_true")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--sent-all", action="store_true", help="Restore confirmed sent history for connected mailboxes, excluding deleted/superseded records")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
-    entries, manifest = inventory(args.db)
+    entries, manifest = inventory(args.db, sent_all=args.sent_all)
     args.receipt_dir.mkdir(parents=True, exist_ok=True)
     if not (args.apply or args.verify or args.replay):
         (args.receipt_dir / "history-inventory.json").write_bytes(encoded(manifest) + b"\n")
@@ -216,7 +231,7 @@ def main():
             if index % 10 == 0 or index == len(entries):
                 print(f"Imported {index}/{len(entries)}: {stored} stored, {duplicates} duplicates", flush=True)
     verify(entries, receipts)
-    after_manifest = inventory(args.db)[1]
+    after_manifest = inventory(args.db, sent_all=args.sent_all)[1]
     if after_manifest["local_rows_sha256"] != manifest["local_rows_sha256"]:
         raise AssertionError("Local mail rows changed during cloud verification; inspect concurrent activity")
     result = {"verified_at": datetime.now(timezone.utc).isoformat(), "mode": "replay" if args.replay else "apply" if args.apply else "verify",

@@ -1,4 +1,4 @@
-# C-mail cloud receiving, replies and indexed reading
+# C-mail cloud receiving, replies, Sent and indexed reading
 
 Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
@@ -88,6 +88,51 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
 Public endpoints: GET/POST `/cmail/api/messages/:id/reply` prepares/sends;
 GET `/cmail/api/replies/:request_id` reads a receipt. The internal Durable Object
 routes are not exposed through the signed administrative API.
+
+## Sent conversations
+
+The mail-view selector includes **Sent** when `CMAIL_SENT_ENABLED=1`. Sent shows
+one row per conversation containing a confirmed outbound message, including
+standalone sends. Opening it displays the sent and received messages together.
+Later incoming replies update the same row; multiple sends in a thread do not
+create duplicate rows. Archive/Inbox state does not determine Sent membership.
+The identity selector filters by the mailbox that sent a message in that thread.
+Rows show the latest sent recipients and are ordered by latest activity.
+
+`src/sent-index.mjs` maintains connected groups and their sorted Sent entries
+in the original message transaction. Exact Message-ID/References/In-Reply-To
+links and the stored archive-parent pointer join messages; matching subjects
+alone do not. Smaller groups merge into larger ones, preserving aliases for
+earlier lookups and moving only the smaller membership set. Sender domains or
+From headers never establish a send; the trusted stored outbound direction does.
+Normal Sent pagination uses one sorted range and batched encrypted summaries;
+it does not decrypt raw MIME or scan the archive. Full-text Sent search examines
+up to ten related groups per request, with projected bodies fetched in batches
+of 100, and can match older sent or received text in the conversation.
+
+The original encrypted MIME and existing read/archive state are preserved. Sent
+uses the same message reader, Reply, downloads and message-state controls as
+the other views. A reply without an original Message-ID can still join its
+stored archive parent. Historical messages without usable thread evidence
+remain standalone rather than being merged by subject.
+
+The signed `/api/mail/sent/status` and `/api/mail/sent/backfill` POST routes
+inspect/build the additive index. Deploy the writer first, run backfill, then
+activate Sent after readiness matches the original archive count. The deployer
+checks readiness and requires indexed reads. New arrivals remain indexed
+during the build. An older-code rollback can be followed by idempotent backfill.
+
+`import_history.py --sent-all` inventories confirmed local sent receipts for the
+six connected mailboxes, including older records without a populated identity
+field. The preserved delivery request supplies the verified sender. Deleted,
+superseded and unsent records are excluded. Original local artifacts remain
+untouched; reconstructed MIME retains text/HTML, dates, thread headers and
+attachment bytes, with an explicit provenance header. Historical sends are
+archived/read without entering the delivery queue. The admin import route
+accepts outgoing history only for configured mailboxes; inbound history imports
+remain restricted to Bind My Soul. Verification compares MIME and attachment
+hashes, dates, IDs, mailbox, direction and flags. None of these operations sends
+mail through a provider.
 
 ## Indexed reading
 
@@ -180,6 +225,11 @@ PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py 
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-fast-reads --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-performance-2026-10-18
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --probe
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --receipt-dir data/qa/cmail-performance-2026-10-18
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --sent --apply --receipt-dir data/qa/cmail-sent-2026-10-18
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py --sent-all --receipt-dir data/qa/cmail-sent-2026-10-18/history
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py --sent-all --apply --receipt-dir data/qa/cmail-sent-2026-10-18/history
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-sent --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-sent-2026-10-18
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --require-sent --receipt-dir data/qa/cmail-sent-2026-10-18
 ```
 
 The deployer checks the current version and exact existing namespace before

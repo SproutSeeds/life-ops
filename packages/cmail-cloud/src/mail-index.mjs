@@ -26,7 +26,7 @@ export async function getMany(storage, keys) {
   }
   return result;
 }
-async function putMany(storage, entries) {
+export async function putMany(storage, entries) {
   const values = Object.entries(entries);
   for (let offset = 0; offset < values.length; offset += 128) await storage.put(Object.fromEntries(values.slice(offset, offset + 128)));
 }
@@ -184,6 +184,11 @@ export class MailIndex {
   async conversation({ id } = {}) {
     if (!ID.test(id || '')) throw bad();
     await this.requireReady();
+    if (this.queue.env.CMAIL_SENT_ENABLED === '1') {
+      await this.queue.sent.requireReady();
+      const members = await this.queue.sent.members(id);
+      return members ? this.conversationResult(await this.summaries(members), id) : null;
+    }
     const first = await this.storage.get(locatorKey(id));
     if (!first) return null;
     const found = new Map([[id, first]]), visited = new Set(), pending = [first];
@@ -201,6 +206,9 @@ export class MailIndex {
       for (const member of ids) { const node = locators.get(locatorKey(member)); if (!node) throw bad('mail_index_incomplete', 503); found.set(member, node); pending.push(node); }
     }
     const summaries = await this.summaries([...found.keys()]);
+    return this.conversationResult(summaries, id);
+  }
+  conversationResult(summaries, id) {
     const unique = new Map();
     for (const item of summaries) { const key = messageTokens(item.message_id)[0] || item.id; if (!unique.has(key) || item.id === id) unique.set(key, item); }
     const items = [...unique.values()].sort((a, b) => (Date.parse(b.date) || Date.parse(b.received_at)) - (Date.parse(a.date) || Date.parse(a.received_at)) || b.id.localeCompare(a.id));

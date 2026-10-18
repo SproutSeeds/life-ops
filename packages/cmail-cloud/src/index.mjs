@@ -3,6 +3,7 @@ import { SUPPORT_MAILBOX, SYNC_STATE, normalizePayload, sourceKey, decodeRaw, sy
 import { handleReply } from './reply.mjs';
 import { withReplies } from './reply-http.mjs';
 import { MailIndex } from './mail-index.mjs';
+import { SentIndex } from './sent-index.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -12,6 +13,8 @@ const ADMIN_ROUTES = new Map([
   ['/api/mail/performance/status', '/performance/status'],
   ['/api/mail/performance/backfill', '/performance/backfill'],
   ['/api/mail/performance/probe', '/performance/probe'],
+  ['/api/mail/sent/status', '/sent/status'],
+  ['/api/mail/sent/backfill', '/sent/backfill'],
 ]);
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -19,6 +22,7 @@ export class MailQueue extends BaseQueue {
   constructor(state, env) {
     super(state, env);
     this.views = new MailIndex(this);
+    this.sent = new SentIndex(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
 
@@ -96,6 +100,7 @@ export class MailQueue extends BaseQueue {
       if (source) await storage.put(source, id);
       await storage.put('meta', { ...meta, next_seq: seq, total_stored: Number(meta.total_stored || 0) + 1, total_acknowledged: Number(meta.total_acknowledged || 0) + (archiveOnly ? 1 : 0) });
       await this.views.put(storage, { id, received_at: receivedAt }, prepared, archived);
+      await this.sent.put(storage, id, prepared.locator, payload);
       return { stored: true, duplicate: false, id, seq, sha256: fingerprint };
     });
   }
@@ -104,8 +109,17 @@ export class MailQueue extends BaseQueue {
     const path = new URL(request.url).pathname;
     if (this.env.CMAIL_FAST_READS === '1' && path === '/archive/list') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      try { return json(await this.views.list(await request.json())); }
+      try { return json(await this.listArchive(await request.json())); }
       catch (error) { return json({ error: error.status ? error.message : 'mail_temporarily_unavailable' }, error.status || 503); }
+    }
+    if (path === '/sent/status' || path === '/sent/backfill') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      try {
+        const input = await request.json();
+        if (path === '/sent/status') return json(await this.sent.readiness());
+        this.sentBackfillPromise ||= this.sent.backfill(input).finally(() => { this.sentBackfillPromise = null; });
+        return json(await this.sentBackfillPromise);
+      } catch (error) { return json({ error: error.status ? error.message : 'sent_index_unavailable' }, error.status || 503); }
     }
     if (path.startsWith('/performance/') || path === '/archive/conversation') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -135,7 +149,9 @@ export class MailQueue extends BaseQueue {
       return json(result, result.status === 'failed' ? 503 : 200);
     }
     if (path === '/resend/import') {
-      if (input.envelope_to !== SUPPORT_MAILBOX || !['resend-receiving', 'resend-sent-history'].includes(input.provider) || !['inbound', 'outbound'].includes(input.direction) || !Number.isFinite(Date.parse(input.received_at))) return json({ error: 'invalid_import' }, 400);
+      const allowed = String(this.env.CMAIL_MAILBOXES || '').split(',').map((value) => value.trim().toLowerCase());
+      const mailboxAllowed = input.envelope_to === SUPPORT_MAILBOX || input.direction === 'outbound' && allowed.includes(input.envelope_to);
+      if (!mailboxAllowed || !['resend-receiving', 'resend-sent-history'].includes(input.provider) || !['inbound', 'outbound'].includes(input.direction) || !Number.isFinite(Date.parse(input.received_at))) return json({ error: 'invalid_import' }, 400);
       if ((input.direction === 'outbound') !== (input.provider === 'resend-sent-history')) return json({ error: 'invalid_import' }, 400);
       const { read, archived, ...payload } = input;
       try {
@@ -167,6 +183,7 @@ export class MailQueue extends BaseQueue {
   }
 
   async listArchive(parameters) {
+    if (parameters?.view === 'sent' && this.env.CMAIL_SENT_ENABLED === '1') return this.sent.list(parameters);
     return this.env.CMAIL_FAST_READS === '1' ? this.views.list(parameters) : super.listArchive(parameters);
   }
   async listThreadIndex(parameters = {}) {
@@ -211,9 +228,10 @@ export class MailQueue extends BaseQueue {
     } };
     facade.loadPayload = async (record) => { if (record.id?.startsWith('mail_')) metrics.raw_payload_loads++; return BaseQueue.prototype.loadPayload.call(facade, record); };
     const views = new MailIndex(facade);
+    facade.views = views; facade.sent = new SentIndex(facade);
     const started = performance.now();
     const result = legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
-      : await (operation === 'list' ? views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
+      : await (operation === 'list' ? parameters.view === 'sent' ? facade.sent.list(parameters) : views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
     return { operation, legacy, milliseconds: Math.round((performance.now() - started) * 100) / 100, ...metrics,
       items: result?.items?.length ?? (result ? 1 : 0), scanned: result?.scanned ?? null, more: Boolean(result?.next_cursor), total: result?.total_stored ?? result?.total ?? null };
   }

@@ -43,8 +43,9 @@ try {
   assert.equal(signed.status, 200);
   assert.equal((await mf.dispatchFetch('https://worker.test/api/mail/resend/status', { method: 'POST', body: '{}' })).status, 401);
   assert.equal((await mf.dispatchFetch('https://cmail.frg.earth/')).status, 503);
-  // Match the largest preserved production MIME (6.94 MB) before live import.
-  const largeRaw = Buffer.concat([raw, Buffer.alloc(7 * 1024 * 1024, 65)]);
+  // Exercise the largest planned import before copying preserved mail.
+  const largeMiB = process.argv.includes('--large') ? 22 : 7;
+  const largeRaw = Buffer.concat([raw, Buffer.alloc(largeMiB * 1024 * 1024, 65)]);
   const large = await (await doCall('/resend/import', { ...payload, external_id: 'resend-receiving:10000000-0000-4000-8000-000000000003', raw_base64: largeRaw.toString('base64'), payload_hash: createHash('sha256').update(largeRaw).digest('hex') })).json();
   assert.equal(large.stored, true);
   const largeRead = await (await doCall('/archive/message', { id: large.id, raw: true })).json();
@@ -58,5 +59,5 @@ try {
   assert.equal(synced.status, 'healthy'); assert.equal(synced.imported, 1);
   assert(synced.last_scheduled_success_at);
   fetchMock.assertNoPendingInterceptors();
-  console.log(JSON.stringify({ passed: true, runtime: 'workerd with SQLite Durable Objects', checks: ['existing archive upgrade', 'atomic encrypted import', 'source deduplication', 'original MIME preservation', '7 MB MIME round-trip', 'native fetch with provider fixture', 'chronological metadata index', 'pending queue preservation', 'admin HMAC', 'website access enforcement'] }));
+  console.log(JSON.stringify({ passed: true, runtime: 'workerd with SQLite Durable Objects', checks: ['existing archive upgrade', 'atomic encrypted import', 'source deduplication', 'original MIME preservation', `${largeMiB} MiB MIME round-trip`, 'native fetch with provider fixture', 'chronological metadata index', 'pending queue preservation', 'admin HMAC', 'website access enforcement'] }));
 } finally { await mf.dispose(); }

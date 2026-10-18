@@ -87,9 +87,11 @@ ${formatMessage(message)}`).join("\n\n");
   function updateInboxLabel() {
     const mailbox = $("mailbox").value;
     const view = $("mailView").value;
-    $("inboxTitle").textContent = view === "archive" ? "Archive" : view === "all" ? "All mail" : mailbox ? "Inbox" : "All inboxes";
-    $("search").placeholder = view === "archive" ? "Search archive" : view === "all" ? "Search all mail" : mailbox ? "Search this inbox" : "Search all inboxes";
+    $("inboxTitle").textContent = view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : mailbox ? "Inbox" : "All inboxes";
+    $("search").placeholder = view === "sent" ? "Search sent conversations" : view === "archive" ? "Search archive" : view === "all" ? "Search all mail" : mailbox ? "Search this inbox" : "Search all inboxes";
     $("inboxTitle").title = mailbox || "All connected addresses";
+    $("back").querySelector("span").textContent = view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : "Inbox";
+    document.querySelector("main.inbox").setAttribute("aria-label", $("inboxTitle").textContent);
   }
   function closeMessage() {
     resetConversation();
@@ -101,6 +103,11 @@ ${formatMessage(message)}`).join("\n\n");
     $("message").hidden = true;
     $("readerPlaceholder").hidden = false;
     document.querySelectorAll(".message-row").forEach((row) => row.classList.remove("selected"));
+  }
+  function backToList() {
+    const previous = selectedId;
+    closeMessage();
+    document.querySelector(`.message-row[data-id="${previous}"] .message-open`)?.focus();
   }
   function switchInbox() {
     if (bulkBusy) return;
@@ -169,7 +176,7 @@ ${formatMessage(message)}`).join("\n\n");
     const checkbox = row.querySelector("input");
     checkbox.checked = checkedIds.has(item.id);
     checkbox.disabled = bulkBusy;
-    row.querySelector(".message-open").setAttribute("aria-label", `${item.read ? "Read" : "Unread"}: ${senderLabel(item.from)} \u2014 ${item.subject}`);
+    row.querySelector(".message-open").setAttribute("aria-label", `${item.read ? "Read" : "Unread"}: ${item.sent_to ? "To: " + senderLabel(item.sent_to) : senderLabel(item.from)} \u2014 ${item.subject}`);
   }
   function appendRow(item) {
     const row = document.createElement("div");
@@ -178,7 +185,7 @@ ${formatMessage(message)}`).join("\n\n");
     const label = addText(row, "label", "row-check", "");
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.setAttribute("aria-label", `Select: ${senderLabel(item.from)} \u2014 ${item.subject}`);
+    checkbox.setAttribute("aria-label", `Select: ${item.sent_to ? "To: " + senderLabel(item.sent_to) : senderLabel(item.from)} \u2014 ${item.subject}`);
     label.append(checkbox);
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) checkedIds.add(item.id);
@@ -189,13 +196,13 @@ ${formatMessage(message)}`).join("\n\n");
     open.type = "button";
     const indicator = addText(open, "span", "read-indicator", "");
     indicator.setAttribute("aria-hidden", "true");
-    addText(open, "span", "row-sender", senderLabel(item.from));
+    addText(open, "span", "row-sender", item.sent_to ? "To: " + senderLabel(item.sent_to) : senderLabel(item.from));
     const subject = addText(open, "span", "row-subject", item.subject);
     subject.title = item.subject;
     addText(open, "span", "row-mailbox", item.mailbox);
     addText(open, "time", "row-date", dateLabel(item.received_at));
     applyRowState(row, item);
-    open.addEventListener("click", () => openMessage(item.id));
+    open.addEventListener("click", () => openMessage(item.id, true));
     $("messages").append(row);
   }
   function closeActions() {
@@ -238,7 +245,7 @@ ${formatMessage(message)}`).join("\n\n");
       renderedIds = ids;
       visible.forEach(appendRow);
       if (!visible.length) {
-        const text = loading ? isSearching() ? "Searching your mail\u2026 Results will appear as they are found." : "Loading messages for this inbox\u2026" : interrupted ? "Loading has not finished. Choose Continue to keep looking." : failed ? "Some messages could not be loaded. Results may be incomplete." : isSearching() ? "No messages match these filters." : $("mailView").value === "archive" ? "No archived messages in this view." : "No messages in this inbox.";
+        const text = loading ? isSearching() ? "Searching your mail\u2026 Results will appear as they are found." : "Loading messages\u2026" : interrupted ? "Loading has not finished. Choose Continue to keep looking." : failed ? "Some messages could not be loaded. Results may be incomplete." : isSearching() ? "No messages match these filters." : $("mailView").value === "sent" ? "No sent conversations in this view." : $("mailView").value === "archive" ? "No archived messages in this view." : "No messages in this inbox.";
         addText($("messages"), "div", "empty-list", text);
       }
     } else {
@@ -312,12 +319,13 @@ ${formatMessage(message)}`).join("\n\n");
         totalStored = Number(result.total_stored);
         totalView = Number(result.total_view);
         exactViewTotal = result.exact_view_total === true;
-        $("listLabel").textContent = searching ? `Searching ${scanned.toLocaleString()} / ${totalStored.toLocaleString()}` : "Latest messages";
+        const searchTotal = result.conversations ? Number(result.total_view) : totalStored;
+        $("listLabel").textContent = searching ? `Searching ${scanned.toLocaleString()} / ${searchTotal.toLocaleString()}` : activeFilters.view === "sent" ? "Latest conversations" : "Latest messages";
         if (failed) notice("Some messages could not be loaded. Results may be incomplete.");
         renderList();
       } while (cursor && items.length < (pageIndex + 1) * pageSize + 1);
       if (exhausted) pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(items.length / pageSize) - 1));
-      $("listLabel").textContent = searching ? failed ? "Search finished with errors" : exhausted ? "Search complete" : "Search results" : "Latest messages";
+      $("listLabel").textContent = searching ? failed ? "Search finished with errors" : exhausted ? "Search complete" : "Search results" : activeFilters.view === "sent" ? "Latest conversations" : "Latest messages";
       connected("Cloud inbox");
     } catch (error) {
       if (generation !== requestGeneration || signingOut) return;
@@ -408,14 +416,14 @@ ${formatMessage(message)}`).join("\n\n");
         const item = items.find((item2) => item2.id === state.id);
         if (item) {
           const archiveDelta = Number(state.archived) - Number(Boolean(item.archived));
-          if (totalView !== null && activeFilters.view !== "all") totalView += activeFilters.view === "archive" ? archiveDelta : -archiveDelta;
+          if (totalView !== null && ["inbox", "archive"].includes(activeFilters.view)) totalView += activeFilters.view === "archive" ? archiveDelta : -archiveDelta;
           Object.assign(item, state);
         }
         readStateOverrides.set(state.id, state.read);
         if (selectedMessage?.id === state.id) Object.assign(selectedMessage, state);
       }
       if (action === "archive" || action === "unarchive") {
-        items = items.filter((item) => activeFilters.view === "all" || item.archived === (activeFilters.view === "archive"));
+        items = items.filter((item) => ["all", "sent"].includes(activeFilters.view) || item.archived === (activeFilters.view === "archive"));
         if (ids.includes(selectedId)) closeMessage();
         pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(items.length / pageSize) - 1));
       }
@@ -543,7 +551,7 @@ ${formatMessage(message)}`).join("\n\n");
       $("copyThread").disabled = true;
     }
   }
-  async function openMessage(id) {
+  async function openMessage(id, pushHistory = false) {
     if (signingOut || bulkBusy) return;
     const generation = ++readingGeneration;
     notice("");
@@ -555,7 +563,8 @@ ${formatMessage(message)}`).join("\n\n");
       selectedMessage = message;
       $("readerNotice").hidden = true;
       $("readerNotice").textContent = "";
-      window.history.replaceState(null, "", `#${id}`);
+      if (pushHistory && window.location.hash !== `#${id}`) window.history.pushState(null, "", `#${id}`);
+      else window.history.replaceState(null, "", `#${id}`);
       document.querySelectorAll(".message-row").forEach((row) => row.classList.toggle("selected", row.dataset.id === id));
       $("messageSubject").textContent = message.subject;
       $("messageMailbox").textContent = message.mailbox;
@@ -636,8 +645,10 @@ ${formatMessage(message)}`).join("\n\n");
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      const transient = !$("actionsMenu").hidden || $("dateFilters").open || $("copyFallback").open;
       closeActions();
       $("dateFilters").open = false;
+      if (!transient && selectedId) { event.preventDefault(); backToList(); }
     }
   });
   $("previousPage").addEventListener("click", () => changePage(-1));
@@ -709,7 +720,7 @@ ${formatMessage(message)}`).join("\n\n");
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) window.location.reload();
   });
-  $("back").addEventListener("click", closeMessage);
+  $("back").addEventListener("click", backToList);
   api("session").then((session) => {
     if (signingOut) return;
     $("signOut").title = `Sign out ${session.email}`;
@@ -721,11 +732,12 @@ ${formatMessage(message)}`).join("\n\n");
     if (signingOut) return;
     const linked = window.location.hash.match(/^#(mail_\d{16})$/);
     if (linked) return openMessage(linked[1]);
+    if (selectedId) closeMessage();
   }
   window.addEventListener("hashchange", openLinkedMessage);
   var initialMailbox = new URLSearchParams(window.location.search).get("mailbox") || "";
   var initialView = new URLSearchParams(window.location.search).get("view");
-  if (["inbox", "archive", "all"].includes(initialView)) $("mailView").value = initialView;
+  if (["inbox", "sent", "archive", "all"].includes(initialView)) $("mailView").value = initialView;
   if (initialMailbox) {
     addMailboxes([initialMailbox]);
     $("mailbox").value = initialMailbox.trim().toLowerCase();
