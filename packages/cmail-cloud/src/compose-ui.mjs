@@ -66,10 +66,29 @@ function composeApplication(findMatches) {
     });
     if (response.redirected || !response.headers.get('Content-Type')?.includes('application/json')) throw new Error('Your sign-in expired. Refresh to sign in; your draft is saved.');
     const data = await response.json();
-    if (!response.ok) throw Object.assign(new Error(errors[data.error] || 'Temporarily unavailable. Your draft is saved.'), { code: data.error, status: response.status });
+    if (!response.ok) throw Object.assign(new Error(errors[data.error] || 'Temporarily unavailable. Your draft is kept in this tab.'), { code: data.error, status: response.status });
     return data;
   }
-  const changedNotice = () => persistent ? 'Unsaved changes. Choose Save draft or Save & close.' : 'Draft saved in this tab.';
+  const changedNotice = () => current?.inline ? 'Unsaved changes. Save draft or return to Drafts to save.' : persistent ? 'Unsaved changes. Choose Save draft or Save & close.' : 'Draft saved in this tab.';
+  function selection(owner) {
+    document.dispatchEvent(new CustomEvent('cmail:draft-selection', { detail: { id: owner?.draft.cloud_id || null, editing: Boolean(owner?.inline) } }));
+  }
+  function inlineRoute(owner, restore = false) {
+    const url = new URL(location.href);
+    url.searchParams.set('view', 'drafts'); url.searchParams.set('draft', owner.draft.cloud_id || 'new'); url.hash = '';
+    if (owner.mailbox) url.searchParams.set('mailbox', owner.mailbox); else url.searchParams.delete('mailbox');
+    if (history.state?.cmailDraft || restore) history.replaceState({ cmailDraft: true }, '', url);
+    else {
+      // A directly linked draft gets the same Back-to-list step as a row click.
+      const list = new URL(url); list.searchParams.delete('draft');
+      history.replaceState(null, '', list); history.pushState({ cmailDraft: true }, '', url);
+    }
+    owner.route = url.href;
+  }
+  function clearInlineRoute() {
+    const url = new URL(location.href); url.searchParams.delete('draft');
+    history.replaceState(null, '', url);
+  }
   function draftValue(value) {
     return { kind: value.kind || 'compose', sender: value.sender, to: value.to, pending: value.pending || '', subject: value.subject,
       cc: value.cc || [], bcc: value.bcc || [],
@@ -102,7 +121,10 @@ function composeApplication(findMatches) {
           document.dispatchEvent(new CustomEvent('cmail:reply-draft-saved', { detail: { id: owner.draft.reply_id } }));
           delete owner.draft.source_reply_local;
         }
-        if (current === owner) { status('Saved to Drafts.'); owner.keepLocal.hidden = true; }
+        if (current === owner) {
+          status('Saved to Drafts.'); owner.keepLocal.hidden = true;
+          if (owner.inline) { if (!owner.closing) inlineRoute(owner, true); selection(owner); }
+        }
         document.dispatchEvent(new CustomEvent('cmail:drafts-changed')); return true;
       } catch (error) {
         owner.conflict = ['draft_conflict', 'draft_changed', 'draft_closed'].includes(error.code);
@@ -201,7 +223,8 @@ function composeApplication(findMatches) {
     owner.send.textContent = busy ? 'Sending…' : owner.draft.locked ? 'Retry confirmation' : 'Send';
     const hasRecipients = owner.draft.to.length > 0 || Boolean(owner.to.value.trim());
     owner.send.disabled = busy || saving || owner.conflict || Boolean(owner.draft.pending_save) || owner.sent || !hasRecipients || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim();
-    owner.discard.disabled = Boolean(locked); owner.cancel.textContent = owner.sent ? 'Done' : persistent ? 'Save & close' : 'Cancel';
+    owner.discard.disabled = Boolean(locked); owner.cancel.textContent = owner.inline ? '← Drafts' : owner.sent ? 'Done' : persistent ? 'Save & close' : 'Cancel';
+    owner.cancel.title = owner.inline && !owner.sent ? 'Save and return to Drafts' : '';
     if (persistent) {
       owner.saveButton.hidden = Boolean(owner.sent); owner.saveButton.disabled = busy || saving || owner.draft.locked || owner.conflict;
       owner.saveButton.textContent = saving ? 'Saving…' : 'Save draft'; owner.copyButton.hidden = !owner.conflict;
@@ -209,22 +232,35 @@ function composeApplication(findMatches) {
     }
     if (locked) hideSuggestions(); updateTrigger();
   }
-  async function close(goBack = true, keepLocal = false) {
-    const owner = current; if (!owner) return;
-    if (owner.closing) return;
+  async function close(goBack = true, keepLocal = false, replacing = false) {
+    const owner = current; if (!owner) return true;
+    if (owner.closing || busy) {
+      if (owner.inline && location.href !== owner.route) history.pushState({ cmailDraft: true }, '', owner.route);
+      return false;
+    }
     owner.closing = true;
     if (persistent && !owner.sent && !keepLocal && !(owner.draft.locked && !owner.draft.cloud_id)) {
+      // A popstate may already have changed the address bar. Save must not
+      // replace that destination while the outgoing editor is closing.
       if ((meaningful() || owner.draft.cloud_id) && !await saveCloud(owner)) {
-        if (!goBack && !history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
+        if (owner.inline && location.href !== owner.route) history.pushState({ cmailDraft: true }, '', owner.route);
+        else if (!owner.inline && !goBack && !history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
         owner.closing = false;
-        return;
+        return false;
       }
       if (draft === owner.draft) clear();
     }
     if (!owner.sent) save();
-    owner.dialog.close(); owner.dialog.remove(); current = null; trigger.focus();
-    if (goBack && history.state?.cmailCompose) history.back();
+    owner.dialog.close?.(); owner.dialog.remove(); current = null;
+    if (owner.inline) {
+      selection(null);
+      if (!replacing) {
+        if (goBack && history.state?.cmailDraft) history.back(); else clearInlineRoute();
+      }
+    } else if (goBack && history.state?.cmailCompose) history.back();
+    if (!replacing) trigger.focus();
     document.dispatchEvent(new CustomEvent('cmail:composer-closed'));
+    return true;
   }
   async function applyReceipt(result, owner) {
     if (result.state === 'sent') {
@@ -234,7 +270,7 @@ function composeApplication(findMatches) {
         owner.sentLink.href = '/cmail/?mailbox=' + encodeURIComponent(owner.draft.sender) + '&view=sent#' + result.archive_id;
         owner.sentLink.hidden = false;
       }
-      $('refresh')?.click();
+      if ($('mailView').value !== 'drafts') $('refresh')?.click();
     } else {
       owner.draft.locked = !(result.state === 'unsent' || result.can_edit);
       if (!owner.draft.locked) owner.draft.request_id = null;
@@ -281,9 +317,11 @@ function composeApplication(findMatches) {
     } finally { busy = false; if (current === owner) controls(); updateTrigger(); }
   }
   async function open(options = {}) {
-    if (opening || busy || current) return;
+    if (opening || busy || saving) return;
+    if (current && (!current.inline || !options.fresh && (!options.id || options.id === current.draft.cloud_id))) return;
     opening = true; openingNotice.hidden = true; updateTrigger();
     try {
+      if (current && !await close(false, false, true)) return;
       config ||= await api('compose');
       if (!config.identities.length) throw new Error('No sending identities are configured.');
       const identity = config.identities.find((item) => item.address === $('mailbox').value) || config.identities[0];
@@ -307,7 +345,8 @@ function composeApplication(findMatches) {
         }
       }
       draft ||= { kind: 'compose', dirty: persistent, sender: identity.address, signature: identity.signature, to: [], pending: '', subject: '', text: identity.signature ? '\n\n' + identity.signature : '' };
-      const dialog = document.createElement('dialog'); dialog.className = 'cmail-compose-dialog'; dialog.setAttribute('aria-labelledby', 'composeHeading');
+      const inline = persistent && $('mailView').value === 'drafts' && Boolean($('draftEditor'));
+      const dialog = document.createElement(inline ? 'section' : 'dialog'); dialog.className = inline ? 'cmail-compose-inline' : 'cmail-compose-dialog'; dialog.setAttribute('aria-labelledby', 'composeHeading');
       dialog.innerHTML = `<form class="cmail-compose-form"><header><h2 id="composeHeading">New message</h2><button type="button" id="composeCancel">Cancel</button></header>
         <label class="cmail-compose-field">From<select id="composeFrom" aria-label="From"></select></label>
         <div class="cmail-compose-field cmail-compose-to"><label for="composeTo">To</label><div class="cmail-recipient-field"><div id="composeTokens"></div><input id="composeTo" type="text" role="combobox" aria-label="To" aria-autocomplete="list" aria-controls="composeOptions" aria-expanded="false" aria-describedby="composeRecipientHint" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Name or email address"><div id="composeOptions" role="listbox" aria-label="Matching contacts" hidden></div><button id="composeUnique" type="button" hidden></button></div></div>
@@ -317,10 +356,10 @@ function composeApplication(findMatches) {
         <label class="cmail-compose-field">Subject<input id="composeSubject" maxlength="1000" autocomplete="off"></label>
         <label class="cmail-compose-body"><span class="cmail-compose-sr">Message</span><textarea id="composeText" aria-label="Message" maxlength="100000" placeholder="Write your message…"></textarea></label>
         <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><button id="composeSave" type="button" hidden>Save draft</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeCopy" type="button" hidden>Save a copy</button><button id="composeKeepLocal" type="button" hidden>Close, keep local copy</button><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
-      document.body.append(dialog);
-      const owner = current = { dialog, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
+      (inline ? $('draftEditor') : document.body).append(dialog);
+      const owner = current = { dialog, inline, mailbox: $('mailbox').value, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
       Object.assign(owner, { cc: $('composeCc'), bcc: $('composeBcc'), saveButton: $('composeSave'), copyButton: $('composeCopy'), keepLocal: $('composeKeepLocal') });
-      $('composeHeading').textContent = draft.kind === 'reply' ? 'Reply draft' : persistent ? 'New draft' : 'New message';
+      $('composeHeading').textContent = draft.kind === 'reply' ? 'Reply draft' : persistent ? draft.cloud_id ? 'Draft' : 'New draft' : 'New message';
       dialog.setAttribute('aria-label', draft.kind === 'reply' ? 'Reply draft' : persistent ? 'Email draft' : 'New message');
       for (const item of config.identities) { const option = document.createElement('option'); option.value = item.address; option.textContent = item.from; owner.from.append(option); }
       owner.from.value = draft.sender; owner.to.value = draft.pending || ''; owner.subject.value = draft.subject; owner.text.value = draft.text;
@@ -375,9 +414,13 @@ function composeApplication(findMatches) {
         owner.sent = true; clear(); close(); document.dispatchEvent(new CustomEvent('cmail:drafts-changed'));
       });
       dialog.addEventListener('cancel', (event) => { event.preventDefault(); if (!owner.list.hidden || !owner.unique.hidden) hideSuggestions(); else close(); });
-      tokens(); dialog.showModal();
-      if (!history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
-      controls(); status(errors[draft.error] || (persistent ? draft.cloud_id && !draft.dirty ? 'Saved to Drafts.' : 'Choose Save draft to keep this email without sending.' : '')); (draft.kind === 'reply' ? owner.text : owner.to).focus(); save();
+      tokens();
+      if (inline) { inlineRoute(owner, options.restore); selection(owner); }
+      else {
+        dialog.showModal();
+        if (!history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
+      }
+      controls(); status(errors[draft.error] || (persistent ? draft.cloud_id && !draft.dirty ? 'Saved to Drafts.' : 'Choose Save draft to keep this email without sending.' : '')); (draft.cloud_id || draft.kind === 'reply' ? owner.text : owner.to).focus(); save();
       if (draft.kind !== 'reply') loadContacts(); else suggest();
       if (draft.locked && (draft.request_id || draft.cloud_id)) {
         busy = true; controls();
@@ -393,7 +436,10 @@ function composeApplication(findMatches) {
       }
     } catch (error) {
       if (current) status(error.message, true);
-      else { openingNotice.textContent = error.message; openingNotice.hidden = false; }
+      else {
+        if (history.state?.cmailDraft) clearInlineRoute();
+        openingNotice.textContent = error.message; openingNotice.hidden = false;
+      }
     } finally { opening = false; updateTrigger(); }
   }
   trigger.addEventListener('click', () => open());
@@ -401,14 +447,40 @@ function composeApplication(findMatches) {
     document.addEventListener('cmail:new-draft', () => open({ fresh: true }));
     document.addEventListener('cmail:open-draft', (event) => open({ id: event.detail.id }));
     document.addEventListener('cmail:reply-draft', (event) => open({ reply_id: event.detail.id, legacy: event.detail.legacy }));
+    document.addEventListener('cmail:before-view-change', (event) => {
+      if (opening) event.detail.ready = Promise.resolve(false);
+      else if (current?.inline) event.detail.ready = close(false);
+    });
+    document.querySelector('.brand')?.addEventListener('click', (event) => {
+      if (!current?.inline || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); $('mailView').value = 'inbox'; $('mailView').dispatchEvent(new Event('change'));
+    });
   }
-  window.addEventListener('popstate', () => { if (current && !history.state?.cmailCompose) close(false); });
+  document.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented || event.key !== 'Escape' || !current?.inline) return;
+    event.preventDefault();
+    if (!current.list.hidden || !current.unique.hidden) hideSuggestions(); else close();
+  });
+  window.addEventListener('popstate', async () => {
+    if (current && !current.inline) { if (!history.state?.cmailCompose) await close(false); return; }
+    const destination = new URL(location.href), id = destination.searchParams.get('draft');
+    if (current?.inline) {
+      if (destination.href === current.route) return;
+      if (!await close(false, false, true)) return;
+    }
+    if (!persistent) return;
+    document.dispatchEvent(new CustomEvent('cmail:restore-view'));
+    if (destination.searchParams.get('view') === 'drafts' && (id === 'new' || /^draft_[a-f0-9-]{36}$/.test(id || ''))) await open({ ...(id === 'new' ? { fresh: true } : { id }), restore: true });
+  });
   window.addEventListener('pagehide', () => { if (draft) save(); });
   $('signOut').addEventListener('click', () => { signedOut = true; clear(); contacts = []; config = null; if (current) { current.sent = true; close(false); } }, true);
   updateTrigger();
   if (persistent) {
     const linked = new URLSearchParams(location.search).get('draft');
-    if (/^draft_[a-f0-9-]{36}$/.test(linked || '')) open({ id: linked });
+    if (/^draft_[a-f0-9-]{36}$/.test(linked || '') || linked === 'new') {
+      const openLinked = () => open(linked === 'new' ? { fresh: true } : { id: linked });
+      if ($('draftEditor')) openLinked(); else document.addEventListener('cmail:drafts-ready', openLinked, { once: true });
+    }
   }
 }
 

@@ -113,19 +113,45 @@ ${formatMessage(message)}`).join("\n\n");
     closeMessage();
     document.querySelector(`.message-row[data-id="${previous}"] .message-open`)?.focus();
   }
-  function switchInbox() {
+  let switchingInbox = false;
+  async function switchInbox() {
     if (bulkBusy) return;
+    const previous = new URL(window.location.href);
+    const mailbox = $("mailbox").value, view = $("mailView").value;
+    if (switchingInbox) return;
+    switchingInbox = true;
+    const transition = { ready: Promise.resolve(true) };
+    document.dispatchEvent(new CustomEvent('cmail:before-view-change', { detail: transition }));
+    const ready = await transition.ready;
+    switchingInbox = false;
+    if (!ready) {
+      $("mailbox").value = previous.searchParams.get("mailbox") || "";
+      $("mailView").value = previous.searchParams.get("view") || "inbox";
+      return;
+    }
     const url = new URL(window.location.href);
-    if ($("mailbox").value) url.searchParams.set("mailbox", $("mailbox").value);
+    $("mailbox").value = mailbox; $("mailView").value = view;
+    if (mailbox) url.searchParams.set("mailbox", mailbox);
     else url.searchParams.delete("mailbox");
-    if ($("mailView").value !== "inbox") url.searchParams.set("view", $("mailView").value);
+    if (view !== "inbox") url.searchParams.set("view", view);
     else url.searchParams.delete("view");
+    url.searchParams.delete("draft");
     url.hash = "";
     window.history.replaceState(null, "", url);
     closeMessage();
     updateInboxLabel();
     load(true);
   }
+  document.addEventListener('cmail:restore-view', () => {
+    const url = new URL(window.location.href);
+    const view = url.searchParams.get('view') || 'inbox', mailbox = url.searchParams.get('mailbox') || '';
+    if ($("mailView").value === view && $("mailbox").value === mailbox) return;
+    if (![...$("mailView").options].some((option) => option.value === view)) return;
+    addMailboxes([mailbox]); $("mailbox").value = mailbox; $("mailView").value = view;
+    resetConversation(); selectedId = null; selectedMessage = null; document.body.classList.remove('reading');
+    $("message").hidden = true; $("readerPlaceholder").hidden = false;
+    updateInboxLabel(); load(true);
+  });
   function notice(message) {
     $("notice").textContent = message;
     $("notice").hidden = !message;
@@ -655,7 +681,7 @@ ${formatMessage(message)}`).join("\n\n");
     if (!event.target.closest(".date-filters")) $("dateFilters").open = false;
   });
   document.addEventListener("keydown", (event) => {
-    if (document.querySelector('.cmail-compose-dialog[open]')) return;
+    if (document.querySelector('.cmail-compose-dialog[open],.cmail-compose-inline')) return;
     if (event.key === "Escape") {
       const transient = !$("actionsMenu").hidden || $("dateFilters").open || $("copyFallback").open;
       closeActions();
