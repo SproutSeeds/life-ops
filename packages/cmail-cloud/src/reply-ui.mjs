@@ -135,6 +135,7 @@ function replyApplication() {
   trigger.addEventListener('click', open);
   $('back').addEventListener('click', (event) => { if (composer) { event.preventDefault(); event.stopImmediatePropagation(); close(); } }, true);
   document.addEventListener('keydown', (event) => {
+    if (document.querySelector('.cmail-compose-dialog[open]')) return;
     if (event.key === 'Escape' && composer) { event.preventDefault(); event.stopImmediatePropagation(); close(); }
   }, true);
   window.addEventListener('popstate', () => { if (composer && history.state?.cmailReply !== current?.id) close(false); });

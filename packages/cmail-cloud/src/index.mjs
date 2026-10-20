@@ -4,6 +4,7 @@ import { handleReply } from './reply.mjs';
 import { withReplies } from './reply-http.mjs';
 import { MailIndex } from './mail-index.mjs';
 import { SentIndex } from './sent-index.mjs';
+import { ContactIndex } from './contact-index.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -15,6 +16,8 @@ const ADMIN_ROUTES = new Map([
   ['/api/mail/performance/probe', '/performance/probe'],
   ['/api/mail/sent/status', '/sent/status'],
   ['/api/mail/sent/backfill', '/sent/backfill'],
+  ['/api/mail/contacts/status', '/contacts/status'],
+  ['/api/mail/contacts/backfill', '/contacts/backfill'],
 ]);
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -23,6 +26,7 @@ export class MailQueue extends BaseQueue {
     super(state, env);
     this.views = new MailIndex(this);
     this.sent = new SentIndex(this);
+    this.contacts = new ContactIndex(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
 
@@ -69,6 +73,7 @@ export class MailQueue extends BaseQueue {
     const fingerprint = payload.payload_hash;
     const source = sourceKey(payload);
     const prepared = await this.views.prepare(payload);
+    const contacts = await this.contacts.prepare(prepared.body, payload);
     return this.state.storage.transaction(async (storage) => {
       const existingId = source && await storage.get(source) || await storage.get(`dedupe:${fingerprint}`);
       if (existingId) {
@@ -101,12 +106,24 @@ export class MailQueue extends BaseQueue {
       await storage.put('meta', { ...meta, next_seq: seq, total_stored: Number(meta.total_stored || 0) + 1, total_acknowledged: Number(meta.total_acknowledged || 0) + (archiveOnly ? 1 : 0) });
       await this.views.put(storage, { id, received_at: receivedAt }, prepared, archived);
       await this.sent.put(storage, id, prepared.locator, payload);
+      await this.contacts.put(storage, id, contacts);
       return { stored: true, duplicate: false, id, seq, sha256: fingerprint };
     });
   }
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path.startsWith('/contacts/')) {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      try {
+        const input = await request.json();
+        if (path === '/contacts/status') return json(await this.contacts.readiness());
+        if (path === '/contacts/list') return json(await this.contacts.list(input));
+        if (path !== '/contacts/backfill') return json({ error: 'not_found' }, 404);
+        this.contactsBackfillPromise ||= this.contacts.backfill(input).finally(() => { this.contactsBackfillPromise = null; });
+        return json(await this.contactsBackfillPromise);
+      } catch (error) { return json({ error: error.status ? error.message : 'contacts_unavailable' }, error.status || 503); }
+    }
     if (this.env.CMAIL_FAST_READS === '1' && path === '/archive/list') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
       try { return json(await this.listArchive(await request.json())); }
@@ -135,7 +152,7 @@ export class MailQueue extends BaseQueue {
         return json(result, result ? 200 : 404);
       } catch (error) { return json({ error: error.status ? error.message : 'index_unavailable' }, error.status || 503); }
     }
-    if (path.startsWith('/reply/')) return handleReply(this, request);
+    if (path.startsWith('/reply/') || path.startsWith('/compose/')) return handleReply(this, request);
     if (!path.startsWith('/resend/')) return super.fetch(request);
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     let input;
@@ -218,7 +235,7 @@ export class MailQueue extends BaseQueue {
     });
   }
   async performanceProbe({ operation = 'list', legacy = false, parameters = {} } = {}) {
-    if (!['list', 'conversation', 'message'].includes(operation)) throw Object.assign(new Error('invalid_request'), { status: 400 });
+    if (!['list', 'conversation', 'message', 'contacts'].includes(operation) || operation === 'contacts' && legacy) throw Object.assign(new Error('invalid_request'), { status: 400 });
     const metrics = { get_calls: 0, list_calls: 0, keys_read: 0, raw_payload_loads: 0 };
     const storage = this.state.storage;
     const facade = Object.create(this);
@@ -228,9 +245,9 @@ export class MailQueue extends BaseQueue {
     } };
     facade.loadPayload = async (record) => { if (record.id?.startsWith('mail_')) metrics.raw_payload_loads++; return BaseQueue.prototype.loadPayload.call(facade, record); };
     const views = new MailIndex(facade);
-    facade.views = views; facade.sent = new SentIndex(facade);
+    facade.views = views; facade.sent = new SentIndex(facade); facade.contacts = new ContactIndex(facade);
     const started = performance.now();
-    const result = legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
+    const result = operation === 'contacts' ? await facade.contacts.list(parameters) : legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
       : await (operation === 'list' ? parameters.view === 'sent' ? facade.sent.list(parameters) : views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
     return { operation, legacy, milliseconds: Math.round((performance.now() - started) * 100) / 100, ...metrics,
       items: result?.items?.length ?? (result ? 1 : 0), scanned: result?.scanned ?? null, more: Boolean(result?.next_cursor), total: result?.total_stored ?? result?.total ?? null };

@@ -59,11 +59,13 @@ def current():
     return settings, deployment
 
 
-def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False):
+def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False, enable_compose=False):
     bindings = []
     reply_names = {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}
     for binding in settings["bindings"]:
         name = binding["name"]
+        if enable_compose and name == "CMAIL_COMPOSE_ENABLED":
+            continue
         if enable_sent and name == "CMAIL_SENT_ENABLED":
             continue
         if enable_fast_reads and name == "CMAIL_FAST_READS":
@@ -108,6 +110,8 @@ def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_se
         bindings.append({"type": "plain_text", "name": "CMAIL_FAST_READS", "text": "1"})
     if enable_sent:
         bindings.append({"type": "plain_text", "name": "CMAIL_SENT_ENABLED", "text": "1"})
+    if enable_compose:
+        bindings.append({"type": "plain_text", "name": "CMAIL_COMPOSE_ENABLED", "text": "1"})
     metadata = {
         "main_module": "index.mjs", "bindings": bindings,
         "compatibility_date": settings["compatibility_date"],
@@ -139,6 +143,7 @@ def main():
     parser.add_argument("--enable-replies", action="store_true", help="Reuse existing per-account sending credentials and identity signatures")
     parser.add_argument("--enable-fast-reads", action="store_true", help="Activate verified mailbox and conversation indexes after backfill")
     parser.add_argument("--enable-sent", action="store_true", help="Enable Sent after its conversation index is complete")
+    parser.add_argument("--enable-compose", action="store_true", help="Enable Compose after the contact history index is complete")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     settings, deployment = current()
@@ -156,6 +161,15 @@ def main():
     before_path = args.receipt_dir / f"production-before-{stamp}.json"
     before_path.write_bytes(encoded(before) + b"\n")
     if args.deploy:
+        if args.enable_compose:
+            from life_ops import cloudflare_email
+            secret = credentials.resolve_secret(name="LIFE_OPS_MAIL_INGEST_SECRET")
+            readiness = cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path="/api/mail/contacts/status", payload={})
+            if not readiness.get("ready"):
+                raise RuntimeError("Contact index must be complete before activation")
+            for name in ["CMAIL_FAST_READS", "CMAIL_SENT_ENABLED"]:
+                if next((b.get("text") for b in settings["bindings"] if b["name"] == name), None) != "1":
+                    raise RuntimeError("Compose requires indexed reads and Sent")
         if args.enable_fast_reads or args.enable_sent:
             from life_ops import cloudflare_email
             secret = credentials.resolve_secret(name="LIFE_OPS_MAIL_INGEST_SECRET")
@@ -168,7 +182,7 @@ def main():
                     raise RuntimeError("Sent index must be complete before activation")
                 if not args.enable_fast_reads and next((b.get("text") for b in settings["bindings"] if b["name"] == "CMAIL_FAST_READS"), None) != "1":
                     raise RuntimeError("Sent requires indexed reads")
-        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent)
+        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent, enable_compose=args.enable_compose)
     else:
         desired = list(dict.fromkeys([*(item["cron"] for item in schedules), "*/2 * * * *"]))
         result = api("/schedules", method="PUT", data=encoded([{"cron": cron} for cron in desired]), content_type="application/json")
@@ -181,6 +195,8 @@ def main():
         if args.enable_fast_reads and old["name"] == "CMAIL_FAST_READS":
             continue
         if args.enable_sent and old["name"] == "CMAIL_SENT_ENABLED":
+            continue
+        if args.enable_compose and old["name"] == "CMAIL_COMPOSE_ENABLED":
             continue
         actual = next((b for b in after_settings["bindings"] if b["name"] == old["name"]), None)
         if actual != old:

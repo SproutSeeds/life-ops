@@ -1,4 +1,4 @@
-# C-mail cloud receiving, replies, Sent and indexed reading
+# C-mail cloud receiving, Compose, replies, Sent and indexed reading
 
 Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
@@ -7,6 +7,9 @@ website's existing encrypted Durable Object archive.
 The message reader also supports authenticated plaintext replies. Click Reply,
 write above the visible signature, then click Send. From, To and conversation
 headers come from the original message and verified mailbox configuration.
+Use **Compose** in the top bar to start a new message. Its From address defaults
+to the selected inbox. Enter recipients, a subject and your message, then click
+Send. New messages appear in Sent with the same durable receipts as replies.
 
 ## Source provenance
 
@@ -81,13 +84,62 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
   recipient-delivery confirmation. No delivery webhook was introduced.
 - Replies currently support plaintext, one reply recipient group derived from
   Reply-To/From, and the existing conversation headers. Attachments, Reply all,
-  new-message composition, and cross-device draft sync are separate features.
+  and cross-device draft sync are separate features.
 - Cloud replies remain in the cloud archive and do not modify local follow-up
   classifications or enter the legacy inbound-delivery queue.
 
 Public endpoints: GET/POST `/cmail/api/messages/:id/reply` prepares/sends;
 GET `/cmail/api/replies/:request_id` reads a receipt. The internal Durable Object
 routes are not exposed through the signed administrative API.
+
+## Compose and recipient autocomplete
+
+`CMAIL_COMPOSE_ENABLED=1` exposes Compose after the contact index is ready.
+Choose among the six configured sending identities, add up to ten recipients,
+and edit the subject, body and visible signature. A new recipient does not need
+to exist in history. Names and email fragments match after two characters;
+multiple matches appear in a keyboard-accessible list. A unique match becomes
+one completion hint. Tab, Enter or a click accepts it, and selected or complete
+addresses hide the suggestions. Enter in the recipient or subject field never
+sends. Sending requires the Send button.
+
+The contact catalog deduplicates incoming From/Reply-To and confirmed outgoing
+To/Cc addresses, excluding the user's configured mailboxes. Prior sends and
+recent activity rank matches. Names and addresses stay encrypted at rest, with
+hashed contact keys and chronological range entries. Mail ingestion updates
+contacts in the existing archive transaction; retries cannot inflate counts.
+Historical backfill uses the trusted outbound metadata and existing body
+projections. It never changes message flags or sends mail. Pathological header
+fanout is capped at 500 distinct contacts per message without blocking intake.
+
+Opening Compose loads the catalog in pages of at most 250 contacts, then keeps
+it only in page memory. Typing performs **zero network or database requests**.
+Reopening within five minutes reuses the catalog; a successful send invalidates
+it. Pagination detects intervening mail writes and restarts with the new
+revision. Catalog failures leave manual address entry available. The initial
+production catalog had 726 contacts, requiring three bounded page requests.
+
+The composer preserves one new-message draft per browser tab through Cancel,
+Escape, Back and reload. Discard draft explicitly clears it; Sign out clears
+drafts and in-memory contacts. Escape closes suggestions before the composer,
+and closing restores focus to Compose. Attachments, Cc/Bcc composition and
+cross-device drafts are outside this release.
+
+GET `/cmail/api/compose` returns allowed identities and signatures, never keys;
+POST on the same route accepts a new message. GET `/cmail/api/contacts` reads
+the paginated catalog. Access protects all assets and APIs. Sending additionally
+requires same-origin JSON and `X-Cmail-Action: compose`. The server validates
+the chosen identity and every recipient, rejects header injection, and uses
+the existing provider-account routing. The shared durable outbox binds sender,
+recipients, subject and body to the stable request UUID. Uncertain retries keep
+the original payload; accepted sends with an archive failure retry only the
+archive step. New messages omit reply headers and begin independent Sent threads.
+
+Deploy the index writer while leaving Compose disabled, build it through signed
+`/api/mail/contacts/backfill`, then use `--enable-compose`. The deployer requires
+ready contacts, indexed reading and Sent. `--contacts --probe` reports logical
+storage work without returning contact contents. No contact data is loaded by
+the ordinary inbox until the user opens Compose.
 
 ## Sent conversations
 
@@ -230,7 +282,17 @@ PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/import_history.py --sent-all --apply --receipt-dir data/qa/cmail-sent-2026-10-18/history
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-sent --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-sent-2026-10-18
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --require-sent --receipt-dir data/qa/cmail-sent-2026-10-18
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --contacts --apply --receipt-dir data/qa/cmail-compose-2026-10-19
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-compose --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-compose-2026-10-19
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --contacts --probe --receipt-dir data/qa/cmail-compose-2026-10-19
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --require-sent --require-compose --receipt-dir data/qa/cmail-compose-2026-10-19
 ```
+
+`scripts/compose-runtime-smoke.mjs` accepts the same Miniflare module path and
+checks new-message routing, concurrent submissions, receipt replay, Sent and
+contacts against a fake provider with external networking disabled. `--serve`
+exposes its synthetic browser fixture on port 9346. Test-only authentication
+and request counters are outside `src/` and are never deployed.
 
 The deployer checks the current version and exact existing namespace before
 writing. It inherits all existing bindings, adds the required mailbox/credential,

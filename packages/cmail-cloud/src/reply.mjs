@@ -10,6 +10,15 @@ const json = (value, status = 200) => Response.json(value, { status, headers: { 
 const headerIds = (value) => [...new Set(String(value || '').match(/<[^<>\s]+>/g) || [])].filter((id) => id.length < 250 && /^[\x21-\x7e]+$/.test(id));
 const emails = (values) => [...new Set((values || []).map((item) => String(item.address || '').toLowerCase()).filter((address) => EMAIL.test(address)))];
 
+export function prepareCompose(queue, input) {
+  const identity = sendingIdentities(queue.env)[input.sender];
+  if (!identity) throw fail('sender_not_configured', 400);
+  if (!Array.isArray(input.to) || !input.to.length || input.to.length > 10 || input.to.some((address) => typeof address !== 'string' || address.length > 254 || /\s/.test(address) || !EMAIL.test(address))) throw fail('invalid_recipients');
+  if (typeof input.subject !== 'string' || input.subject.length > 1000 || /[\r\n\0]/.test(input.subject)) throw fail('invalid_subject');
+  return { from: identity.from, sender: input.sender, to: [...new Set(input.to.map((address) => address.toLowerCase()))],
+    subject: input.subject.trim(), signature: String(identity.signature || ''), references: [], credential: identity.key };
+}
+
 export function sendingIdentities(env) {
   let configured;
   try { configured = JSON.parse(env.CMAIL_SEND_IDENTITIES || '{}'); } catch { return {}; }
@@ -61,9 +70,10 @@ function makeMessage(prepared, text, requestId, createdAt) {
     `Subject: ${encodedSubject(prepared.subject)}`, `Date: ${new Date(createdAt).toUTCString()}`,
     ...Object.entries(headers).map(([key, value]) => `${key}: ${key === 'References' ? value.split(' ').join('\r\n ') : value}`), 'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', body64, ''];
-  return { request, credential: prepared.credential, archive: { provider: 'resend-cloud-reply', external_id: `cmail-reply:${requestId}`,
+  const kind = prepared.id ? 'reply' : 'compose';
+  return { request, credential: prepared.credential, archive: { provider: `resend-cloud-${kind}`, external_id: `cmail-${kind}:${requestId}`,
     envelope_from: prepared.sender, envelope_to: prepared.sender, direction: 'outbound', received_at: createdAt,
-    raw_base64: encodeRaw(new TextEncoder().encode(lines.join('\r\n'))), reply_to_archive_id: prepared.id } };
+    raw_base64: encodeRaw(new TextEncoder().encode(lines.join('\r\n'))), ...(prepared.id ? { reply_to_archive_id: prepared.id } : {}) } };
 }
 
 function receipt(record) {
@@ -83,25 +93,29 @@ async function archiveSent(queue, key, record, saved) {
   return receipt(record);
 }
 
-export async function sendReply(queue, input, { fetcher = fetch, now = Date.now } = {}) {
-  if (!MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
+export const sendReply = (queue, input, options) => sendMessage(queue, input, { ...options, kind: 'reply' });
+export const sendCompose = (queue, input, options) => sendMessage(queue, input, { ...options, kind: 'compose' });
+
+async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind } = {}) {
+  if (kind === 'reply' && !MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
+  const composition = kind === 'compose' ? prepareCompose(queue, input) : null;
   const key = OUTBOX + input.request_id;
-  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify([input.id, input.text])));
+  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify(composition ? [kind, composition.sender, composition.to, composition.subject, input.text] : [input.id, input.text])));
   let record = await queue.state.storage.get(key);
-  if (record && (record.message_id !== input.id || record.digest !== digest)) throw fail('reply_changed', 409);
+  if (record && ((record.kind || 'reply') !== kind || record.digest !== digest)) throw fail('reply_changed', 409);
   if (record?.state === 'sent' || record?.state === 'rejected') return receipt(record);
   let saved;
   if (record) {
     saved = await queue.loadPayload(record);
   } else {
-    const prepared = await prepareReply(queue, input.id);
+    const prepared = composition || await prepareReply(queue, input.id);
     if (input.text.trim() === prepared.signature.trim()) throw fail('empty_reply');
     const createdAt = new Date(now()).toISOString();
     saved = makeMessage(prepared, input.text, input.request_id, createdAt);
     const envelope = await encryptArchivePayload({ masterKey: queue.env.LIFE_OPS_MASTER_KEY, purpose: 'cloudflare-mail-archive-v1', payload: saved,
       metadata: { id: `reply_${input.request_id}`, created_at: createdAt } });
     const payloadRef = await storeArchiveEnvelope({ storage: queue.state.storage, id: `reply_${input.request_id}`, envelope });
-    record = { request_id: input.request_id, message_id: input.id, digest, created_at: createdAt, state: 'prepared', payload_ref: payloadRef };
+    record = { request_id: input.request_id, kind, ...(input.id ? { message_id: input.id } : {}), digest, created_at: createdAt, state: 'prepared', payload_ref: payloadRef };
     await queue.state.storage.put(key, record);
   }
   if (record.provider_id) return archiveSent(queue, key, record, saved);
@@ -116,7 +130,7 @@ export async function sendReply(queue, input, { fetcher = fetch, now = Date.now 
     await queue.state.storage.put(key, record);
     response = await fetcher('https://api.resend.com/emails', {
       method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(25000),
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `cmail-reply/${input.request_id}` },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `cmail-${kind}/${input.request_id}` },
       body: JSON.stringify(saved.request),
     });
     const result = await response.json();
@@ -140,6 +154,7 @@ export async function handleReply(queue, request) {
   try {
     const input = await request.json();
     const path = new URL(request.url).pathname;
+    if (path === '/compose/prepare') return json({ identities: Object.entries(sendingIdentities(queue.env)).map(([address, item]) => ({ address, from: item.from, signature: String(item.signature || '') })), max_recipients: 10 });
     if (path === '/reply/prepare') {
       const { credential, ...prepared } = await prepareReply(queue, input.id);
       return json(prepared);
@@ -149,11 +164,11 @@ export async function handleReply(queue, request) {
       const record = await queue.state.storage.get(OUTBOX + input.request_id);
       return record ? json(receipt(record)) : json({ state: 'unsent' });
     }
-    if (path === '/reply/send') {
+    if (path === '/reply/send' || path === '/compose/send') {
       // Serialize request preparation too, so concurrent double-clicks cannot
       // construct different dates/bodies for one provider idempotency key.
       const previous = queue.replyTail || Promise.resolve();
-      const work = previous.catch(() => {}).then(() => sendReply(queue, input));
+      const work = previous.catch(() => {}).then(() => path === '/compose/send' ? sendCompose(queue, input) : sendReply(queue, input));
       queue.replyTail = work.catch(() => {});
       return json(await work);
     }

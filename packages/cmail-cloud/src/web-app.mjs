@@ -644,6 +644,7 @@ ${formatMessage(message)}`).join("\n\n");
     if (!event.target.closest(".date-filters")) $("dateFilters").open = false;
   });
   document.addEventListener("keydown", (event) => {
+    if (document.querySelector('.cmail-compose-dialog[open]')) return;
     if (event.key === "Escape") {
       const transient = !$("actionsMenu").hidden || $("dateFilters").open || $("copyFallback").open;
       closeActions();
