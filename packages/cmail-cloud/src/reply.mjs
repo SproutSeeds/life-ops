@@ -11,7 +11,8 @@ const headerIds = (value) => [...new Set(String(value || '').match(/<[^<>\s]+>/g
 const emails = (values) => [...new Set((values || []).map((item) => String(item.address || '').toLowerCase()).filter((address) => EMAIL.test(address)))];
 
 export function prepareCompose(queue, input) {
-  const identity = sendingIdentities(queue.env)[input.sender];
+  const identities = sendingIdentities(queue.env);
+  const identity = Object.hasOwn(identities, input.sender) ? identities[input.sender] : null;
   if (!identity) throw fail('sender_not_configured', 400);
   if (!Array.isArray(input.to) || !input.to.length || input.to.length > 10 || input.to.some((address) => typeof address !== 'string' || address.length > 254 || /\s/.test(address) || !EMAIL.test(address))) throw fail('invalid_recipients');
   if (typeof input.subject !== 'string' || input.subject.length > 1000 || /[\r\n\0]/.test(input.subject)) throw fail('invalid_subject');

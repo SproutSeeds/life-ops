@@ -87,6 +87,10 @@ ${formatMessage(message)}`).join("\n\n");
   function updateInboxLabel() {
     const mailbox = $("mailbox").value;
     const view = $("mailView").value;
+    if (view === 'drafts') {
+      $("inboxTitle").textContent = 'Drafts'; $("search").placeholder = 'Search draft subjects and recipients';
+      return;
+    }
     $("inboxTitle").textContent = view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : mailbox ? "Inbox" : "All inboxes";
     $("search").placeholder = view === "sent" ? "Search sent conversations" : view === "archive" ? "Search archive" : view === "all" ? "Search all mail" : mailbox ? "Search this inbox" : "Search all inboxes";
     $("inboxTitle").title = mailbox || "All connected addresses";
@@ -263,6 +267,13 @@ ${formatMessage(message)}`).join("\n\n");
     updateSelection();
   }
   async function load(reset = false) {
+    const drafts = $("mailView").value === 'drafts';
+    document.body.classList.toggle('drafts-view', drafts);
+    if (drafts) {
+      requestGeneration++; loadController?.abort(); loading = false; checkedIds.clear(); closeActions(); updateSelection();
+      document.dispatchEvent(new CustomEvent('cmail:drafts-load')); return;
+    }
+    document.dispatchEvent(new CustomEvent('cmail:drafts-load'));
     if (signingOut || bulkBusy || loading && !reset) return;
     if (reset) {
       requestGeneration += 1;
@@ -730,7 +741,7 @@ ${formatMessage(message)}`).join("\n\n");
     if (!signingOut) notice(error.message);
   });
   function openLinkedMessage() {
-    if (signingOut) return;
+    if (signingOut || $("mailView").value === 'drafts') return;
     const linked = window.location.hash.match(/^#(mail_\d{16})$/);
     if (linked) return openMessage(linked[1]);
     if (selectedId) closeMessage();
@@ -738,7 +749,7 @@ ${formatMessage(message)}`).join("\n\n");
   window.addEventListener("hashchange", openLinkedMessage);
   var initialMailbox = new URLSearchParams(window.location.search).get("mailbox") || "";
   var initialView = new URLSearchParams(window.location.search).get("view");
-  if (["inbox", "sent", "archive", "all"].includes(initialView)) $("mailView").value = initialView;
+  if (["inbox", "sent", "archive", "all", "drafts"].includes(initialView) && [...$("mailView").options].some((option) => option.value === initialView)) $("mailView").value = initialView;
   if (initialMailbox) {
     addMailboxes([initialMailbox]);
     $("mailbox").value = initialMailbox.trim().toLowerCase();

@@ -5,6 +5,8 @@ import { withReplies } from './reply-http.mjs';
 import { MailIndex } from './mail-index.mjs';
 import { SentIndex } from './sent-index.mjs';
 import { ContactIndex } from './contact-index.mjs';
+import { DraftStore, handleDrafts } from './draft-store.mjs';
+import { withDrafts } from './draft-http.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -18,6 +20,7 @@ const ADMIN_ROUTES = new Map([
   ['/api/mail/sent/backfill', '/sent/backfill'],
   ['/api/mail/contacts/status', '/contacts/status'],
   ['/api/mail/contacts/backfill', '/contacts/backfill'],
+  ['/api/mail/drafts/status', '/drafts/status'],
 ]);
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -27,6 +30,7 @@ export class MailQueue extends BaseQueue {
     this.views = new MailIndex(this);
     this.sent = new SentIndex(this);
     this.contacts = new ContactIndex(this);
+    this.drafts = new DraftStore(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
 
@@ -113,6 +117,7 @@ export class MailQueue extends BaseQueue {
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path.startsWith('/drafts/')) return handleDrafts(this, request);
     if (path.startsWith('/contacts/')) {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
       try {
@@ -235,7 +240,7 @@ export class MailQueue extends BaseQueue {
     });
   }
   async performanceProbe({ operation = 'list', legacy = false, parameters = {} } = {}) {
-    if (!['list', 'conversation', 'message', 'contacts'].includes(operation) || operation === 'contacts' && legacy) throw Object.assign(new Error('invalid_request'), { status: 400 });
+    if (!['list', 'conversation', 'message', 'contacts', 'drafts'].includes(operation) || ['contacts', 'drafts'].includes(operation) && legacy) throw Object.assign(new Error('invalid_request'), { status: 400 });
     const metrics = { get_calls: 0, list_calls: 0, keys_read: 0, raw_payload_loads: 0 };
     const storage = this.state.storage;
     const facade = Object.create(this);
@@ -245,9 +250,9 @@ export class MailQueue extends BaseQueue {
     } };
     facade.loadPayload = async (record) => { if (record.id?.startsWith('mail_')) metrics.raw_payload_loads++; return BaseQueue.prototype.loadPayload.call(facade, record); };
     const views = new MailIndex(facade);
-    facade.views = views; facade.sent = new SentIndex(facade); facade.contacts = new ContactIndex(facade);
+    facade.views = views; facade.sent = new SentIndex(facade); facade.contacts = new ContactIndex(facade); facade.drafts = new DraftStore(facade);
     const started = performance.now();
-    const result = operation === 'contacts' ? await facade.contacts.list(parameters) : legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
+    const result = operation === 'drafts' ? await facade.drafts.list(parameters) : operation === 'contacts' ? await facade.contacts.list(parameters) : legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
       : await (operation === 'list' ? parameters.view === 'sent' ? facade.sent.list(parameters) : views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
     return { operation, legacy, milliseconds: Math.round((performance.now() - started) * 100) / 100, ...metrics,
       items: result?.items?.length ?? (result ? 1 : 0), scanned: result?.scanned ?? null, more: Boolean(result?.next_cursor), total: result?.total_stored ?? result?.total ?? null };
@@ -291,4 +296,4 @@ export function withResend(worker = baseWorker) {
 }
 
 export { createWorker };
-export default withReplies(withResend());
+export default withDrafts(withReplies(withResend()));

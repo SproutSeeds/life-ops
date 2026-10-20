@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--require-index", action="store_true")
     parser.add_argument("--require-sent", action="store_true")
     parser.add_argument("--require-compose", action="store_true")
+    parser.add_argument("--require-drafts", action="store_true")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     key = credentials.resolve_secret(name="CLOUDFLARE_API_TOKEN")
@@ -82,6 +83,14 @@ def main():
         assert protected["conversation_api"] == 302
     scheduled_at = sync.get("last_scheduled_success_at")
     contacts = None
+    drafts = None
+    if args.require_drafts:
+        assert next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_DRAFTS_ENABLED") == "1"
+        drafts = signed("/api/mail/drafts/status")
+        assert drafts["ready"] and isinstance(drafts["drafts"], int)
+        protected["drafts_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/drafts")
+        protected["draft_save_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/drafts/save", "POST")
+        assert protected["drafts_api"] == protected["draft_save_api"] == 302
     if args.require_compose:
         assert next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_COMPOSE_ENABLED") == "1"
         contacts = signed("/api/mail/contacts/status")
@@ -99,7 +108,7 @@ def main():
     scheduled_fresh = bool(scheduled_at) and (datetime.now(timezone.utc) - datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))).total_seconds() < 300
     result = {"checked_at": datetime.now(timezone.utc).isoformat(), "version": deployment["versions"][0]["version_id"],
               "source_sha256": actual, "existing_namespace_verified": True, "mailboxes": mailboxes,
-              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index, "sent": sent, "contacts": contacts}
+              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index, "sent": sent, "contacts": contacts, "drafts": drafts}
     target = args.receipt_dir / "production-verification.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded(result) + b"\n")

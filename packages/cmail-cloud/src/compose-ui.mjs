@@ -21,8 +21,9 @@ export function matchContacts(contacts, query, selected = []) {
 function composeApplication(findMatches) {
   const $ = (id) => document.getElementById(id);
   const key = 'cmail.compose.draft.v1';
+  const persistent = document.body.dataset.cmailDrafts === '1';
   const email = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
-  let draft = null, current = null, opening = false, busy = false, config = null;
+  let draft = null, current = null, opening = false, busy = false, saving = false, config = null;
   let contacts = [], contactsAt = 0, contactsPromise = null, contactsError = false, signedOut = false;
   const trigger = document.createElement('button');
   trigger.type = 'button'; trigger.id = 'composeButton'; trigger.className = 'cmail-reply-trigger cmail-compose-trigger'; trigger.textContent = 'Compose';
@@ -30,6 +31,12 @@ function composeApplication(findMatches) {
   const openingNotice = document.createElement('span'); openingNotice.className = 'cmail-reply-status'; openingNotice.setAttribute('role', 'status'); openingNotice.hidden = true; trigger.after(openingNotice);
   try { draft = JSON.parse(sessionStorage.getItem(key) || 'null'); } catch {}
   const errors = {
+    invalid_draft: 'This draft is too large or has an invalid field. Your changes are kept in this tab.',
+    draft_conflict: 'This draft changed in another tab. Save a copy to preserve your changes separately.',
+    draft_changed: 'The saved version differs. Save a copy to preserve these changes.',
+    draft_closed: 'This draft has already been sent or discarded. Save a copy if you want to keep these changes.',
+    draft_sending: 'This draft is being sent. Check its confirmation before editing.',
+    draft_not_found: 'This draft is no longer available.',
     invalid_recipients: 'Enter up to 10 complete email addresses.', invalid_subject: 'Check the subject and try again.',
     invalid_reply: 'Write your message before sending.', empty_reply: 'Write your message above the signature.',
     sender_not_configured: 'Choose a configured From address.', reply_changed: 'The original send is being confirmed. Retry it before editing.',
@@ -40,9 +47,10 @@ function composeApplication(findMatches) {
     archive_pending: 'Your email was sent. Retry confirmation to finish saving its Sent copy.',
   };
   const meaningful = () => draft && (draft.to?.length || draft.pending || draft.subject || draft.text?.trim() !== draft.signature?.trim());
-  function updateTrigger() { trigger.textContent = opening ? 'Opening…' : meaningful() ? 'Continue draft' : 'Compose'; trigger.disabled = opening || busy; }
-  function save() {
+  function updateTrigger() { trigger.textContent = opening ? 'Opening…' : meaningful() ? 'Continue draft' : 'Compose'; trigger.disabled = opening || busy || saving; }
+  function save(changed = false) {
     if (signedOut || !draft) return;
+    if (changed && persistent) draft.dirty = true;
     try { sessionStorage.setItem(key, JSON.stringify(draft)); }
     catch { status('Your draft is kept in this page. Keep this tab open until you send it.'); }
     updateTrigger();
@@ -54,12 +62,54 @@ function composeApplication(findMatches) {
   }
   async function api(path, body) {
     const response = await fetch('/cmail/api/' + path, body === undefined ? { credentials: 'same-origin', cache: 'no-store' } : {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Cmail-Action': 'compose' }, body: JSON.stringify(body),
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Cmail-Action': path.startsWith('drafts') ? 'draft' : 'compose' }, body: JSON.stringify(body),
     });
     if (response.redirected || !response.headers.get('Content-Type')?.includes('application/json')) throw new Error('Your sign-in expired. Refresh to sign in; your draft is saved.');
     const data = await response.json();
     if (!response.ok) throw Object.assign(new Error(errors[data.error] || 'Temporarily unavailable. Your draft is saved.'), { code: data.error, status: response.status });
     return data;
+  }
+  const changedNotice = () => persistent ? 'Unsaved changes. Choose Save draft or Save & close.' : 'Draft saved in this tab.';
+  function draftValue(value) {
+    return { kind: value.kind || 'compose', sender: value.sender, to: value.to, pending: value.pending || '', subject: value.subject,
+      text: value.text, signature: value.signature || '', ...(value.reply_id ? { reply_id: value.reply_id } : {}) };
+  }
+  function cloudDraft(result) {
+    return { ...result.draft, cloud_id: result.id, revision: result.revision, saved_at: result.updated_at, dirty: false,
+      locked: result.state === 'sending', request_id: result.request_id, error: result.error || '' };
+  }
+  async function saveCloud(owner = current) {
+    if (!owner || owner.sent || !persistent) return true;
+    if (owner.savingPromise) return owner.savingPromise;
+    if (owner.draft.locked) {
+      if (!owner.draft.cloud_id) { openingNotice.textContent = 'Confirm the earlier send before starting another draft.'; openingNotice.hidden = false; }
+      return Boolean(owner.draft.cloud_id);
+    }
+    if (owner.draft.cloud_id && !owner.draft.dirty && !owner.draft.pending_save) return true;
+    owner.draft.cloud_id ||= 'draft_' + crypto.randomUUID();
+    owner.draft.pending_save ||= { id: owner.draft.cloud_id, revision: owner.draft.revision || 0, save_id: crypto.randomUUID(), draft: draftValue(owner.draft) };
+    saving = true; save(); if (current === owner) { controls(); status('Saving draft…'); }
+    owner.savingPromise = (async () => {
+      try {
+        const result = await api('drafts/save', owner.draft.pending_save);
+        if (!result.draft) throw Object.assign(new Error(errors.draft_closed), { code: 'draft_closed' });
+        Object.assign(owner.draft, cloudDraft(result)); delete owner.draft.pending_save; owner.conflict = false;
+        if (draft === owner.draft) save();
+        if (owner.draft.source_reply_local) {
+          try { sessionStorage.removeItem('cmail.reply.' + owner.draft.reply_id); } catch {}
+          document.dispatchEvent(new CustomEvent('cmail:reply-draft-saved', { detail: { id: owner.draft.reply_id } }));
+          delete owner.draft.source_reply_local;
+        }
+        if (current === owner) { status('Saved to Drafts.'); owner.keepLocal.hidden = true; }
+        document.dispatchEvent(new CustomEvent('cmail:drafts-changed')); return true;
+      } catch (error) {
+        owner.conflict = ['draft_conflict', 'draft_changed', 'draft_closed'].includes(error.code);
+        if (current === owner) { status(error.message, true); owner.keepLocal.hidden = false; }
+        else { openingNotice.textContent = error.message; openingNotice.hidden = false; }
+        return false;
+      } finally { saving = false; owner.savingPromise = null; if (current === owner) controls(); updateTrigger(); }
+    })();
+    return owner.savingPromise;
   }
   function loadContacts() {
     if (contactsPromise || contactsAt > Date.now() - 300000) return contactsPromise;
@@ -92,7 +142,7 @@ function composeApplication(findMatches) {
     if (!current) return;
     hideSuggestions();
     const owner = current;
-    owner.hint.textContent = contactsError ? 'Suggestions unavailable. You can enter a full email address.' : contactsPromise && !contactsAt ? 'Loading addresses from your mail…' : 'Type a name or email address. Use Tab or Enter to add it.';
+    owner.hint.textContent = owner.draft.kind === 'reply' ? 'Replying to the sender in this conversation.' : contactsError ? 'Suggestions unavailable. You can enter a full email address.' : contactsPromise && !contactsAt ? 'Loading addresses from your mail…' : 'Type a name or email address. Use Tab or Enter to add it.';
     if (document.activeElement !== owner.to || owner.draft.locked || owner.sent) return;
     const result = findMatches(contacts, owner.to.value, owner.draft.to);
     owner.options = result.items;
@@ -122,7 +172,7 @@ function composeApplication(findMatches) {
       const token = document.createElement('span'); token.className = 'cmail-recipient'; token.textContent = address;
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Remove ' + address);
       remove.disabled = busy || owner.draft.locked || owner.sent;
-      remove.addEventListener('click', () => { owner.draft.to = owner.draft.to.filter((value) => value !== address); tokens(); save(); controls(); owner.to.focus(); suggest(); });
+      remove.addEventListener('click', () => { owner.draft.to = owner.draft.to.filter((value) => value !== address); tokens(); save(true); controls(); owner.to.focus(); suggest(); });
       token.append(remove); owner.tokens.append(token);
     }
   }
@@ -133,25 +183,45 @@ function composeApplication(findMatches) {
     const combined = [...new Set([...owner.draft.to, ...values])];
     if (combined.length > 10) { status(errors.invalid_recipients, true); return false; }
     owner.draft.to = combined; owner.draft.pending = ''; owner.to.value = '';
-    tokens(); hideSuggestions(); save(); controls(); status('Draft saved in this tab.'); return true;
+    tokens(); hideSuggestions(); save(true); controls(); status(changedNotice()); return true;
   }
   function controls() {
     if (!current) return;
-    const owner = current, locked = busy || owner.draft.locked || owner.sent;
+    const owner = current, locked = busy || saving || owner.draft.locked || owner.sent || Boolean(owner.draft.pending_save);
     for (const input of [owner.from, owner.to, owner.subject, owner.text]) input.disabled = Boolean(locked);
     for (const button of owner.tokens.querySelectorAll('button')) button.disabled = Boolean(locked);
+    if (owner.draft.kind === 'reply') {
+      owner.from.disabled = true; owner.to.disabled = true; owner.subject.disabled = true;
+      for (const button of owner.tokens.querySelectorAll('button')) button.disabled = true;
+    }
     owner.send.hidden = Boolean(owner.sent); owner.discard.hidden = Boolean(owner.sent);
     owner.send.textContent = busy ? 'Sending…' : owner.draft.locked ? 'Retry confirmation' : 'Send';
     const hasRecipients = owner.draft.to.length > 0 || Boolean(owner.to.value.trim());
-    owner.send.disabled = busy || owner.sent || !hasRecipients || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim();
-    owner.discard.disabled = Boolean(locked); owner.cancel.textContent = owner.sent ? 'Done' : 'Cancel';
+    owner.send.disabled = busy || saving || owner.conflict || Boolean(owner.draft.pending_save) || owner.sent || !hasRecipients || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim();
+    owner.discard.disabled = Boolean(locked); owner.cancel.textContent = owner.sent ? 'Done' : persistent ? 'Save & close' : 'Cancel';
+    if (persistent) {
+      owner.saveButton.hidden = Boolean(owner.sent); owner.saveButton.disabled = busy || saving || owner.draft.locked || owner.conflict;
+      owner.saveButton.textContent = saving ? 'Saving…' : 'Save draft'; owner.copyButton.hidden = !owner.conflict;
+      owner.cancel.disabled = busy || saving;
+    }
     if (locked) hideSuggestions(); updateTrigger();
   }
-  function close(goBack = true) {
+  async function close(goBack = true, keepLocal = false) {
     const owner = current; if (!owner) return;
+    if (owner.closing) return;
+    owner.closing = true;
+    if (persistent && !owner.sent && !keepLocal && !(owner.draft.locked && !owner.draft.cloud_id)) {
+      if ((meaningful() || owner.draft.cloud_id) && !await saveCloud(owner)) {
+        if (!goBack && !history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
+        owner.closing = false;
+        return;
+      }
+      if (draft === owner.draft) clear();
+    }
     if (!owner.sent) save();
     owner.dialog.close(); owner.dialog.remove(); current = null; trigger.focus();
     if (goBack && history.state?.cmailCompose) history.back();
+    document.dispatchEvent(new CustomEvent('cmail:composer-closed'));
   }
   async function applyReceipt(result, owner) {
     if (result.state === 'sent') {
@@ -176,6 +246,25 @@ function composeApplication(findMatches) {
     if (!owner || busy || owner.sent) return;
     if (!owner.draft.locked && owner.to.value.trim() && !add(owner.to.value)) { status(errors.invalid_recipients, true); owner.to.focus(); return; }
     if (!owner.draft.to.length || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim()) return;
+    if (persistent && !(owner.draft.locked && !owner.draft.cloud_id)) {
+      if (!await saveCloud(owner)) return;
+      busy = true; owner.draft.locked = true; save(); controls(); status('Sending…');
+      try {
+        const result = await api('drafts/' + owner.draft.cloud_id + '/send', { revision: owner.draft.revision });
+        if (result.draft) Object.assign(owner.draft, cloudDraft(result));
+        await applyReceipt({ state: result.state === 'editing' ? 'rejected' : result.state === 'sending' ? 'uncertain' : result.state,
+          archive_id: result.archive_id, can_edit: result.state === 'editing', error: result.error }, owner);
+        document.dispatchEvent(new CustomEvent('cmail:drafts-changed'));
+      } catch (error) {
+        owner.conflict = error.code === 'draft_conflict';
+        if (owner.conflict) { owner.draft.locked = false; owner.draft.dirty = true; }
+        else if (error.status === 400) {
+          try { const latest = await api('drafts/' + owner.draft.cloud_id); if (latest.draft) Object.assign(owner.draft, cloudDraft(latest)); } catch {}
+        }
+        if (draft === owner.draft) save(); if (current === owner) { status(error.message, true); owner.keepLocal.hidden = false; }
+      } finally { busy = false; if (current === owner) controls(); updateTrigger(); }
+      return;
+    }
     owner.draft.request_id ||= crypto.randomUUID(); owner.draft.locked = true;
     busy = true; save(); controls(); status('Sending…');
     try { await applyReceipt(await api('compose', { request_id: owner.draft.request_id, sender: owner.draft.sender, to: owner.draft.to, subject: owner.draft.subject, text: owner.draft.text }), owner); }
@@ -188,14 +277,33 @@ function composeApplication(findMatches) {
       if (current === owner) status(error.message, true);
     } finally { busy = false; if (current === owner) controls(); updateTrigger(); }
   }
-  async function open() {
+  async function open(options = {}) {
     if (opening || busy || current) return;
     opening = true; openingNotice.hidden = true; updateTrigger();
     try {
       config ||= await api('compose');
       if (!config.identities.length) throw new Error('No sending identities are configured.');
       const identity = config.identities.find((item) => item.address === $('mailbox').value) || config.identities[0];
-      draft ||= { sender: identity.address, signature: identity.signature, to: [], pending: '', subject: '', text: identity.signature ? '\n\n' + identity.signature : '' };
+      if (persistent && (options.fresh || options.id && options.id !== draft?.cloud_id || options.reply_id && options.reply_id !== draft?.reply_id)) {
+        if (draft && meaningful() && !await saveCloud({ draft })) return;
+        clear();
+      }
+      const cloudId = options.id || draft?.cloud_id;
+      if (persistent && cloudId && !draft?.dirty && !draft?.pending_save) {
+        const item = await api('drafts/' + cloudId);
+        if (!item.draft) { clear(); throw new Error(item.state === 'sent' ? 'This draft has already been sent. You can find it in Sent.' : 'This draft was discarded.'); }
+        draft = cloudDraft(item);
+      }
+      if (persistent && options.reply_id && !draft) {
+        const item = await api('drafts/reply/' + options.reply_id);
+        if (item.draft && !options.legacy?.text) draft = cloudDraft(item);
+        else {
+          const context = item.context || item.draft;
+          draft = { kind: 'reply', reply_id: options.reply_id, sender: context.sender, to: context.to, subject: context.subject,
+            signature: context.signature, text: options.legacy?.text || (context.signature ? '\n\n' + context.signature : ''), pending: '', dirty: true, source_reply_local: Boolean(options.legacy) };
+        }
+      }
+      draft ||= { kind: 'compose', dirty: persistent, sender: identity.address, signature: identity.signature, to: [], pending: '', subject: '', text: identity.signature ? '\n\n' + identity.signature : '' };
       const dialog = document.createElement('dialog'); dialog.className = 'cmail-compose-dialog'; dialog.setAttribute('aria-labelledby', 'composeHeading');
       dialog.innerHTML = `<form class="cmail-compose-form"><header><h2 id="composeHeading">New message</h2><button type="button" id="composeCancel">Cancel</button></header>
         <label class="cmail-compose-field">From<select id="composeFrom" aria-label="From"></select></label>
@@ -203,9 +311,12 @@ function composeApplication(findMatches) {
         <p id="composeRecipientHint" class="cmail-compose-hint"></p>
         <label class="cmail-compose-field">Subject<input id="composeSubject" maxlength="1000" autocomplete="off"></label>
         <label class="cmail-compose-body"><span class="cmail-compose-sr">Message</span><textarea id="composeText" aria-label="Message" maxlength="100000" placeholder="Write your message…"></textarea></label>
-        <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
+        <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><button id="composeSave" type="button" hidden>Save draft</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeCopy" type="button" hidden>Save a copy</button><button id="composeKeepLocal" type="button" hidden>Close, keep local copy</button><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
       document.body.append(dialog);
       const owner = current = { dialog, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
+      Object.assign(owner, { saveButton: $('composeSave'), copyButton: $('composeCopy'), keepLocal: $('composeKeepLocal') });
+      $('composeHeading').textContent = draft.kind === 'reply' ? 'Reply draft' : persistent ? 'New draft' : 'New message';
+      dialog.setAttribute('aria-label', draft.kind === 'reply' ? 'Reply draft' : persistent ? 'Email draft' : 'New message');
       for (const item of config.identities) { const option = document.createElement('option'); option.value = item.address; option.textContent = item.from; owner.from.append(option); }
       owner.from.value = draft.sender; owner.to.value = draft.pending || ''; owner.subject.value = draft.subject; owner.text.value = draft.text;
       owner.from.addEventListener('change', () => {
@@ -213,9 +324,9 @@ function composeApplication(findMatches) {
         const old = owner.draft.signature;
         if (old && owner.text.value.endsWith(old)) owner.text.value = owner.text.value.slice(0, -old.length) + identity.signature;
         else if (!owner.text.value.trim()) owner.text.value = identity.signature ? '\n\n' + identity.signature : '';
-        owner.draft.sender = identity.address; owner.draft.signature = identity.signature; owner.draft.text = owner.text.value; save(); controls();
+        owner.draft.sender = identity.address; owner.draft.signature = identity.signature; owner.draft.text = owner.text.value; save(true); controls(); status(changedNotice());
       });
-      owner.to.addEventListener('input', () => { owner.draft.pending = owner.to.value; save(); controls(); suggest(); });
+      owner.to.addEventListener('input', () => { owner.draft.pending = owner.to.value; save(true); controls(); status(changedNotice()); suggest(); });
       owner.to.addEventListener('focus', suggest);
       owner.to.addEventListener('blur', () => { if (owner.to.value.trim()) add(owner.to.value); hideSuggestions(); });
       owner.to.addEventListener('keydown', (event) => {
@@ -234,18 +345,37 @@ function composeApplication(findMatches) {
       });
       owner.unique.addEventListener('mousedown', (event) => event.preventDefault());
       owner.unique.addEventListener('click', () => { if (owner.options[0]) { add(owner.options[0].address); owner.to.focus(); } });
-      for (const [input, field] of [[owner.subject, 'subject'], [owner.text, 'text']]) input.addEventListener('input', () => { owner.draft[field] = input.value; owner.draft.error = ''; save(); controls(); status('Draft saved in this tab.'); });
+      for (const [input, field] of [[owner.subject, 'subject'], [owner.text, 'text']]) input.addEventListener('input', () => { owner.draft[field] = input.value; owner.draft.error = ''; save(true); controls(); status(changedNotice()); });
       owner.subject.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); owner.text.focus(); } });
       dialog.querySelector('form').addEventListener('submit', (event) => event.preventDefault());
       owner.send.addEventListener('click', send); owner.cancel.addEventListener('click', () => close());
-      owner.discard.addEventListener('click', () => { owner.sent = true; clear(); close(); });
+      owner.saveButton.addEventListener('click', () => saveCloud(owner));
+      owner.copyButton.addEventListener('click', async () => {
+        Object.assign(owner.draft, { cloud_id: null, revision: 0, dirty: true, locked: false, request_id: null }); delete owner.draft.pending_save;
+        owner.conflict = false; save(); await saveCloud(owner);
+      });
+      owner.keepLocal.addEventListener('click', () => close(true, true));
+      owner.discard.addEventListener('click', async () => {
+        if (persistent && owner.draft.cloud_id) {
+          try { await api('drafts/' + owner.draft.cloud_id + '/discard', { revision: owner.draft.revision }); }
+          catch (error) { status(error.message, true); return; }
+        }
+        owner.sent = true; clear(); close(); document.dispatchEvent(new CustomEvent('cmail:drafts-changed'));
+      });
       dialog.addEventListener('cancel', (event) => { event.preventDefault(); if (!owner.list.hidden || !owner.unique.hidden) hideSuggestions(); else close(); });
       tokens(); dialog.showModal();
       if (!history.state?.cmailCompose) history.pushState({ ...history.state, cmailCompose: true }, '', location.href);
-      controls(); status(errors[draft.error] || ''); owner.to.focus(); save(); loadContacts();
-      if (draft.locked && draft.request_id) {
+      controls(); status(errors[draft.error] || (persistent ? draft.cloud_id && !draft.dirty ? 'Saved to Drafts.' : 'Choose Save draft to keep this email without sending.' : '')); (draft.kind === 'reply' ? owner.text : owner.to).focus(); save();
+      if (draft.kind !== 'reply') loadContacts(); else suggest();
+      if (draft.locked && (draft.request_id || draft.cloud_id)) {
         busy = true; controls();
-        try { await applyReceipt(await api('replies/' + draft.request_id), owner); }
+        try {
+          if (persistent && draft.cloud_id) {
+            const result = await api('drafts/' + draft.cloud_id);
+            if (result.draft) Object.assign(owner.draft, cloudDraft(result));
+            await applyReceipt({ state: result.state === 'editing' ? 'unsent' : result.state === 'sending' ? 'uncertain' : result.state, archive_id: result.archive_id, error: result.error }, owner);
+          } else await applyReceipt(await api('replies/' + draft.request_id), owner);
+        }
         catch (error) { if (current === owner) status(error.message, true); }
         finally { busy = false; if (current === owner) controls(); }
       }
@@ -254,7 +384,12 @@ function composeApplication(findMatches) {
       else { openingNotice.textContent = error.message; openingNotice.hidden = false; }
     } finally { opening = false; updateTrigger(); }
   }
-  trigger.addEventListener('click', open);
+  trigger.addEventListener('click', () => open());
+  if (persistent) {
+    document.addEventListener('cmail:new-draft', () => open({ fresh: true }));
+    document.addEventListener('cmail:open-draft', (event) => open({ id: event.detail.id }));
+    document.addEventListener('cmail:reply-draft', (event) => open({ reply_id: event.detail.id, legacy: event.detail.legacy }));
+  }
   window.addEventListener('popstate', () => { if (current && !history.state?.cmailCompose) close(false); });
   window.addEventListener('pagehide', () => { if (draft) save(); });
   $('signOut').addEventListener('click', () => { signedOut = true; clear(); contacts = []; config = null; if (current) { current.sent = true; close(false); } }, true);

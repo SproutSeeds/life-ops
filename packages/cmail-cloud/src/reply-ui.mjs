@@ -86,6 +86,9 @@ function replyApplication() {
   async function open() {
     const id = selected();
     if (!id || opening || busy) return;
+    if (document.body.dataset.cmailDrafts === '1' && !getDraft(id)?.locked) {
+      document.dispatchEvent(new CustomEvent('cmail:reply-draft', { detail: { id, legacy: getDraft(id) } })); return;
+    }
     if (composer && current?.id === id) { composer.querySelector('textarea').focus(); return; }
     opening = true; trigger.disabled = true; trigger.textContent = 'Opening reply…';
     try {
@@ -133,6 +136,7 @@ function replyApplication() {
     trigger.disabled = opening || busy || !id;
   }
   trigger.addEventListener('click', open);
+  document.addEventListener('cmail:reply-draft-saved', (event) => { clearDraft(event.detail.id); update(); });
   $('back').addEventListener('click', (event) => { if (composer) { event.preventDefault(); event.stopImmediatePropagation(); close(); } }, true);
   document.addEventListener('keydown', (event) => {
     if (document.querySelector('.cmail-compose-dialog[open]')) return;

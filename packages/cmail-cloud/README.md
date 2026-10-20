@@ -1,4 +1,4 @@
-# C-mail cloud receiving, Compose, replies, Sent and indexed reading
+# C-mail cloud receiving, Compose, Drafts, replies, Sent and indexed reading
 
 Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
@@ -10,6 +10,9 @@ headers come from the original message and verified mailbox configuration.
 Use **Compose** in the top bar to start a new message. Its From address defaults
 to the selected inbox. Enter recipients, a subject and your message, then click
 Send. New messages appear in Sent with the same durable receipts as replies.
+Choose **Drafts** in the Inbox/Sent selector and **New draft** to start a saved
+email. **Save draft** keeps it without sending; **Save & close** saves and returns
+to the mailbox. Multiple drafts and reply drafts can be reopened later.
 
 ## Source provenance
 
@@ -63,10 +66,11 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
 
 ## Replies
 
-- The inline composer displays the existing sender signature for editing. Drafts
-  survive Cancel, Escape, Back and reload within the same browser tab, using
-  session storage. Sign out clears those tab drafts. Sending requires an explicit
-  click; opening a message, preparing a reply and checking status never send.
+- The composer displays the existing sender signature for editing. With Drafts
+  enabled, Reply opens the shared persistent composer described below. The
+  legacy inline composer remains available for recovering earlier unconfirmed
+  sends. Sending requires an explicit click; opening a message, preparing a
+  reply and checking status never send.
 - Access protects the assets and API. Sending additionally requires a matching
   Origin, a custom action header and JSON. The server derives From/To/subject
   from the archived MIME; client-supplied recipients or credentials are ignored.
@@ -83,14 +87,56 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
   appear in the conversation and Archive, marked read. API acceptance is not
   recipient-delivery confirmation. No delivery webhook was introduced.
 - Replies currently support plaintext, one reply recipient group derived from
-  Reply-To/From, and the existing conversation headers. Attachments, Reply all,
-  and cross-device draft sync are separate features.
+  Reply-To/From, and the existing conversation headers. Attachments and Reply all
+  are separate features.
 - Cloud replies remain in the cloud archive and do not modify local follow-up
   classifications or enter the legacy inbound-delivery queue.
 
 Public endpoints: GET/POST `/cmail/api/messages/:id/reply` prepares/sends;
 GET `/cmail/api/replies/:request_id` reads a receipt. The internal Durable Object
 routes are not exposed through the signed administrative API.
+
+## Saved drafts
+
+`CMAIL_DRAFTS_ENABLED=1` adds **Drafts** beside Inbox and Sent and a **New draft**
+button inside that mailbox. Compose and Reply use the same saved draft editor.
+Save accepts unfinished addresses, empty subjects and empty bodies. Saving,
+closing, opening, listing and checking a draft never call the sending provider.
+Only **Send** submits mail, after validating recipients and message content.
+
+Drafts are encrypted in the existing Durable Object, independently of received
+mail. Saved drafts survive signing out or closing the browser and can be opened
+from another signed-in browser. Typing keeps a recovery copy in this tab with
+zero network calls; **Save draft**, **Save & close**, Escape and browser Back
+save changes to the cloud. Closing the browser before saving preserves only
+whatever tab recovery the browser retains. A failed save clearly offers retry,
+or closing while retaining the local copy. Sign out clears local recovery.
+
+Each draft has its own ID, revision and idempotent save ID. Revision checks
+prevent a stale tab from replacing another tab's changes; **Save a copy**
+preserves competing edits separately. Discard and confirmed send leave small
+tombstones so stale tabs cannot recreate closed drafts. In-progress sends retain
+the exact saved message and request UUID, disable editing/discard, and reuse the
+existing durable outbox for safe confirmation. The draft leaves Drafts only
+after the provider acceptance and Sent archive are recorded. Reply drafts retain
+the original conversation routing and headers on the server.
+
+Newest edits appear first. Draft listing uses a sorted range, one batch of small
+encrypted summaries and an exact counter; full bodies are stored separately and
+loaded only for an individual draft. Large bodies use bounded encrypted chunks.
+Pages contain at most 50 drafts; search scans up to 100 summaries per request
+with explicit Next navigation. Search covers recipients, sender, subject and
+preview. The mailbox selector filters by sending identity. Opening Drafts does
+not load or scan inbox messages. Lists refresh after saves, discards and sends;
+another browser sees changes on refresh or when reopening Drafts.
+
+Access protects `/cmail/api/drafts` and its editor routes. Save/send/discard
+additionally require same-origin JSON and `X-Cmail-Action: draft`. The signed
+administrative API exposes only `/api/mail/drafts/status` and the existing
+performance probe with `operation: "drafts"`. Draft mutation routes are absent
+from the signed administrative API. This store starts empty and needs no mail
+backfill. Legacy unsent tab drafts migrate on an acknowledged save; unconfirmed
+legacy sends keep their original receipt flow.
 
 ## Compose and recipient autocomplete
 
@@ -286,6 +332,8 @@ PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py 
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-compose --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-compose-2026-10-19
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/index_archive.py --contacts --probe --receipt-dir data/qa/cmail-compose-2026-10-19
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --require-sent --require-compose --receipt-dir data/qa/cmail-compose-2026-10-19
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --enable-drafts --expected-version CURRENT_VERSION --receipt-dir data/qa/cmail-drafts-2026-10-20
+PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/verify_deployment.py --require-replies --require-scheduled --require-index --require-sent --require-compose --require-drafts --receipt-dir data/qa/cmail-drafts-2026-10-20
 ```
 
 `scripts/compose-runtime-smoke.mjs` accepts the same Miniflare module path and
@@ -293,6 +341,10 @@ checks new-message routing, concurrent submissions, receipt replay, Sent and
 contacts against a fake provider with external networking disabled. `--serve`
 exposes its synthetic browser fixture on port 9346. Test-only authentication
 and request counters are outside `src/` and are never deployed.
+`scripts/drafts-runtime-smoke.mjs` uses the same module path and optional `--serve`
+flag. It verifies save without send, independent drafts, newest-first ordering,
+concurrent send deduplication, Sent placement and reply threading in native
+SQLite-backed Durable Objects with only a fake sending provider.
 
 The deployer checks the current version and exact existing namespace before
 writing. It inherits all existing bindings, adds the required mailbox/credential,
