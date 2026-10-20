@@ -5,6 +5,7 @@ const MAIL_ID = /^mail_\d{16}$/;
 const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const EMAIL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const OUTBOX = 'cmail-outbox:';
+const SENDING_KEYS = Object.freeze({ primary: 'CMAIL_RESEND_API_KEY', support: 'CMAIL_SUPPORT_SEND_KEY', ritmo: 'CMAIL_RITMO_SEND_KEY' });
 const fail = (code, status = 400) => Object.assign(new Error(code), { status });
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } });
 const headerIds = (value) => [...new Set(String(value || '').match(/<[^<>\s]+>/g) || [])].filter((id) => id.length < 250 && /^[\x21-\x7e]+$/.test(id));
@@ -30,7 +31,7 @@ export function sendingIdentities(env) {
   try { configured = JSON.parse(env.CMAIL_SEND_IDENTITIES || '{}'); } catch { return {}; }
   const allowed = new Set(String(env.CMAIL_MAILBOXES || '').toLowerCase().split(',').map((v) => v.trim()));
   return Object.fromEntries(Object.entries(configured).filter(([address, item]) => allowed.has(address) && EMAIL.test(address) &&
-    item && ['primary', 'support'].includes(item.key) && addresses(item.from).length === 1 && addresses(item.from)[0] === address && !/[\r\n]/.test(item.from)));
+    item && Object.hasOwn(SENDING_KEYS, item.key) && addresses(item.from).length === 1 && addresses(item.from)[0] === address && !/[\r\n]/.test(item.from)));
 }
 
 export async function prepareReply(queue, id) {
@@ -136,7 +137,7 @@ async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind
   // Resend retains its idempotency keys for 24 hours. An ambiguous older send
   // needs review; never turn a timed-out retry into a second delivery.
   if (now() - Date.parse(record.created_at) >= 23 * 60 * 60 * 1000) throw fail('confirmation_expired', 409);
-  const apiKey = saved.credential === 'support' ? queue.env.CMAIL_SUPPORT_SEND_KEY : queue.env.CMAIL_RESEND_API_KEY;
+  const apiKey = Object.hasOwn(SENDING_KEYS, saved.credential) ? queue.env[SENDING_KEYS[saved.credential]] : null;
   if (!apiKey) throw fail('sender_not_configured', 503);
   let response;
   try {

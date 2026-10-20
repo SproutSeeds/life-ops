@@ -76,6 +76,9 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
   from the archived MIME; client-supplied recipients or credentials are ignored.
 - Bind My Soul uses its existing sending key in `CMAIL_SUPPORT_SEND_KEY`. The
   other five inboxes use their existing account's `CMAIL_RESEND_API_KEY`.
+  Ritmo's `hello@ritmo.coffee` and `cody@ritmo.coffee` use the separate,
+  domain-restricted `CMAIL_RITMO_SEND_KEY`. A missing or unknown credential
+  stops sending without falling back to another account's key.
   `CMAIL_SEND_IDENTITIES` carries the allowed From addresses and signatures;
   private signature content is populated from local configuration at deployment.
 - Before sending, the exact request is encrypted into the existing archive
@@ -311,6 +314,15 @@ authentication bypass lives only in `test/reply-worker.mjs`; deployment uploads
 only `src/*.mjs`.
 
 Explicit production operations:
+
+For Ritmo onboarding, `deploy.py --deploy --enable-ritmo --expected-version
+CURRENT_VERSION --receipt-dir data/qa/cmail-ritmo-2026-10-20` adds those two
+identities and reads their scoped sending key directly from macOS Keychain
+(`resend-ritmo` / `ritmo.coffee`). It inherits all existing provider secrets,
+retains existing identities and signatures, and verifies the additive mailbox
+change after deployment. Domain DNS and inbound Email Routing are separate
+provider setup steps. This operation sends no mail. Do not combine it with
+the legacy `--enable-replies` option, which rebuilds the old identity list.
 
 ```sh
 PYTHONPATH=src ./.venv/bin/python packages/cmail-cloud/scripts/deploy.py --deploy --expected-version CURRENT_VERSION

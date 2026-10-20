@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +23,10 @@ WORKER = "life-ops-email-ingest"
 NAMESPACE = "f47ff10b992d4614a5b7a4df118b3e8c"
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = "support@bindmysoul.com"
+RITMO = {
+    "hello@ritmo.coffee": {"from": "Ritmo Coffee <hello@ritmo.coffee>", "signature": "Ritmo Coffee\nhttps://ritmo.coffee", "key": "ritmo"},
+    "cody@ritmo.coffee": {"from": "Cody Mitchell <cody@ritmo.coffee>", "signature": "Best,\n\nCody Mitchell\nRitmo Coffee\nhttps://ritmo.coffee", "key": "ritmo"},
+}
 BASE = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/workers/scripts/{WORKER}"
 
 
@@ -59,11 +64,15 @@ def current():
     return settings, deployment
 
 
-def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False, enable_compose=False, enable_drafts=False, enable_agent=False):
+def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False, enable_compose=False, enable_drafts=False, enable_agent=False, enable_ritmo=False):
+    if enable_ritmo and enable_replies:
+        raise RuntimeError("Add Ritmo separately from rebuilding existing sending identities")
     bindings = []
     reply_names = {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}
     for binding in settings["bindings"]:
         name = binding["name"]
+        if enable_ritmo and name in {"CMAIL_SEND_IDENTITIES", "CMAIL_RITMO_SEND_KEY"}:
+            continue
         if enable_agent and name == "CMAIL_AGENT_ENABLED":
             continue
         if enable_drafts and name == "CMAIL_DRAFTS_ENABLED":
@@ -74,20 +83,37 @@ def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_se
             continue
         if enable_fast_reads and name == "CMAIL_FAST_READS":
             continue
-        if name == "RESEND_RECEIVING_API_KEY":
+        if name == "RESEND_RECEIVING_API_KEY" and not enable_ritmo:
             continue
         if enable_replies and name in reply_names:
             continue
         if name == "CMAIL_MAILBOXES":
-            addresses = list(dict.fromkeys([*binding.get("text", "").split(","), SUPPORT]))
+            addresses = list(dict.fromkeys([*binding.get("text", "").split(","), SUPPORT, *(RITMO if enable_ritmo else [])]))
             bindings.append({"type": "plain_text", "name": name, "text": ",".join(addresses)})
         else:
             bindings.append({"type": "inherit", "name": name})
-    config = resend_integration._load_resend_admin_config(Path.home() / ".lifeops/config/resend-bind-my-soul.json")
-    if not config.get("admin_api_key"):
-        raise RuntimeError("Existing Resend receiving credential unavailable")
-    bindings.append({"type": "secret_text", "name": "RESEND_RECEIVING_API_KEY", "text": config["admin_api_key"]})
+    if not enable_ritmo:
+        config = resend_integration._load_resend_admin_config(Path.home() / ".lifeops/config/resend-bind-my-soul.json")
+        if not config.get("admin_api_key"):
+            raise RuntimeError("Existing Resend receiving credential unavailable")
+        bindings.append({"type": "secret_text", "name": "RESEND_RECEIVING_API_KEY", "text": config["admin_api_key"]})
+    if enable_ritmo:
+        identities = json.loads(next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_SEND_IDENTITIES"))
+        for address, identity in RITMO.items():
+            if address in identities and identities[address] != identity:
+                raise RuntimeError("Existing Ritmo identity differs; inspect before replacing it")
+            identities[address] = identity
+        lookup = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "resend-ritmo", "-a", "ritmo.coffee", "-w"], capture_output=True, text=True)
+        secret = lookup.stdout.strip()
+        if lookup.returncode or not secret.startswith("re_") or len(secret) < 24:
+            raise RuntimeError("Verified Ritmo sending key unavailable in Keychain")
+        bindings.extend([
+            {"type": "secret_text", "name": "CMAIL_RITMO_SEND_KEY", "text": secret},
+            {"type": "plain_text", "name": "CMAIL_SEND_IDENTITIES", "text": json.dumps(identities)},
+        ])
     if enable_replies:
+        if any(b["name"] == "CMAIL_RITMO_SEND_KEY" for b in settings["bindings"]):
+            raise RuntimeError("Preserve the existing Ritmo identities; do not rebuild replies with this legacy option")
         primary = resend_integration._load_resend_config(Path.home() / ".lifeops/config/resend.json")
         if not primary.get("api_key") or not config.get("api_key"):
             raise RuntimeError("Existing outbound credentials unavailable")
@@ -154,6 +180,7 @@ def main():
     parser.add_argument("--enable-compose", action="store_true", help="Enable Compose after the contact history index is complete")
     parser.add_argument("--enable-drafts", action="store_true", help="Enable encrypted saved drafts with existing Compose and Sent")
     parser.add_argument("--enable-agent", action="store_true", help="Enable signed agent access to the same cloud mailbox and drafts")
+    parser.add_argument("--enable-ritmo", action="store_true", help="Add the two Ritmo identities using their domain-scoped Keychain sending key, preserving all existing credentials")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     settings, deployment = current()
@@ -196,13 +223,17 @@ def main():
                     raise RuntimeError("Sent index must be complete before activation")
                 if not args.enable_fast_reads and next((b.get("text") for b in settings["bindings"] if b["name"] == "CMAIL_FAST_READS"), None) != "1":
                     raise RuntimeError("Sent requires indexed reads")
-        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent, enable_compose=args.enable_compose, enable_drafts=args.enable_drafts, enable_agent=args.enable_agent)
+        if current()[1]["versions"][0]["version_id"] != version:
+            raise RuntimeError("Production changed during preflight; inspect before deploying")
+        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent, enable_compose=args.enable_compose, enable_drafts=args.enable_drafts, enable_agent=args.enable_agent, enable_ritmo=args.enable_ritmo)
     else:
         desired = list(dict.fromkeys([*(item["cron"] for item in schedules), "*/2 * * * *"]))
         result = api("/schedules", method="PUT", data=encoded([{"cron": cron} for cron in desired]), content_type="application/json")
     after_settings, after_deployment = current()
     for old in settings["bindings"]:
-        if old["name"] in {"CMAIL_MAILBOXES", "RESEND_RECEIVING_API_KEY"}:
+        if args.enable_ritmo and old["name"] in {"CMAIL_SEND_IDENTITIES", "CMAIL_RITMO_SEND_KEY"}:
+            continue
+        if old["name"] == "CMAIL_MAILBOXES" or old["name"] == "RESEND_RECEIVING_API_KEY" and not args.enable_ritmo:
             continue
         if args.enable_replies and old["name"] in {"CMAIL_RESEND_API_KEY", "CMAIL_SUPPORT_SEND_KEY", "CMAIL_SEND_IDENTITIES"}:
             continue
@@ -219,6 +250,15 @@ def main():
         actual = next((b for b in after_settings["bindings"] if b["name"] == old["name"]), None)
         if actual != old:
             raise RuntimeError("Existing binding changed: " + old["name"])
+    if args.enable_ritmo:
+        old_identities = json.loads(next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_SEND_IDENTITIES"))
+        new_identities = json.loads(next(b["text"] for b in after_settings["bindings"] if b["name"] == "CMAIL_SEND_IDENTITIES"))
+        assert all(new_identities.get(address) == identity for address, identity in old_identities.items())
+        assert all(new_identities.get(address) == identity for address, identity in RITMO.items())
+        old_mailboxes = set(next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_MAILBOXES").split(","))
+        new_mailboxes = set(next(b["text"] for b in after_settings["bindings"] if b["name"] == "CMAIL_MAILBOXES").split(","))
+        assert new_mailboxes == old_mailboxes | set(RITMO)
+        assert next(b for b in after_settings["bindings"] if b["name"] == "CMAIL_RITMO_SEND_KEY")["type"] == "secret_text"
     receipt = {"mode": "deploy" if args.deploy else "schedule", "before_path": str(before_path), "source_sha256": sources, "result": result, "deployment": after_deployment, "settings": after_settings, "schedules": api("/schedules")["schedules"]}
     path = args.receipt_dir / f"production-{'deploy' if args.deploy else 'schedule'}-{stamp}.json"
     path.write_bytes(encoded(receipt) + b"\n")
