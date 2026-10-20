@@ -516,6 +516,7 @@ def ingest_cloudflare_email_payload(
     provider = _strip_string(payload.get("provider")).lower()
     is_resend_receiving = provider in {"resend", "resend-receiving", "resend_receiving"}
     is_gmail_archive = provider in {"gmail-archive", "gmail_archive"}
+    is_cloud_projection = provider == "cmail-cloud"
     if is_gmail_archive:
         source = "gmail_archive"
         external_prefix = "gmail-archive"
@@ -535,7 +536,7 @@ def ingest_cloudflare_email_payload(
         vault_namespace = "cloudflare_email"
         ingest_note = "Ingested from Cloudflare Email Routing."
     requested_direction = _strip_string(payload.get("direction")).lower()
-    direction = requested_direction if is_gmail_archive and requested_direction in {"inbound", "outbound"} else "inbound"
+    direction = requested_direction if (is_gmail_archive or is_cloud_projection) and requested_direction in {"inbound", "outbound"} else "inbound"
     message_id = mail_metadata.primary_message_id(_raw_header_values(message, "Message-ID"))
     if not message_id:
         message_id = f"<{external_prefix}-{hashlib.sha256(raw_bytes).hexdigest()[:24]}@life-ops>"
@@ -582,7 +583,7 @@ def ingest_cloudflare_email_payload(
         triage={},
         user_email=_strip_string(payload.get("user_email")) or envelope_to,
     )
-    status = "reference" if is_gmail_archive else (_strip_string(message_classification.get("status")) or "reference")
+    status = "sent" if is_cloud_projection and direction == "outbound" else "reference" if is_gmail_archive else (_strip_string(message_classification.get("status")) or "reference")
     follow_up_at = happened_at if status == "open" else None
     raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
 

@@ -1104,6 +1104,9 @@ async function runCmailCommand({
   runner = defaultProcessRunner,
 }) {
   const cmailArgv = invokedFromLifeops ? argv.slice(1) : argv;
+  const { runCloudCmail } = await import("./cmail-cloud.js");
+  const cloudResult = await runCloudCmail(cmailArgv);
+  if (cloudResult !== null) return cloudResult;
   const subcommand = cmailArgv[0] ?? "help";
   const serviceScript = path.join(packageDir, "bin", "cmail-service");
   const mailboxUrl = "http://127.0.0.1:4311";

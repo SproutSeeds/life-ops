@@ -1,5 +1,11 @@
 # CMAIL Spam
 
+CMAIL routing update, October 20, 2026: the active mailbox and Drafts are at
+https://cmail.frg.earth and the installed `cmail` command. Follow
+[the current CMAIL agent guide](cmail-agent/README.md). Local mail UI/API, local draft
+and direct-provider sending examples in older sections are historical. Local
+communication records remain Life Ops follow-up projections.
+
 Open a message and choose **Move sender to Spam**, review the address, then choose
 **Move sender to Spam** in the dialog. You can also open **Spam → Manage senders**
 and enter an address directly. Rules match an exact email address, ignoring case,

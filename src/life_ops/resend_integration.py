@@ -1083,6 +1083,9 @@ def process_resend_delivery_queue(
     limit: int = DEFAULT_RESEND_PROCESS_LIMIT,
     queue_ids: Optional[list[int]] = None,
 ) -> dict[str, Any]:
+    from .cmail_cloud import active
+    if active():
+        return {"retired": True, "processed": [], "failures": [], "system": "cmail-cloud"}
     target_db_path = db_path or store.default_db_path()
     started_at = _utc_now_string()
     processed: list[dict[str, Any]] = []
@@ -1347,6 +1350,8 @@ def resend_send_email(
     mail_identity: str = "",
     idempotency_key: str = "",
 ) -> dict[str, Any]:
+    from .cmail_cloud import guard_legacy_write
+    guard_legacy_write()
     if idempotency_key and not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", idempotency_key):
         raise ValueError("Invalid mail idempotency key")
     recipients = [address.strip() for address in to if address and address.strip()]

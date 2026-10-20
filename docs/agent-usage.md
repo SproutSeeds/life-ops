@@ -1,5 +1,11 @@
 # Agent Usage
 
+CMAIL routing update, October 20, 2026: the active mailbox and Drafts are at
+https://cmail.frg.earth and the installed `cmail` command. Follow
+[the current CMAIL agent guide](cmail-agent/README.md). Local mail UI/API, local draft
+and direct-provider sending examples in older sections are historical. Local
+communication records remain Life Ops follow-up projections.
+
 When you ask your agent about the agenda, the agent should query this repo directly rather than guessing from memory.
 
 ## Refresh before answering

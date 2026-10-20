@@ -1,54 +1,53 @@
-# CMAIL Agent runbook
+# C-mail cloud runbook
 
-## Expected launch
+Start with `cmail status` and `cmail --help`. Run these from any working directory.
+`lifeops cmail status` must report the same `cmail-cloud` system and identities.
+The website is https://cmail.frg.earth. The cloud credential stays in Keychain;
+never paste it into chat, print it, or place it in a request artifact.
 
-1. CMAIL posts the current `view`, `identity`, and selected row ID to `POST /api/agent-terminal`.
-2. The server looks up the row in the live database and derives the trusted thread, message, contact, and identity pointers.
-3. `src/life_ops/cmail_agent.py` resolves the dedicated `CMAIL Agent` ClawDad session, writes the pointer state with mode `0600`, and asks ClawDad to open the session in Terminal.
-4. ClawDad launches Codex with the Life Ops checkout as its working directory. Existing native sessions use the shared Codex app-server resume path.
+If a draft appears missing, check the sender filter with `cmail drafts`, then
+read its cloud ID with `cmail draft ID`. An agent's prose/file is not a saved
+email. A legacy numeric draft ID is resolved only through the migration mapping
+in `~/.lifeops/config/cmail-cloud.json`. Verify exact content and `state: editing`
+after any authorized save. The link shape is
+`https://cmail.frg.earth/?view=drafts&draft=draft_UUID`.
 
-The browser cannot provide a shell command, project path, session ID, message body, or ClawDad token. The launch route accepts the loopback CMAIL origin and Cody's authenticated Tailscale identity on the canonical CMAIL host.
+On conflict, reread the current cloud revision and reconcile the actual changes.
+Do not overwrite a browser edit by inventing a revision. On a send timeout, check
+the same draft/receipt; never fall back to direct Resend or another mailbox.
+Unsupported commands fail explicitly rather than create hidden local drafts.
 
-## Health checks
+Local `GET /api/health` remains available only for the service supervisor and
+reports `system: cmail-cloud`, `legacy_ui_retired: true`. All other old mail APIs
+return 410. The localhost/Tailscale website redirects to the new website. The
+legacy send queue was empty at cutover and its processing worker is disabled.
+Do not run old install/repair instructions to reopen it.
 
-```sh
-curl -fsS http://127.0.0.1:4311/api/health
-zsh ./packages/lifeops-cli/bin/cmail-service status
-clawdad sessions-doctor /Volumes/Code_2TB/code/life-ops --json
-```
+The existing local service now projects new cloud messages into Life Ops and
+keeps its sealing/backup jobs. Inspect `cmail_cloud_projection` and runtime worker
+health when troubleshooting that projection. Keep task/follow-up dispositions
+separate from cloud mailbox read/archive state. Projection errors must be fixed
+without reopening the old mail UI or sending queue.
 
-Inspect pointer state without treating it as message content:
-
-```sh
-stat -f '%Sp %N' ~/.lifeops/state/cmail-agent.json
-python3 -m json.tool ~/.lifeops/state/cmail-agent.json
-```
-
-The file should be readable only by the local user (`-rw-------`).
-
-## Button errors
-
-- **CMAIL Agent is already opening**: wait for the current launch to finish, then click Retry.
-- **Local ClawDad service is unavailable**: open the native ClawDad app, verify its health, and retry.
-- **Session has no saved transcript / invalid project binding**: the launcher normally self-heals by creating a fresh named session. Run the session doctor if it repeats.
-- **Selected CMAIL item is no longer available**: refresh CMAIL, select a current message or draft, and retry.
-- **Tailnet identity required**: open the canonical CMAIL URL through Tailscale Serve while signed in as an allowed user.
-
-## Verification after a code change
+Verification commands for this implementation:
 
 ```sh
-/Users/codymitchell/.lifeops/venvs/cmail/bin/python -m unittest \
-  tests.test_clawdad_client \
-  tests.test_cmail_agent
-
-/Users/codymitchell/.lifeops/venvs/cmail/bin/python -m unittest \
-  tests.test_mail_ui.MailUiTests.test_cmail_agent_button_is_keyboard_accessible_and_posts_selection \
-  tests.test_mail_ui.MailUiTests.test_cmail_agent_selection_uses_server_side_pointer_fields_only \
-  tests.test_mail_ui.MailUiTests.test_cmail_agent_launch_authorization_accepts_local_and_verified_tailnet \
-  tests.test_mail_ui.MailUiTests.test_cmail_agent_endpoint_launches_with_validated_message_pointer
-
-npm run prepack --prefix packages/lifeops-cli
-zsh ./packages/lifeops-cli/bin/cmail-service restart
+npm test --prefix packages/cmail-cloud
+npm run check --prefix packages/cmail-cloud
+PYTHONPATH=src ./.venv/bin/python -m unittest tests.test_cmail_cloud
 ```
 
-Calling `POST /api/agent-terminal` during a live smoke test opens a real Terminal window. Use a current CMAIL row ID and expect that visible side effect.
+Tests for the retired upstream behavior must use an isolated temporary HOME or
+mock `cmail_cloud.active` false; this machine's real cutover intentionally blocks
+old local writes. Never disable the live cutover file merely to run legacy tests.
+
+Deploy through `packages/cmail-cloud/scripts/deploy.py` with the observed expected
+version and existing namespace. Verify all production source hashes, Access,
+agent HMAC protection and scheduled receiving. Draft migration uses
+`scripts/migrate_local_drafts.py` within that package, deterministic IDs and a
+private receipt; it never sends or modifies original rows. A verified prior
+receipt makes reruns read-only for that draft, preserving subsequent user edits.
+
+The October 20 cutover evidence is in
+`docs/qa/cmail-agent-cutover-2026-10-20/VERIFICATION.md`; private receipts and
+screenshots are under the corresponding ignored `data/qa/` directory.

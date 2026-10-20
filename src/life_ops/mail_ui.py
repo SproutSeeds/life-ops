@@ -7106,6 +7106,8 @@ def _list_cmail_drafts(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    from .cmail_cloud import guard_legacy_write
+    guard_legacy_write()
     draft_id = int(payload.get("id") or 0)
     subject = str(payload.get("subject") or "").strip()
     external_to = str(payload.get("to") or "").strip()
@@ -7226,6 +7228,9 @@ def _save_cmail_draft(connection: sqlite3.Connection, payload: dict[str, Any]) -
 
 
 def list_cmail_drafts(*, db_path: Path) -> list[dict[str, Any]]:
+    from .cmail_cloud import active, request
+    if active():
+        return request("drafts")["items"]
     with store.open_db(db_path) as connection:
         return _list_cmail_drafts(connection)
 
@@ -7266,6 +7271,8 @@ def send_cmail_draft(
     config_path: Path | None = None,
     scheduled_at: datetime | str | None = None,
 ) -> dict[str, Any]:
+    from .cmail_cloud import guard_legacy_write
+    guard_legacy_write()
     temp_attachment_dir: Path | None = None
     temp_attachment_paths: list[Path] = []
     with store.open_db(db_path) as connection:
@@ -7344,6 +7351,8 @@ def send_cmail_draft(
 
 
 def delete_cmail_draft(*, db_path: Path, draft_id: int) -> dict[str, Any]:
+    from .cmail_cloud import guard_legacy_write
+    guard_legacy_write()
     with store.open_db(db_path) as connection:
         row = store.get_communication_by_id(connection, int(draft_id))
         if row is None or str(row["source"] or "") != "cmail_draft":
@@ -9914,6 +9923,9 @@ def _make_handler(
             return False
 
         def do_GET(self) -> None:  # noqa: N802
+            from .cmail_cloud import retired_http
+            if retired_http(self):
+                return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             query = parse_qs(parsed.query)
@@ -10358,6 +10370,9 @@ def _make_handler(
             self._send_json({"error": "not_found"}, status_code=404)
 
         def do_POST(self) -> None:  # noqa: N802
+            from .cmail_cloud import retired_http
+            if retired_http(self):
+                return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
@@ -10892,6 +10907,9 @@ def serve_mail_ui(
     enable_background_remote_sync: bool = True,
     require_app_auth: bool | None = None,
 ) -> None:
+    from .cmail_cloud import active, serve_redirect
+    if active():
+        return serve_redirect(host=host, port=port)
     print(f"[mail_ui] preparing handler for http://{host}:{port}", flush=True)
     handler = _make_handler(
         db_path=db_path,

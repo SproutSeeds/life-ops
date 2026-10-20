@@ -990,6 +990,9 @@ def _run_periodic_loop(
     target,
     initial_delay_seconds: float = 0.0,
 ) -> None:
+    from .cmail_cloud import active, sync_projection
+    if worker_name == "sync" and active():
+        target = lambda: sync_projection(runtime_db_path=runtime_db_path)
     consecutive_failures = 0
     if initial_delay_seconds > 0 and stop_event.wait(max(0.25, float(initial_delay_seconds))):
         return
@@ -1148,6 +1151,9 @@ def serve_cmail_service(
             name="life-ops-cmail-runtime-backup",
         ),
     ]
+    from .cmail_cloud import active
+    if active():
+        worker_threads = [thread for thread in worker_threads if thread.name != "life-ops-cmail-runtime-send"]
     for thread in worker_threads:
         thread.start()
     print("[cmail_runtime] background workers started", flush=True)

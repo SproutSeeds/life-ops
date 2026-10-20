@@ -1,5 +1,11 @@
 # CMAIL Labels
 
+CMAIL routing update, October 20, 2026: the active mailbox and Drafts are at
+https://cmail.frg.earth and the installed `cmail` command. Follow
+[the current CMAIL agent guide](cmail-agent/README.md). Local mail UI/API, local draft
+and direct-provider sending examples in older sections are historical. Local
+communication records remain Life Ops follow-up projections.
+
 Labels gather correspondence into its own view. Choose a label from the dropdown
 beside the inbox picker to see only that label's correspondence; **All labels**
 returns to the full mailbox. A label combines with the inbox picker, the

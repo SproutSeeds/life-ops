@@ -15,9 +15,14 @@ export function prepareCompose(queue, input) {
   const identity = Object.hasOwn(identities, input.sender) ? identities[input.sender] : null;
   if (!identity) throw fail('sender_not_configured', 400);
   if (!Array.isArray(input.to) || !input.to.length || input.to.length > 10 || input.to.some((address) => typeof address !== 'string' || address.length > 254 || /\s/.test(address) || !EMAIL.test(address))) throw fail('invalid_recipients');
+  for (const values of [input.cc || [], input.bcc || []]) if (!Array.isArray(values) || values.some((address) => typeof address !== 'string' || address.length > 254 || !EMAIL.test(address))) throw fail('invalid_recipients');
+  if (input.to.length + (input.cc || []).length + (input.bcc || []).length > 10) throw fail('invalid_recipients');
   if (typeof input.subject !== 'string' || input.subject.length > 1000 || /[\r\n\0]/.test(input.subject)) throw fail('invalid_subject');
+  const inReplyTo = input.in_reply_to || '', references = input.references || [];
+  if (typeof inReplyTo !== 'string' || inReplyTo && headerIds(inReplyTo)[0] !== inReplyTo || !Array.isArray(references) || references.length > 20 || references.some((id) => typeof id !== 'string' || headerIds(id)[0] !== id)) throw fail('invalid_thread_headers');
   return { from: identity.from, sender: input.sender, to: [...new Set(input.to.map((address) => address.toLowerCase()))],
-    subject: input.subject.trim(), signature: String(identity.signature || ''), references: [], credential: identity.key };
+    cc: [...new Set((input.cc || []).map((address) => address.toLowerCase()))], bcc: [...new Set((input.bcc || []).map((address) => address.toLowerCase()))],
+    subject: input.subject.trim(), signature: String(identity.signature || ''), in_reply_to: inReplyTo, references, credential: identity.key };
 }
 
 export function sendingIdentities(env) {
@@ -66,8 +71,14 @@ function makeMessage(prepared, text, requestId, createdAt) {
   if (prepared.in_reply_to) headers['In-Reply-To'] = prepared.in_reply_to;
   if (prepared.references.length) headers.References = prepared.references.join(' ');
   const request = { from: prepared.from, to: prepared.to, subject: prepared.subject, text, reply_to: prepared.sender, headers };
+  if (prepared.cc?.length) request.cc = prepared.cc;
+  if (prepared.bcc?.length) request.bcc = prepared.bcc;
   const body64 = encodeRaw(new TextEncoder().encode(text)).match(/.{1,76}/g)?.join('\r\n') || '';
   const lines = [`From: ${prepared.from}`, `To: ${prepared.to.join(', ')}`, `Reply-To: ${prepared.sender}`,
+    ...(prepared.cc?.length ? [`Cc: ${prepared.cc.join(', ')}`] : []),
+    // Bcc is retained only in the private Sent archive. The provider request
+    // receives it separately and does not put it in recipient-visible headers.
+    ...(prepared.bcc?.length ? [`Bcc: ${prepared.bcc.join(', ')}`] : []),
     `Subject: ${encodedSubject(prepared.subject)}`, `Date: ${new Date(createdAt).toUTCString()}`,
     ...Object.entries(headers).map(([key, value]) => `${key}: ${key === 'References' ? value.split(' ').join('\r\n ') : value}`), 'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', body64, ''];
@@ -101,7 +112,9 @@ async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind
   if (kind === 'reply' && !MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
   const composition = kind === 'compose' ? prepareCompose(queue, input) : null;
   const key = OUTBOX + input.request_id;
-  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify(composition ? [kind, composition.sender, composition.to, composition.subject, input.text] : [input.id, input.text])));
+  const extended = composition && (composition.cc.length || composition.bcc.length || composition.in_reply_to || composition.references.length);
+  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify(composition ? [kind, composition.sender, composition.to, composition.subject, input.text,
+    ...(extended ? [composition.cc, composition.bcc, composition.in_reply_to, composition.references] : [])] : [input.id, input.text])));
   let record = await queue.state.storage.get(key);
   if (record && ((record.kind || 'reply') !== kind || record.digest !== digest)) throw fail('reply_changed', 409);
   if (record?.state === 'sent' || record?.state === 'rejected') return receipt(record);

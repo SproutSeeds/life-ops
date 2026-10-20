@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--require-sent", action="store_true")
     parser.add_argument("--require-compose", action="store_true")
     parser.add_argument("--require-drafts", action="store_true")
+    parser.add_argument("--require-agent", action="store_true")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     key = credentials.resolve_secret(name="CLOUDFLARE_API_TOKEN")
@@ -70,6 +71,15 @@ def main():
                  "signed_admin": unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/api/mail/resend/status", "POST")}
     assert protected == {"website": 302, "worker_mail_api": 302, "signed_admin": 401}, protected
     secret = credentials.resolve_secret(name="LIFE_OPS_MAIL_INGEST_SECRET")
+    agent = None
+    if args.require_agent:
+        assert next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_AGENT_ENABLED") == "1"
+        protected["agent_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/api/mail/agent", "POST")
+        assert protected["agent_api"] == 401
+        agent = cloudflare_email._cloudflare_worker_request_json(
+            worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret,
+            path="/api/mail/agent", payload={"action": "status"})
+        assert agent["system"] == "cmail-cloud" and agent["ready"]
     def signed(path):
         return cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path=path, payload={})
     sync = signed("/api/mail/resend/status")
@@ -108,7 +118,8 @@ def main():
     scheduled_fresh = bool(scheduled_at) and (datetime.now(timezone.utc) - datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))).total_seconds() < 300
     result = {"checked_at": datetime.now(timezone.utc).isoformat(), "version": deployment["versions"][0]["version_id"],
               "source_sha256": actual, "existing_namespace_verified": True, "mailboxes": mailboxes,
-              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index, "sent": sent, "contacts": contacts, "drafts": drafts}
+              "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index, "sent": sent, "contacts": contacts, "drafts": drafts,
+              "agent": {key: agent[key] for key in ["system", "ready", "drafts", "capabilities"]} if agent else None}
     target = args.receipt_dir / "production-verification.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded(result) + b"\n")

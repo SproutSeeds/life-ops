@@ -7,6 +7,7 @@ import { SentIndex } from './sent-index.mjs';
 import { ContactIndex } from './contact-index.mjs';
 import { DraftStore, handleDrafts } from './draft-store.mjs';
 import { withDrafts } from './draft-http.mjs';
+import { handleAgent } from './agent-api.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -21,6 +22,7 @@ const ADMIN_ROUTES = new Map([
   ['/api/mail/contacts/status', '/contacts/status'],
   ['/api/mail/contacts/backfill', '/contacts/backfill'],
   ['/api/mail/drafts/status', '/drafts/status'],
+  ['/api/mail/agent', '/agent/request'],
 ]);
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -117,6 +119,7 @@ export class MailQueue extends BaseQueue {
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path === '/agent/request') return handleAgent(this, request);
     if (path.startsWith('/drafts/')) return handleDrafts(this, request);
     if (path.startsWith('/contacts/')) {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

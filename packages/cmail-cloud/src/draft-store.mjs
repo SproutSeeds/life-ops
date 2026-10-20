@@ -38,7 +38,7 @@ export class DraftStore {
     await putMany(tx, entries);
     record.summary = await this.queue.views.seal({ id: record.id, revision: record.revision, sender: value.sender, to: value.to,
       pending: value.pending, subject: value.subject, preview: value.text.replace(/\s+/g, ' ').slice(0, 180),
-      kind: value.kind, reply_id: value.reply_id || '', updated_at: record.updated_at, state: record.state });
+      kind: value.kind, reply_id: value.reply_id || '', cc: value.cc || [], bcc: value.bcc || [], updated_at: record.updated_at, state: record.state });
   }
   async move(tx, before, after) {
     const changes = new Map();
@@ -61,8 +61,15 @@ export class DraftStore {
       typeof value.text !== 'string' || value.text.length > 100000 || value.text.includes('\0') ||
       typeof value.signature !== 'string' || value.signature.length > 10000 ||
       value.kind === 'reply' && !/^mail_\d{16}$/.test(value.reply_id || '')) throw bad('invalid_draft');
+    for (const values of [value.cc || [], value.bcc || []]) if (!Array.isArray(values) || values.length > 10 || values.some((v) => typeof v !== 'string' || v.length > 254 || /[\r\n\0]/.test(v))) throw bad('invalid_draft');
+    const messageId = /^<[\x21-\x3b\x3d\x3f-\x7e]{1,247}>$/;
+    if (value.in_reply_to && (typeof value.in_reply_to !== 'string' || !messageId.test(value.in_reply_to)) ||
+      value.references && (!Array.isArray(value.references) || value.references.length > 20 || value.references.some((v) => typeof v !== 'string' || !messageId.test(v)))) throw bad('invalid_thread_headers');
+    if (value.kind === 'reply' && (value.cc?.length || value.bcc?.length)) throw bad('reply_recipients_locked');
     return { kind: value.kind, sender: value.sender, to: [...value.to], pending: value.pending, subject: value.subject,
-      text: value.text, signature: value.signature, ...(value.kind === 'reply' ? { reply_id: value.reply_id } : {}) };
+      text: value.text, signature: value.signature, ...(value.kind === 'reply' ? { reply_id: value.reply_id } : {}),
+      ...(value.cc?.length ? { cc: [...value.cc] } : {}), ...(value.bcc?.length ? { bcc: [...value.bcc] } : {}),
+      ...(value.in_reply_to ? { in_reply_to: value.in_reply_to } : {}), ...(value.references?.length ? { references: [...value.references] } : {}) };
   }
   async save(input) {
     this.validateId(input.id);
@@ -88,6 +95,11 @@ export class DraftStore {
       if (previous) {
         const old = await this.body(previous, tx);
         if (old.kind !== value.kind || old.reply_id !== value.reply_id) throw bad('draft_changed', 409);
+        // Tabs opened before CC/header support omit these fields entirely.
+        // Preserve them unless a current client explicitly supplies [] or ''.
+        for (const field of ['cc', 'bcc', 'in_reply_to', 'references']) {
+          if (!Object.hasOwn(input.draft, field) && old[field] !== undefined) value[field] = old[field];
+        }
       }
       const now = new Date().toISOString();
       const record = { ...previous, id: input.id, revision: input.revision + 1, scope, save_id: input.save_id, digest,
@@ -185,7 +197,7 @@ export class DraftStore {
       const record = records.get(recordKey(id));
       if (!active(record)) continue;
       const summary = await this.queue.views.unseal(record.summary);
-      if (query && ![summary.subject, summary.to.join(' '), summary.pending, summary.sender, summary.preview].join(' ').toLowerCase().includes(query.toLowerCase())) continue;
+      if (query && ![summary.subject, summary.to.join(' '), (summary.cc || []).join(' '), (summary.bcc || []).join(' '), summary.pending, summary.sender, summary.preview].join(' ').toLowerCase().includes(query.toLowerCase())) continue;
       items.push(summary);
     }
     return { items, total: Number(await this.storage.get(P + 'count:' + scope) || 0),

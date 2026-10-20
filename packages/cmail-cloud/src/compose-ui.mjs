@@ -72,6 +72,8 @@ function composeApplication(findMatches) {
   const changedNotice = () => persistent ? 'Unsaved changes. Choose Save draft or Save & close.' : 'Draft saved in this tab.';
   function draftValue(value) {
     return { kind: value.kind || 'compose', sender: value.sender, to: value.to, pending: value.pending || '', subject: value.subject,
+      cc: value.cc || [], bcc: value.bcc || [],
+      in_reply_to: value.in_reply_to || '', references: value.references || [],
       text: value.text, signature: value.signature || '', ...(value.reply_id ? { reply_id: value.reply_id } : {}) };
   }
   function cloudDraft(result) {
@@ -188,7 +190,8 @@ function composeApplication(findMatches) {
   function controls() {
     if (!current) return;
     const owner = current, locked = busy || saving || owner.draft.locked || owner.sent || Boolean(owner.draft.pending_save);
-    for (const input of [owner.from, owner.to, owner.subject, owner.text]) input.disabled = Boolean(locked);
+    for (const input of [owner.from, owner.to, owner.cc, owner.bcc, owner.subject, owner.text]) input.disabled = Boolean(locked);
+    owner.cc.parentElement.hidden = owner.bcc.parentElement.hidden = owner.draft.kind === 'reply';
     for (const button of owner.tokens.querySelectorAll('button')) button.disabled = Boolean(locked);
     if (owner.draft.kind === 'reply') {
       owner.from.disabled = true; owner.to.disabled = true; owner.subject.disabled = true;
@@ -267,7 +270,7 @@ function composeApplication(findMatches) {
     }
     owner.draft.request_id ||= crypto.randomUUID(); owner.draft.locked = true;
     busy = true; save(); controls(); status('Sending…');
-    try { await applyReceipt(await api('compose', { request_id: owner.draft.request_id, sender: owner.draft.sender, to: owner.draft.to, subject: owner.draft.subject, text: owner.draft.text }), owner); }
+    try { await applyReceipt(await api('compose', { ...draftValue(owner.draft), request_id: owner.draft.request_id }), owner); }
     catch (error) {
       // Validation failures happen before provider submission; every other
       // failure retains the exact payload and request ID for safe confirmation.
@@ -309,16 +312,25 @@ function composeApplication(findMatches) {
         <label class="cmail-compose-field">From<select id="composeFrom" aria-label="From"></select></label>
         <div class="cmail-compose-field cmail-compose-to"><label for="composeTo">To</label><div class="cmail-recipient-field"><div id="composeTokens"></div><input id="composeTo" type="text" role="combobox" aria-label="To" aria-autocomplete="list" aria-controls="composeOptions" aria-expanded="false" aria-describedby="composeRecipientHint" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Name or email address"><div id="composeOptions" role="listbox" aria-label="Matching contacts" hidden></div><button id="composeUnique" type="button" hidden></button></div></div>
         <p id="composeRecipientHint" class="cmail-compose-hint"></p>
+        <label class="cmail-compose-field">Cc<input id="composeCc" aria-label="Cc" autocomplete="off" placeholder="Email addresses, separated by commas"></label>
+        <label class="cmail-compose-field">Bcc<input id="composeBcc" aria-label="Bcc" autocomplete="off" placeholder="Email addresses, separated by commas"></label>
         <label class="cmail-compose-field">Subject<input id="composeSubject" maxlength="1000" autocomplete="off"></label>
         <label class="cmail-compose-body"><span class="cmail-compose-sr">Message</span><textarea id="composeText" aria-label="Message" maxlength="100000" placeholder="Write your message…"></textarea></label>
         <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><button id="composeSave" type="button" hidden>Save draft</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeCopy" type="button" hidden>Save a copy</button><button id="composeKeepLocal" type="button" hidden>Close, keep local copy</button><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
       document.body.append(dialog);
       const owner = current = { dialog, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
-      Object.assign(owner, { saveButton: $('composeSave'), copyButton: $('composeCopy'), keepLocal: $('composeKeepLocal') });
+      Object.assign(owner, { cc: $('composeCc'), bcc: $('composeBcc'), saveButton: $('composeSave'), copyButton: $('composeCopy'), keepLocal: $('composeKeepLocal') });
       $('composeHeading').textContent = draft.kind === 'reply' ? 'Reply draft' : persistent ? 'New draft' : 'New message';
       dialog.setAttribute('aria-label', draft.kind === 'reply' ? 'Reply draft' : persistent ? 'Email draft' : 'New message');
       for (const item of config.identities) { const option = document.createElement('option'); option.value = item.address; option.textContent = item.from; owner.from.append(option); }
       owner.from.value = draft.sender; owner.to.value = draft.pending || ''; owner.subject.value = draft.subject; owner.text.value = draft.text;
+      for (const field of ['cc', 'bcc']) {
+        owner[field].value = (draft[field] || []).join(', ');
+        owner[field].addEventListener('input', () => {
+          owner.draft[field] = owner[field].value.split(/[,;]/).map((v) => v.trim()).filter(Boolean);
+          save(true); controls(); status(changedNotice());
+        });
+      }
       owner.from.addEventListener('change', () => {
         const identity = config.identities.find((item) => item.address === owner.from.value);
         const old = owner.draft.signature;
@@ -394,6 +406,10 @@ function composeApplication(findMatches) {
   window.addEventListener('pagehide', () => { if (draft) save(); });
   $('signOut').addEventListener('click', () => { signedOut = true; clear(); contacts = []; config = null; if (current) { current.sent = true; close(false); } }, true);
   updateTrigger();
+  if (persistent) {
+    const linked = new URLSearchParams(location.search).get('draft');
+    if (/^draft_[a-f0-9-]{36}$/.test(linked || '')) open({ id: linked });
+  }
 }
 
 export const composeScript = '(' + composeApplication.toString() + ')(' + matchContacts.toString() + ');';
