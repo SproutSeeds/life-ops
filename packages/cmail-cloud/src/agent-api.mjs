@@ -1,5 +1,6 @@
 import { handleDrafts } from './draft-store.mjs';
 import { sendingIdentities } from './reply.mjs';
+import { publicIdentity } from './signature.mjs';
 
 // Reached only through the existing timestamped HMAC administrative transport.
 // This is an allowlist, not an arbitrary Durable Object route proxy.
@@ -10,7 +11,7 @@ export async function handleAgent(queue, request) {
   try {
     const { action, parameters: p = {} } = await request.json();
     if (!p || typeof p !== 'object' || Array.isArray(p)) return json({ error: 'invalid_parameters' }, 400);
-    const identities = Object.entries(sendingIdentities(queue.env)).map(([address, item]) => ({ address, from: item.from, signature: String(item.signature || '') }));
+    const identities = Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item));
     if (action === 'status') return json({ system: 'cmail-cloud', website: 'https://cmail.frg.earth', ready: true,
       drafts: (await queue.state.storage.get('cmail-drafts-v1:count:*')) || 0, identities,
       capabilities: ['messages', 'search', 'threads', 'raw', 'attachments-read', 'drafts', 'send', 'read-state', 'archive'] });

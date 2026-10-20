@@ -1,9 +1,21 @@
 // Synthetic credentials and recipients only. All external networking is disabled.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { bindings, payload, uuid, support } from '../test/reply-fixture.mjs';
 const { Miniflare, createFetchMock } = await import(process.argv[2]);
 const serve = process.argv.includes('--serve'), root = fileURLToPath(new URL('../', import.meta.url));
+// Optional private signature fixtures for visual QA. These still use synthetic
+// credentials, example.test recipients, and the network-isolated fake provider.
+const signatureFlag = process.argv.indexOf('--signature-config');
+const extraBindings = {};
+if (signatureFlag !== -1) {
+  const signatures = JSON.parse(await readFile(process.argv[signatureFlag + 1], 'utf8'));
+  const identities = JSON.parse(bindings.CMAIL_SEND_IDENTITIES);
+  for (const [address, signature] of Object.entries(signatures)) identities[address] = { from: address, key: 'primary', ...signature };
+  extraBindings.CMAIL_SEND_IDENTITIES = JSON.stringify(identities);
+  extraBindings.CMAIL_MAILBOXES = Object.keys(identities).join(',');
+}
 const fetchMock = createFetchMock(); fetchMock.disableNetConnect(); let sends = 0;
 fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'POST' }).reply(200, async (options) => {
   const body = await new Response(options.body).json();
@@ -12,7 +24,7 @@ fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'PO
 }, { headers: { 'Content-Type': 'application/json' } }).persist();
 const mf = new Miniflare({ name: 'cmail-drafts-fixture', host: '127.0.0.1', port: serve ? 9346 : 0,
   modules: true, modulesRoot: root, scriptPath: root + 'test/compose-worker.mjs', compatibilityDate: '2026-03-27',
-  bindings: { ...bindings, CMAIL_FAST_READS: '1', CMAIL_SENT_ENABLED: '1', CMAIL_COMPOSE_ENABLED: '1', CMAIL_DRAFTS_ENABLED: '1' },
+  bindings: { ...bindings, ...extraBindings, CMAIL_FAST_READS: '1', CMAIL_SENT_ENABLED: '1', CMAIL_COMPOSE_ENABLED: '1', CMAIL_DRAFTS_ENABLED: '1' },
   fetchMock, durableObjects: { MAIL_QUEUE: { className: 'MailQueue', useSQLite: true } },
 });
 try {

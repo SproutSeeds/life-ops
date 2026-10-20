@@ -1,3 +1,5 @@
+import { splitSignature } from './signature.mjs';
+
 // Shared with the browser bundle so ranking/normalization can be verified with
 // realistic ambiguous names without loading any private contact data in tests.
 export function matchContacts(contacts, query, selected = []) {
@@ -18,7 +20,7 @@ export function matchContacts(contacts, query, selected = []) {
   return { total: matches.length, items: matches.slice(0, 7).map((item) => item.contact) };
 }
 
-function composeApplication(findMatches) {
+function composeApplication(findMatches, splitSignature) {
   const $ = (id) => document.getElementById(id);
   const key = 'cmail.compose.draft.v1';
   const persistent = document.body.dataset.cmailDrafts === '1';
@@ -122,6 +124,7 @@ function composeApplication(findMatches) {
           delete owner.draft.source_reply_local;
         }
         if (current === owner) {
+          signaturePreview(owner);
           status('Saved to Drafts.'); owner.keepLocal.hidden = true;
           if (owner.inline) { if (!owner.closing) inlineRoute(owner, true); selection(owner); }
         }
@@ -134,6 +137,18 @@ function composeApplication(findMatches) {
       } finally { saving = false; owner.savingPromise = null; if (current === owner) controls(); updateTrigger(); }
     })();
     return owner.savingPromise;
+  }
+  function signaturePreview(owner) {
+    const target = owner.dialog.querySelector('.cmail-signature-preview');
+    const logo = owner.draft.signature_logo;
+    const parts = splitSignature(owner.text.value, owner.draft.signature);
+    target.replaceChildren(); target.hidden = !logo || !parts;
+    if (target.hidden) return;
+    const label = document.createElement('span'); label.className = 'cmail-signature-label'; label.textContent = 'Signature preview';
+    const card = document.createElement('div'); card.className = 'cmail-signature-card';
+    const image = document.createElement('img'); image.src = logo.url; image.alt = logo.alt; image.width = image.height = 96;
+    const words = document.createElement('div'); words.textContent = parts.signature;
+    card.append(image, words); target.append(label, card);
   }
   function loadContacts() {
     if (contactsPromise || contactsAt > Date.now() - 300000) return contactsPromise;
@@ -341,10 +356,10 @@ function composeApplication(findMatches) {
         else {
           const context = item.context || item.draft;
           draft = { kind: 'reply', reply_id: options.reply_id, sender: context.sender, to: context.to, subject: context.subject,
-            signature: context.signature, text: options.legacy?.text || (context.signature ? '\n\n' + context.signature : ''), pending: '', dirty: true, source_reply_local: Boolean(options.legacy) };
+            signature: context.signature, signature_logo: context.signature_logo, text: options.legacy?.text || (context.signature ? '\n\n' + context.signature : ''), pending: '', dirty: true, source_reply_local: Boolean(options.legacy) };
         }
       }
-      draft ||= { kind: 'compose', dirty: persistent, sender: identity.address, signature: identity.signature, to: [], pending: '', subject: '', text: identity.signature ? '\n\n' + identity.signature : '' };
+      draft ||= { kind: 'compose', dirty: persistent, sender: identity.address, signature: identity.signature, signature_logo: identity.signature_logo, to: [], pending: '', subject: '', text: identity.signature ? '\n\n' + identity.signature : '' };
       const inline = persistent && $('mailView').value === 'drafts' && Boolean($('draftEditor'));
       const dialog = document.createElement(inline ? 'section' : 'dialog'); dialog.className = inline ? 'cmail-compose-inline' : 'cmail-compose-dialog'; dialog.setAttribute('aria-labelledby', 'composeHeading');
       dialog.innerHTML = `<form class="cmail-compose-form"><header><h2 id="composeHeading">New message</h2><button type="button" id="composeCancel">Cancel</button></header>
@@ -355,6 +370,7 @@ function composeApplication(findMatches) {
         <label class="cmail-compose-field">Bcc<input id="composeBcc" aria-label="Bcc" autocomplete="off" placeholder="Email addresses, separated by commas"></label>
         <label class="cmail-compose-field">Subject<input id="composeSubject" maxlength="1000" autocomplete="off"></label>
         <label class="cmail-compose-body"><span class="cmail-compose-sr">Message</span><textarea id="composeText" aria-label="Message" maxlength="100000" placeholder="Write your message…"></textarea></label>
+        <section class="cmail-signature-preview" aria-label="Signature preview" hidden></section>
         <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><button id="composeSave" type="button" hidden>Save draft</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeCopy" type="button" hidden>Save a copy</button><button id="composeKeepLocal" type="button" hidden>Close, keep local copy</button><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
       (inline ? $('draftEditor') : document.body).append(dialog);
       const owner = current = { dialog, inline, mailbox: $('mailbox').value, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
@@ -375,7 +391,7 @@ function composeApplication(findMatches) {
         const old = owner.draft.signature;
         if (old && owner.text.value.endsWith(old)) owner.text.value = owner.text.value.slice(0, -old.length) + identity.signature;
         else if (!owner.text.value.trim()) owner.text.value = identity.signature ? '\n\n' + identity.signature : '';
-        owner.draft.sender = identity.address; owner.draft.signature = identity.signature; owner.draft.text = owner.text.value; save(true); controls(); status(changedNotice());
+        owner.draft.sender = identity.address; owner.draft.signature = identity.signature; owner.draft.signature_logo = identity.signature_logo; owner.draft.text = owner.text.value; signaturePreview(owner); save(true); controls(); status(changedNotice());
       });
       owner.to.addEventListener('input', () => { owner.draft.pending = owner.to.value; save(true); controls(); status(changedNotice()); suggest(); });
       owner.to.addEventListener('focus', suggest);
@@ -396,7 +412,7 @@ function composeApplication(findMatches) {
       });
       owner.unique.addEventListener('mousedown', (event) => event.preventDefault());
       owner.unique.addEventListener('click', () => { if (owner.options[0]) { add(owner.options[0].address); owner.to.focus(); } });
-      for (const [input, field] of [[owner.subject, 'subject'], [owner.text, 'text']]) input.addEventListener('input', () => { owner.draft[field] = input.value; owner.draft.error = ''; save(true); controls(); status(changedNotice()); });
+      for (const [input, field] of [[owner.subject, 'subject'], [owner.text, 'text']]) input.addEventListener('input', () => { owner.draft[field] = input.value; owner.draft.error = ''; signaturePreview(owner); save(true); controls(); status(changedNotice()); });
       owner.subject.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); owner.text.focus(); } });
       dialog.querySelector('form').addEventListener('submit', (event) => event.preventDefault());
       owner.send.addEventListener('click', send); owner.cancel.addEventListener('click', () => close());
@@ -415,6 +431,7 @@ function composeApplication(findMatches) {
       });
       dialog.addEventListener('cancel', (event) => { event.preventDefault(); if (!owner.list.hidden || !owner.unique.hidden) hideSuggestions(); else close(); });
       tokens();
+      signaturePreview(owner);
       if (inline) { inlineRoute(owner, options.restore); selection(owner); }
       else {
         dialog.showModal();
@@ -484,7 +501,7 @@ function composeApplication(findMatches) {
   }
 }
 
-export const composeScript = '(' + composeApplication.toString() + ')(' + matchContacts.toString() + ');';
+export const composeScript = '(' + composeApplication.toString() + ')(' + matchContacts.toString() + ',' + splitSignature.toString() + ');';
 export const composeStyles = `
 .cmail-compose-trigger{white-space:nowrap}
 .cmail-compose-dialog{box-sizing:border-box;width:min(760px,calc(100vw - 24px));max-height:calc(100dvh - 28px);margin:auto;padding:0;border:1px solid #526445;border-radius:12px;background:var(--panel2);color:var(--text);box-shadow:0 16px 70px #0008;overflow:auto}
@@ -510,6 +527,10 @@ export const composeStyles = `
 .cmail-compose-form #composeUnique{width:100%;text-align:left;color:var(--accent);padding:8px 2px;overflow-wrap:anywhere}
 .cmail-compose-hint{margin:0 0 0 42px;color:var(--muted);font-size:11px;line-height:1.5}
 .cmail-compose-body textarea{box-sizing:border-box;width:100%;min-height:240px;height:30vh;resize:vertical;padding:14px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text);font:inherit;font-size:14px;line-height:1.6}
+.cmail-signature-preview{padding:2px 0 8px}.cmail-signature-preview[hidden]{display:none}
+.cmail-signature-label{display:block;color:var(--muted);font-size:11px;margin-bottom:8px}
+.cmail-signature-card{display:flex;align-items:center;gap:18px;padding:18px;background:#fffef6;border-radius:6px;color:#004b36;font:13px/1.6 Arial,Helvetica,sans-serif}
+.cmail-signature-card img{display:block;width:96px;height:96px;flex-shrink:0}.cmail-signature-card div{border-left:2px solid #cf4d1c;padding-left:18px;white-space:pre-line;overflow-wrap:anywhere;min-width:0}
 .cmail-compose-form input:focus,.cmail-compose-form textarea:focus,.cmail-compose-form select:focus{outline:2px solid var(--accent);outline-offset:1px}
 .cmail-compose-form footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px}
 #composeDiscard{margin-left:auto}.cmail-compose-form a{color:var(--accent)}

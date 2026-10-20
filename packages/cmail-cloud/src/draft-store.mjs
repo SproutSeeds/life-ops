@@ -1,6 +1,7 @@
 import { sha256Hex } from './production-base.mjs';
 import { getMany, putMany } from './mail-index.mjs';
 import { prepareReply, sendingIdentities, sendCompose, sendReply } from './reply.mjs';
+import { brandedMessage, signatureLogo } from './signature.mjs';
 
 const P = 'cmail-drafts-v1:';
 const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
@@ -81,6 +82,15 @@ export class DraftStore {
     if (value.kind === 'reply') {
       const context = await prepareReply(this.queue, value.reply_id);
       value = { ...value, sender: context.sender, to: context.to, pending: '', subject: context.subject, signature: context.signature };
+    }
+    // Freeze the rendered alternative with this saved revision. Client-supplied
+    // HTML is ignored, and a later signature change cannot alter an approved send.
+    const identity = sendingIdentities(this.queue.env)[value.sender];
+    const logo = signatureLogo(identity);
+    if (logo) {
+      value.html = brandedMessage(identity, value.text);
+      value.signature = identity.signature;
+      value.signature_logo = value.html ? logo : null;
     }
     const scope = await hash(value.sender);
     await this.storage.transaction(async (tx) => {
@@ -175,6 +185,7 @@ export class DraftStore {
     });
     if (record.state === 'sent') return this.get(id);
     const value = await this.body(record);
+    options = { ...options, html: value.html };
     try {
       const result = value.kind === 'reply' ? await sendReply(this.queue, { id: value.reply_id, request_id: record.request_id, text: value.text }, options)
         : await sendCompose(this.queue, { ...value, request_id: record.request_id }, options);

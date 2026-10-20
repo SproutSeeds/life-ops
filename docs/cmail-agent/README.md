@@ -81,7 +81,10 @@ inbound conversation. Nothing in this guide grants send authority.
 
 `cmail draft-discard ID --revision N` discards an authorized draft.
 `cmail read`, `unread`, `archive`, and `unarchive` accept cloud message IDs.
-Cloud sending currently supports plain text, To/CC/BCC and reply headers.
+Cloud sending supports plain text, To/CC/BCC, reply headers and configured logo signatures.
+For branded identities, the server also saves an HTML alternative when the configured
+signature remains at the end of the text. Editing or omitting that signature preserves
+plain-text sending. The rendered alternative is frozen with the saved draft revision.
 Attachment sending, HTML-only sending, scheduled/batch delivery and legacy local
 label administration are not exposed by this client. Report missing capability
 and retain the draft; do not fall back to the retired system.

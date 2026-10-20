@@ -1,5 +1,6 @@
 import { PostalMime, sha256Hex, encryptArchivePayload, storeArchiveEnvelope } from './production-base.mjs';
 import { addresses, decodeRaw, encodeRaw } from './resend.mjs';
+import { brandedMessage, publicIdentity } from './signature.mjs';
 
 const MAIL_ID = /^mail_\d{16}$/;
 const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -23,7 +24,7 @@ export function prepareCompose(queue, input) {
   if (typeof inReplyTo !== 'string' || inReplyTo && headerIds(inReplyTo)[0] !== inReplyTo || !Array.isArray(references) || references.length > 20 || references.some((id) => typeof id !== 'string' || headerIds(id)[0] !== id)) throw fail('invalid_thread_headers');
   return { from: identity.from, sender: input.sender, to: [...new Set(input.to.map((address) => address.toLowerCase()))],
     cc: [...new Set((input.cc || []).map((address) => address.toLowerCase()))], bcc: [...new Set((input.bcc || []).map((address) => address.toLowerCase()))],
-    subject: input.subject.trim(), signature: String(identity.signature || ''), in_reply_to: inReplyTo, references, credential: identity.key };
+    subject: input.subject.trim(), ...publicIdentity(input.sender, identity), sender: input.sender, in_reply_to: inReplyTo, references, credential: identity.key };
 }
 
 export function sendingIdentities(env) {
@@ -53,7 +54,7 @@ export async function prepareReply(queue, id) {
   const originalId = headerIds(parsed.messageId)[0] || '';
   const references = [...new Set([...headerIds(parsed.references), ...headerIds(parsed.inReplyTo), ...(originalId ? [originalId] : [])])].slice(-20);
   return { id, from: identity.from, sender, to: recipients, subject: /^re:/i.test(subject) ? subject : `Re: ${subject}`,
-    signature: String(identity.signature || ''), in_reply_to: originalId, references, credential: identity.key };
+    ...publicIdentity(sender, identity), in_reply_to: originalId, references, credential: identity.key };
 }
 
 function encodedSubject(subject) {
@@ -66,15 +67,22 @@ function encodedSubject(subject) {
   return words.map((word) => `=?UTF-8?B?${encodeRaw(new TextEncoder().encode(word))}?=`).join('\r\n ');
 }
 
-function makeMessage(prepared, text, requestId, createdAt) {
+function makeMessage(prepared, text, requestId, createdAt, savedHtml) {
   const messageId = `<cmail.${requestId}@${prepared.sender.split('@')[1]}>`;
   const headers = { 'Message-ID': messageId };
   if (prepared.in_reply_to) headers['In-Reply-To'] = prepared.in_reply_to;
   if (prepared.references.length) headers.References = prepared.references.join(' ');
   const request = { from: prepared.from, to: prepared.to, subject: prepared.subject, text, reply_to: prepared.sender, headers };
+  const html = savedHtml === undefined ? brandedMessage(prepared, text) : savedHtml;
+  if (html) request.html = html;
   if (prepared.cc?.length) request.cc = prepared.cc;
   if (prepared.bcc?.length) request.bcc = prepared.bcc;
-  const body64 = encodeRaw(new TextEncoder().encode(text)).match(/.{1,76}/g)?.join('\r\n') || '';
+  const base64 = (value) => encodeRaw(new TextEncoder().encode(value)).match(/.{1,76}/g)?.join('\r\n') || '';
+  const boundary = 'cmail-alt-' + requestId;
+  const bodyLines = html ? [`Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+    `--${boundary}`, 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', base64(text),
+    `--${boundary}`, 'Content-Type: text/html; charset=utf-8', 'Content-Transfer-Encoding: base64', '', base64(html), `--${boundary}--`, '']
+    : ['Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', base64(text), ''];
   const lines = [`From: ${prepared.from}`, `To: ${prepared.to.join(', ')}`, `Reply-To: ${prepared.sender}`,
     ...(prepared.cc?.length ? [`Cc: ${prepared.cc.join(', ')}`] : []),
     // Bcc is retained only in the private Sent archive. The provider request
@@ -82,7 +90,7 @@ function makeMessage(prepared, text, requestId, createdAt) {
     ...(prepared.bcc?.length ? [`Bcc: ${prepared.bcc.join(', ')}`] : []),
     `Subject: ${encodedSubject(prepared.subject)}`, `Date: ${new Date(createdAt).toUTCString()}`,
     ...Object.entries(headers).map(([key, value]) => `${key}: ${key === 'References' ? value.split(' ').join('\r\n ') : value}`), 'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', body64, ''];
+    ...bodyLines];
   const kind = prepared.id ? 'reply' : 'compose';
   return { request, credential: prepared.credential, archive: { provider: `resend-cloud-${kind}`, external_id: `cmail-${kind}:${requestId}`,
     envelope_from: prepared.sender, envelope_to: prepared.sender, direction: 'outbound', received_at: createdAt,
@@ -109,7 +117,7 @@ async function archiveSent(queue, key, record, saved) {
 export const sendReply = (queue, input, options) => sendMessage(queue, input, { ...options, kind: 'reply' });
 export const sendCompose = (queue, input, options) => sendMessage(queue, input, { ...options, kind: 'compose' });
 
-async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind } = {}) {
+async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind, html } = {}) {
   if (kind === 'reply' && !MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
   const composition = kind === 'compose' ? prepareCompose(queue, input) : null;
   const key = OUTBOX + input.request_id;
@@ -126,7 +134,7 @@ async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind
     const prepared = composition || await prepareReply(queue, input.id);
     if (input.text.trim() === prepared.signature.trim()) throw fail('empty_reply');
     const createdAt = new Date(now()).toISOString();
-    saved = makeMessage(prepared, input.text, input.request_id, createdAt);
+    saved = makeMessage(prepared, input.text, input.request_id, createdAt, html);
     const envelope = await encryptArchivePayload({ masterKey: queue.env.LIFE_OPS_MASTER_KEY, purpose: 'cloudflare-mail-archive-v1', payload: saved,
       metadata: { id: `reply_${input.request_id}`, created_at: createdAt } });
     const payloadRef = await storeArchiveEnvelope({ storage: queue.state.storage, id: `reply_${input.request_id}`, envelope });
@@ -169,7 +177,7 @@ export async function handleReply(queue, request) {
   try {
     const input = await request.json();
     const path = new URL(request.url).pathname;
-    if (path === '/compose/prepare') return json({ identities: Object.entries(sendingIdentities(queue.env)).map(([address, item]) => ({ address, from: item.from, signature: String(item.signature || '') })), max_recipients: 10 });
+    if (path === '/compose/prepare') return json({ identities: Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item)), max_recipients: 10 });
     if (path === '/reply/prepare') {
       const { credential, ...prepared } = await prepareReply(queue, input.id);
       return json(prepared);

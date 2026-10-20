@@ -4,7 +4,7 @@ Production: <https://cmail.frg.earth>, Cloudflare Worker
 `life-ops-email-ingest`. This package restores Bind My Soul receiving to the
 website's existing encrypted Durable Object archive.
 
-The message reader also supports authenticated plaintext replies. Click Reply,
+The message reader supports authenticated replies with editable plain text and configured logo signatures. Click Reply,
 write above the visible signature, then click Send. From, To and conversation
 headers come from the original message and verified mailbox configuration.
 Use **Compose** in the top bar to start a new message. Its From address defaults
@@ -89,7 +89,7 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
   An archive failure can retry without another provider send. Confirmed copies
   appear in the conversation and Archive, marked read. API acceptance is not
   recipient-delivery confirmation. No delivery webhook was introduced.
-- Replies currently support plaintext, one reply recipient group derived from
+- Replies support plain text and a configured branded HTML alternative, one reply recipient group derived from
   Reply-To/From, and the existing conversation headers. Attachments and Reply all
   are separate features.
 - Cloud replies remain in the cloud archive and do not modify local follow-up
@@ -377,3 +377,22 @@ Provider references: [Resend receiving list](https://resend.com/docs/api-referen
 [sending API](https://resend.com/docs/api-reference/emails/send-email),
 [send idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys),
 [Cloudflare multipart deployment metadata](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/).
+
+## Branded identity signatures
+
+A configured `signature_logo` supplies an HTTPS PNG/JPEG URL, website link and alt text.
+The website and logo must share an origin; URLs with credentials, query strings or
+fragments are rejected. Signature text remains editable. A matching complete signature
+at the end of the message receives the logo in an HTML alternative; editing/removing
+that text leaves the message plain text. There is no arbitrary client HTML input.
+
+Compose and reply drafts display the selected identity signature and logo preview.
+Saving freezes the server-rendered alternative with that revision. Sending and retries
+reuse it, and Sent stores both MIME alternatives. The plain-text body is unchanged.
+Other identities retain their existing behavior. The browser CSP permits only the
+configured logo URLs in addition to its existing same-origin images.
+
+Deploy scoped updates with `--signature-config /private/path/signatures.json`. The
+JSON maps existing addresses to `signature` and `signature_logo`; it cannot change
+sender addresses or credentials. Existing secrets are inherited. Private signature
+configuration and contact details stay outside the public repository.
