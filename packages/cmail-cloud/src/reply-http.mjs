@@ -4,6 +4,7 @@ import { appScript } from './web-app.mjs';
 import { composeScript, composeStyles } from './compose-ui.mjs';
 import { signatureLogo } from './signature.mjs';
 import { sendingIdentities } from './reply.mjs';
+import { messageStyles } from './message-format.mjs';
 
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 
@@ -32,7 +33,7 @@ export function withReplies(worker, checkAccess = authorize) {
         if ((compose || contacts || composeAsset) && env.CMAIL_COMPOSE_ENABLED !== '1') return json({ error: 'not_found' }, 404);
         if (asset) {
           if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-          return new Response(url.pathname.endsWith('.js') ? composeAsset ? composeScript : replyScript : composeAsset ? composeStyles : replyStyles, { headers: {
+          return new Response(url.pathname.endsWith('.js') ? composeAsset ? composeScript : replyScript : composeAsset ? composeStyles : replyStyles + messageStyles, { headers: {
             'Content-Type': url.pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8',
             'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
           } });

@@ -14,6 +14,29 @@ Choose **Drafts** in the Inbox/Sent selector and **New draft** to start a saved
 email. **Save draft** keeps it without sending; **Save & close** saves and returns
 to the mailbox. Multiple drafts and reply drafts can be reopened later.
 
+## Readable incoming mail
+
+The reader formats the existing plain-text message into compact paragraphs.
+It removes repeated blank and invisible padding lines, preserves meaningful
+line breaks, lists, quoted replies, code blocks and aligned text tables, and
+shortens the displayed labels of long URLs while retaining their exact targets.
+**Original text** switches the selected message and loaded conversation bodies
+back to their exact text and spacing; switching again restores the reading layout.
+Copy message, Copy thread, downloads and archived content retain the originals.
+
+`src/message-format.mjs` runs entirely in the browser using the body already
+loaded by indexed reading. It adds no database queries, provider calls, asset
+requests or background work. Blocks and link elements have bounded DOM budgets;
+overflow remains visible as text. Email content becomes text nodes, never active
+HTML or remote images. This is a plain-text reading layout, not an HTML email
+renderer; sender-provided plain-text alternatives can omit HTML-only content.
+
+The network-isolated `scripts/reader-runtime-smoke.mjs` accepts the same
+Miniflare module path as the other runtime scripts below. Use `--serve` for
+browser QA and optional `--sample /private/path/message.json` for a captured
+cloud message. Synthetic fixtures cover excess spacing, technical text, quoted
+replies, malicious markup and a 390px reader. Test-only routes never deploy.
+
 ## Source provenance
 
 The October 13 cloud rebuild's original source directory was absent from both

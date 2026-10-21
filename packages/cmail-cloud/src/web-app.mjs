@@ -1,4 +1,6 @@
-function application() {
+import { messageRendererSource } from './message-format.mjs';
+
+function application(renderMessageText) {
   // Recovered C-mail UI with indexed, lazy conversation loading.
   function address(value) {
     if (value?.group) return value.group.map(address).filter(Boolean).join(", ");
@@ -22,6 +24,13 @@ ${formatMessage(message)}`).join("\n\n");
 
   // web/app.js
   var $ = (id) => document.getElementById(id);
+  let originalText = false;
+  const renderedBodies = new WeakMap();
+  const messageFormat = document.createElement('button');
+  messageFormat.id = 'messageFormat'; messageFormat.type = 'button'; messageFormat.className = 'quiet';
+  messageFormat.textContent = 'Original text'; messageFormat.setAttribute('aria-pressed', 'false');
+  messageFormat.title = 'Show the original text and spacing';
+  $('copyThread').after(messageFormat);
   var cursor = null;
   var selectedId = null;
   var requestGeneration = 0;
@@ -483,20 +492,8 @@ ${formatMessage(message)}`).join("\n\n");
     }
   }
   function renderBody(text, target = $("messageBody")) {
-    target.replaceChildren();
-    const matches = String(text).matchAll(/https?:\/\/[^\s<>"\u0000-\u001f]+/g);
-    let offset = 0;
-    for (const match of matches) {
-      target.append(document.createTextNode(text.slice(offset, match.index)));
-      const link = document.createElement("a");
-      link.href = match[0];
-      link.textContent = match[0];
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      target.append(link);
-      offset = match.index + match[0].length;
-    }
-    target.append(document.createTextNode(text.slice(offset)));
+    renderedBodies.set(target, String(text ?? ''));
+    renderMessageText(text, target, originalText);
   }
   async function copyText(text, button, label) {
     const id = selectedId;
@@ -598,6 +595,8 @@ ${formatMessage(message)}`).join("\n\n");
       if (generation !== readingGeneration) return;
       selectedId = id;
       selectedMessage = message;
+      originalText = false; messageFormat.setAttribute('aria-pressed', 'false');
+      messageFormat.title = 'Show the original text and spacing';
       $("readerNotice").hidden = true;
       $("readerNotice").textContent = "";
       if (pushHistory && window.location.hash !== `#${id}`) window.history.pushState(null, "", `#${id}`);
@@ -714,6 +713,13 @@ ${formatMessage(message)}`).join("\n\n");
   $("copyMessage").addEventListener("click", () => {
     if (selectedMessage) copyText(formatMessage(selectedMessage), $("copyMessage"), "Message");
   });
+  messageFormat.addEventListener('click', () => {
+    originalText = !originalText; messageFormat.setAttribute('aria-pressed', String(originalText));
+    messageFormat.title = originalText ? 'Return to the formatted reading layout' : 'Show the original text and spacing';
+    for (const target of document.querySelectorAll('#messageBody,#threadMessages .message-body')) {
+      if (renderedBodies.has(target)) renderBody(renderedBodies.get(target), target);
+    }
+  });
   $("copyThread").addEventListener("click", async () => {
     if (!conversationMessages.length) return;
     const generation = conversationGeneration;
@@ -785,4 +791,4 @@ ${formatMessage(message)}`).join("\n\n");
   openLinkedMessage();
 }
 
-export const appScript = "(" + application.toString() + ")();";
+export const appScript = "(" + application.toString() + ")(" + messageRendererSource + ");";
