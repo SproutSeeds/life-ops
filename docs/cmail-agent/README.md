@@ -18,6 +18,8 @@ cmail identities
 cmail messages --mailbox cody@frg.earth --view inbox --limit 50
 cmail search --mailbox cody@frg.earth --view all --query 'subject or sender'
 cmail messages --view sent
+cmail messages --view spam
+cmail spam-senders
 cmail message mail_0000000000000001
 cmail thread mail_0000000000000001
 cmail contacts
@@ -81,6 +83,13 @@ inbound conversation. Nothing in this guide grants send authority.
 
 `cmail draft-discard ID --revision N` discards an authorized draft.
 `cmail read`, `unread`, `archive`, and `unarchive` accept cloud message IDs.
+`cmail spam ID [ID ...]` moves authorized messages to Spam and filters future
+inbound mail from those exact From addresses across inboxes. `cmail not-spam ID
+[ID ...]` restores selected messages to Inbox and removes their sender rules.
+Other caught messages remain in Spam until restored. Search with `--view spam`
+and list active rules with `cmail spam-senders`. Reopen changed IDs to verify
+`spam` and `archived` flags. Owned addresses and outbound mail cannot be blocked.
+See [Spam behavior](../cmail-spam.md); local historical spam commands stay retired.
 Cloud sending supports plain text, To/CC/BCC, reply headers and configured logo signatures.
 For branded identities, the server also saves an HTML alternative when the configured
 signature remains at the end of the text. Editing or omitting that signature preserves

@@ -14,7 +14,7 @@ export async function handleAgent(queue, request) {
     const identities = Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item));
     if (action === 'status') return json({ system: 'cmail-cloud', website: 'https://cmail.frg.earth', ready: true,
       drafts: (await queue.state.storage.get('cmail-drafts-v1:count:*')) || 0, identities,
-      capabilities: ['messages', 'search', 'threads', 'raw', 'attachments-read', 'drafts', 'send', 'read-state', 'archive'] });
+      capabilities: ['messages', 'search', 'threads', 'raw', 'attachments-read', 'drafts', 'send', 'read-state', 'archive', 'spam'] });
     if (action === 'identities') return json({ identities });
     // Append-only ingestion cursor for the local Life Ops projection. Ordinary
     // mailbox reads use the bounded indexes above, never this raw export.
@@ -41,8 +41,9 @@ export async function handleAgent(queue, request) {
     }
     if (action === 'conversation') return json(await queue.views.conversation({ id: p.id }));
     if (action === 'contacts') return json(await queue.contacts.list(p));
+    if (action === 'spam-senders') return json(await queue.spam.list(p));
     if (action === 'message-action') {
-      if (!['read', 'unread', 'archive', 'unarchive'].includes(p.action)) return json({ error: 'unsupported_action' }, 400);
+      if (!['read', 'unread', 'archive', 'unarchive', 'spam', 'not-spam'].includes(p.action)) return json({ error: 'unsupported_action' }, 400);
       const result = await queue.applyAction({ ids: p.ids, action: p.action });
       return json(result || { error: 'message_not_found' }, result ? 200 : 404);
     }

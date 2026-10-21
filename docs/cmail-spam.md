@@ -1,59 +1,77 @@
-# CMAIL Spam
+# C-mail Spam
 
-CMAIL routing update, October 20, 2026: the active mailbox and Drafts are at
-https://cmail.frg.earth and the installed `cmail` command. Follow
-[the current CMAIL agent guide](cmail-agent/README.md). Local mail UI/API, local draft
-and direct-provider sending examples in older sections are historical. Local
-communication records remain Life Ops follow-up projections.
+C-mail cloud at https://cmail.frg.earth is the active Spam system. The website
+and installed `cmail` command share the same messages, folder and sender rules.
 
-Open a message and choose **Move sender to Spam**, review the address, then choose
-**Move sender to Spam** in the dialog. You can also open **Spam → Manage senders**
-and enter an address directly. Rules match an exact email address, ignoring case,
-across CMAIL inbox identities. They cover existing and future correspondence,
-including the saved conversation history with that address.
+## Use Spam
 
-**Restore sender**, **Restore** in the Spam list, or **Restore** in Manage senders
-removes the rule and returns the correspondence to the main view. Spam remains
-searchable and readable. Back and Escape close the dialog and restore focus;
-Escape from an unselected Spam folder returns to Correspondence.
+Open an incoming message and choose **Mark as spam**, or check several messages
+and choose **Actions → Mark as spam**. The selected messages leave Inbox or
+Archive and appear in **Spam** in the folder selector. Future incoming mail from
+those exact From addresses goes directly to Spam across all C-mail inboxes.
+Rules ignore address case. They do not match an entire domain, display name,
+Reply-To address, subdomain or plus-address variation. Owned sending addresses
+and outgoing messages cannot be marked as spam.
 
-Rules are local CMAIL preferences. They do not unsubscribe, reject delivery,
-delete messages, alter attachments, mark obligations complete, or modify Gmail
-provider labels. Existing deliberate job, bill and manual obligations retain their
-canonical state. Spam is excluded from CMAIL mail-review candidates, mail-derived
-communication-loop reminders, and Day Sheet mail lists. A conversation involving
-an unblocked person's evidence remains visible. Removing a rule restores the
-original mail-follow-up state.
+Choose **Spam** to search, read or download caught mail. **Not spam**, in the
+reader or bulk Actions, restores selected messages to Inbox and removes their
+sender rules. Other messages previously caught remain in Spam until restored.
+Older messages from a newly blocked sender remain where they were unless you
+select them too. All mail retains every message and labels spam; Sent and thread
+history remain intact. Normal Archive preserves Spam, and Move to inbox asks
+for Not spam when the selection contains Spam.
 
-Automated billing candidate selection and job-review reconciliation also honor
-Spam. Spam-only evidence cannot create, reopen, rewrite or resolve a job item;
-existing explicit job and bill obligations remain intact.
+There is no automatic deletion or expiry. These controls do not send mail,
+unsubscribe, reject delivery, change Gmail, or complete Life Ops obligations.
 
-## Storage and compatibility
+## Agent commands
 
-`life_ops.mail_spam` owns sender-rule normalization and matching. It reuses
-`sync_state["mail_ui:hidden_contacts"]`, which is already included in CMAIL runtime
-sealing and encrypted backups. New keys are `sender:<lowercase-email>`. Existing
-Hidden keys retain their original inbox scope until explicitly replaced or
-restored; the visible Hidden tab is now named Spam. No message schema or provider
-migration is needed. The `hidden` mailbox API and stored view remain compatible;
-`mailbox=spam` and `view=spam` are accepted aliases.
+Read [the canonical agent guide](cmail-agent/README.md). Classifying specific
+mail requires Cody's authorization, just like archiving it.
 
-- `GET /api/spam/senders`: list sender rules.
-- `POST /api/spam/senders` with `{"sender":"sender@example.com"}`: add a rule.
-- `POST /api/spam/senders/remove` with `{"id":"sender:sender@example.com"}`:
-  remove a rule.
+```sh
+cmail spam MAIL_ID [MAIL_ID ...]
+cmail messages --view spam
+cmail search --view spam --query 'sender or subject'
+cmail spam-senders
+cmail not-spam MAIL_ID [MAIL_ID ...]
+```
 
-Mutations require the existing local/same-origin or verified private-tailnet
-request boundary. Rule edits serialize their read/modify/write transaction.
-Restoration preserves bodies, statuses, dates, unread state and attachments.
-Rule edits invalidate the mailbox snapshots and caches. Other devices pick up
-changes during their regular mailbox refresh.
+List/search commands support bounded pages and cursors. `spam-senders` lists
+active rules and their original message IDs; it also supports `--cursor` and
+`--limit`. Reopen changed message IDs to verify the returned `spam` and `archived`
+flags. Reads alone do not classify, restore or mark messages read.
+
+## Implementation
+
+`packages/cmail-cloud/src/spam.mjs` owns exact-sender rules. Addresses are hashed
+in storage keys and encrypted in values using the existing archive key. Spam
+flags, sender-rule changes, folder indexes and counts commit atomically. Rules
+are checked within the incoming-message transaction, and provider replays retain
+the original message's current state. Restarting the Worker preserves the rules.
+
+Spam uses the existing newest-first mailbox index and bounded search. Incoming
+mail adds one point lookup for an eligible sender; it does not scan old mail.
+Inbox and Spam listing retain the existing number of database requests. All mail
+and Sent read one additional boolean per message in the existing batched state
+read. The release needs no full archive migration or new provider service.
+
+Original MIME, bodies, attachments, dates and read flags are preserved by Spam
+and Not spam. Selected legacy records lacking direction metadata may load their
+original envelope once during action validation; ordinary folder reads never
+load MIME. The entire selection is validated before changing a rule or message.
+
+## Historical local system
+
+The pre-October-20 local CMAIL Spam implementation and its preferences belong to
+the retired local system. Its `/api/spam/senders` endpoints and local database
+commands are not active cloud routes. This release does not import or activate
+those historical preferences. Use the cloud folder and commands above.
 
 ## Verification
 
-`tests.test_mail_spam` covers current/future messages, provider replay, exact
-matching, Resend inbound and inbox identities, legacy rules, concurrent edits,
-restart persistence, HTTP operations and origin rejection, and reversible
-suppression in mail review, the Day Sheet and Home. The September 23 deployment
-record and synthetic browser fixture are in `docs/qa/cmail-spam-2026-09-23/`.
+See [the release plan](qa/cmail-spam-cloud-2026-10-21/PLAN.md) and
+[verification record](qa/cmail-spam-cloud-2026-10-21/VERIFICATION.md). Isolated
+fixtures cover current/future classification, exact matching, duplicates,
+concurrent actions, encrypted persistence, atomic failures, restoration,
+authentication, bounded folder reads and browser navigation.

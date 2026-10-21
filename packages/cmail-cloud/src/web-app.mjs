@@ -31,6 +31,17 @@ ${formatMessage(message)}`).join("\n\n");
   messageFormat.textContent = 'Original text'; messageFormat.setAttribute('aria-pressed', 'false');
   messageFormat.title = 'Show the original text and spacing';
   $('copyThread').after(messageFormat);
+  const spamToggle = document.createElement('button');
+  spamToggle.id = 'toggleSpam'; spamToggle.type = 'button'; spamToggle.className = 'quiet';
+  $('toggleRead').before(spamToggle);
+  for (const [action, label] of [['spam', 'Mark as spam'], ['not-spam', 'Not spam']]) {
+    const button = document.createElement('button'); button.type = 'button'; button.dataset.action = action; button.textContent = label;
+    button.title = action === 'spam' ? 'Move selected mail to Spam and filter future mail from these exact senders across all inboxes' : 'Move selected mail to Inbox and stop filtering its senders';
+    $('actionsMenu').append(button);
+  }
+  const spamHelp = document.createElement('p'); spamHelp.id = 'spamHelp'; spamHelp.className = 'notice'; spamHelp.hidden = true;
+  spamHelp.textContent = 'Mark as spam also filters future mail from that exact sender. Not spam restores selected mail and removes the sender rule.';
+  $('notice').before(spamHelp);
   var cursor = null;
   var selectedId = null;
   var requestGeneration = 0;
@@ -92,18 +103,20 @@ ${formatMessage(message)}`).join("\n\n");
       $("mailbox").append(option);
     }
     updateInboxLabel();
+    updateReadControl();
   }
   function updateInboxLabel() {
     const mailbox = $("mailbox").value;
     const view = $("mailView").value;
+    spamHelp.hidden = view !== 'spam';
     if (view === 'drafts') {
       $("inboxTitle").textContent = 'Drafts'; $("search").placeholder = 'Search draft subjects and recipients';
       return;
     }
-    $("inboxTitle").textContent = view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : mailbox ? "Inbox" : "All inboxes";
-    $("search").placeholder = view === "sent" ? "Search sent conversations" : view === "archive" ? "Search archive" : view === "all" ? "Search all mail" : mailbox ? "Search this inbox" : "Search all inboxes";
+    $("inboxTitle").textContent = view === 'spam' ? 'Spam' : view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : mailbox ? "Inbox" : "All inboxes";
+    $("search").placeholder = view === 'spam' ? 'Search spam' : view === "sent" ? "Search sent conversations" : view === "archive" ? "Search archive" : view === "all" ? "Search all mail" : mailbox ? "Search this inbox" : "Search all inboxes";
     $("inboxTitle").title = mailbox || "All connected addresses";
-    $("back").querySelector("span").textContent = view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : "Inbox";
+    $("back").querySelector("span").textContent = view === 'spam' ? 'Spam' : view === "sent" ? "Sent" : view === "archive" ? "Archive" : view === "all" ? "All mail" : "Inbox";
     document.querySelector("main.inbox").setAttribute("aria-label", $("inboxTitle").textContent);
   }
   function closeMessage() {
@@ -183,6 +196,9 @@ ${formatMessage(message)}`).join("\n\n");
       throw new Error("Your session has expired. Reload this page to sign in again.");
     }
     if (!result.ok || !result.headers.get("content-type")?.includes("application/json")) {
+      const error = await result.json().catch(() => ({}));
+      if (error.error === 'sender_cannot_be_blocked') throw new Error('Your selection includes an outgoing message or an address that cannot be blocked. Choose incoming mail from an external sender.');
+      if (error.error === 'use_not_spam_to_restore') throw new Error('Your selection includes Spam. Choose Not spam to restore it and remove its sender rule.');
       throw new Error("Your mail is temporarily unavailable. Please try Refresh.");
     }
     return result.json();
@@ -212,6 +228,7 @@ ${formatMessage(message)}`).join("\n\n");
     row.classList.toggle("selected", item.id === selectedId);
     row.dataset.read = String(Boolean(item.read));
     row.classList.toggle("checked", checkedIds.has(item.id));
+    row.querySelector('.row-mailbox').textContent = item.mailbox + (item.spam ? ' · Spam' : '');
     const checkbox = row.querySelector("input");
     checkbox.checked = checkedIds.has(item.id);
     checkbox.disabled = bulkBusy;
@@ -262,8 +279,12 @@ ${formatMessage(message)}`).join("\n\n");
     $("actionsButton").disabled = !count || loading || bulkBusy || [...checkedIds].some((id) => pendingReadIds.has(id));
     $("actionsButton").textContent = bulkBusy ? "Saving\u2026" : "Actions \u2304";
     $("actionsButton").title = loading ? "Wait for loading to finish, or choose Stop." : "Actions for checked messages";
-    document.querySelector('[data-action="archive"]').hidden = $("mailView").value === "archive";
-    document.querySelector('[data-action="unarchive"]').hidden = $("mailView").value === "inbox";
+    const selected = items.filter((item) => checkedIds.has(item.id));
+    const hasSpam = selected.some((item) => item.spam);
+    document.querySelector('[data-action="archive"]').hidden = hasSpam || ['archive', 'spam'].includes($("mailView").value);
+    document.querySelector('[data-action="unarchive"]').hidden = hasSpam || ['inbox', 'spam'].includes($("mailView").value);
+    document.querySelector('[data-action="spam"]').hidden = selected.length > 0 && selected.every((item) => item.spam);
+    document.querySelector('[data-action="not-spam"]').hidden = !hasSpam;
     for (const id of ["mailbox", "mailView", "pageSize", "search", "after", "before", "applyDates", "clearDates"]) $(id).disabled = bulkBusy;
     $("refresh").disabled = bulkBusy || loading;
   }
@@ -284,7 +305,7 @@ ${formatMessage(message)}`).join("\n\n");
       renderedIds = ids;
       visible.forEach(appendRow);
       if (!visible.length) {
-        const text = loading ? isSearching() ? "Searching your mail\u2026 Results will appear as they are found." : "Loading messages\u2026" : interrupted ? "Loading has not finished. Choose Continue to keep looking." : failed ? "Some messages could not be loaded. Results may be incomplete." : isSearching() ? "No messages match these filters." : $("mailView").value === "sent" ? "No sent conversations in this view." : $("mailView").value === "archive" ? "No archived messages in this view." : "No messages in this inbox.";
+        const text = loading ? isSearching() ? "Searching your mail\u2026 Results will appear as they are found." : "Loading messages\u2026" : interrupted ? "Loading has not finished. Choose Continue to keep looking." : failed ? "Some messages could not be loaded. Results may be incomplete." : isSearching() ? "No messages match these filters." : $("mailView").value === 'spam' ? 'No spam in this view.' : $("mailView").value === "sent" ? "No sent conversations in this view." : $("mailView").value === "archive" ? "No archived messages in this view." : "No messages in this inbox.";
         addText($("messages"), "div", "empty-list", text);
       }
     } else {
@@ -389,6 +410,7 @@ ${formatMessage(message)}`).join("\n\n");
         loading = false;
         $("refresh").disabled = false;
         renderList();
+        updateReadControl();
       }
     }
   }
@@ -406,6 +428,12 @@ ${formatMessage(message)}`).join("\n\n");
     if (!selectedMessage) return;
     $("toggleRead").disabled = bulkBusy || pendingReadIds.has(selectedMessage.id);
     $("toggleRead").textContent = pendingReadIds.has(selectedMessage.id) ? "Saving\u2026" : selectedMessage.read ? "Mark unread" : "Mark read";
+    const sender = String(selectedMessage.from?.address || '').toLowerCase();
+    spamToggle.hidden = !sender || !selectedMessage.spam && (knownMailboxes.has(sender) || selectedMessage.direction === 'outbound');
+    spamToggle.disabled = bulkBusy || loading || pendingReadIds.has(selectedMessage.id);
+    spamToggle.textContent = selectedMessage.spam ? 'Not spam' : 'Mark as spam';
+    spamToggle.title = selectedMessage.spam ? 'Move this message to Inbox and stop filtering ' + sender : 'Move this message to Spam and filter future mail from ' + sender + ' across all inboxes';
+    $('messageMailbox').textContent = selectedMessage.mailbox + (selectedMessage.spam ? ' · Spam' : '');
   }
   async function setReadState(id, read) {
     if (pendingReadIds.has(id) || signingOut || bulkBusy) return;
@@ -441,9 +469,10 @@ ${formatMessage(message)}`).join("\n\n");
       }
     }
   }
-  async function applyBulkAction(action) {
-    if (!checkedIds.size || $("actionsButton").disabled || signingOut) return;
-    const ids = [...checkedIds];
+  const inFolder = (item, view) => view === 'spam' ? Boolean(item.spam) : view === 'inbox' ? !item.archived && !item.spam : view === 'archive' ? item.archived && !item.spam : true;
+  async function applyBulkAction(action, explicitIds) {
+    const ids = explicitIds || [...checkedIds];
+    if (!ids.length || loading || bulkBusy || signingOut || ids.some((id) => pendingReadIds.has(id))) return;
     bulkBusy = true;
     readingGeneration += 1;
     closeActions();
@@ -461,19 +490,18 @@ ${formatMessage(message)}`).join("\n\n");
       for (const state of result.items) {
         const item = items.find((item2) => item2.id === state.id);
         if (item) {
-          const archiveDelta = Number(state.archived) - Number(Boolean(item.archived));
-          if (totalView !== null && ["inbox", "archive"].includes(activeFilters.view)) totalView += activeFilters.view === "archive" ? archiveDelta : -archiveDelta;
+          if (totalView !== null && ["inbox", "archive", "spam"].includes(activeFilters.view)) totalView += Number(inFolder(state, activeFilters.view)) - Number(inFolder(item, activeFilters.view));
           Object.assign(item, state);
         }
         readStateOverrides.set(state.id, state.read);
         if (selectedMessage?.id === state.id) Object.assign(selectedMessage, state);
       }
-      if (action === "archive" || action === "unarchive") {
-        items = items.filter((item) => ["all", "sent"].includes(activeFilters.view) || item.archived === (activeFilters.view === "archive"));
+      if (['archive', 'unarchive', 'spam', 'not-spam'].includes(action)) {
+        items = items.filter((item) => inFolder(item, activeFilters.view));
         if (ids.includes(selectedId)) closeMessage();
         pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(items.length / pageSize) - 1));
       }
-      checkedIds.clear();
+      for (const id of ids) checkedIds.delete(id);
       succeeded = true;
     } catch (error) {
       const detail = error.message.startsWith("Your ") ? error.message : "Check your connection and try again.";
@@ -484,8 +512,9 @@ ${formatMessage(message)}`).join("\n\n");
         renderList();
         updateReadControl();
         if (succeeded) {
-          const label = { read: "Marked read", unread: "Marked unread", archive: "Archived", unarchive: "Moved to inbox" }[action];
-          actionStatus(`${label}: ${ids.length} ${ids.length === 1 ? "message" : "messages"}.`);
+          const label = { read: "Marked read", unread: "Marked unread", archive: "Archived", unarchive: "Moved to inbox", spam: 'Moved to Spam', 'not-spam': 'Moved to Inbox' }[action];
+          actionStatus(`${label}: ${ids.length} ${ids.length === 1 ? "message" : "messages"}.` + (action === 'spam' ? ' Future mail from these senders will go to Spam.' : action === 'not-spam' ? ' Sender rules removed.' : ''));
+          if (explicitIds && !selectedId) document.querySelector('.message-open')?.focus();
           if (!exhausted && !interrupted && items.length < (pageIndex + 1) * pageSize + 1) load();
         }
       }
@@ -710,6 +739,7 @@ ${formatMessage(message)}`).join("\n\n");
   $("toggleRead").addEventListener("click", () => {
     if (selectedMessage) setReadState(selectedMessage.id, !selectedMessage.read);
   });
+  spamToggle.addEventListener('click', () => { if (selectedMessage) applyBulkAction(selectedMessage.spam ? 'not-spam' : 'spam', [selectedMessage.id]); });
   $("copyMessage").addEventListener("click", () => {
     if (selectedMessage) copyText(formatMessage(selectedMessage), $("copyMessage"), "Message");
   });
@@ -781,7 +811,7 @@ ${formatMessage(message)}`).join("\n\n");
   window.addEventListener("hashchange", openLinkedMessage);
   var initialMailbox = new URLSearchParams(window.location.search).get("mailbox") || "";
   var initialView = new URLSearchParams(window.location.search).get("view");
-  if (["inbox", "sent", "archive", "all", "drafts"].includes(initialView) && [...$("mailView").options].some((option) => option.value === initialView)) $("mailView").value = initialView;
+    if (["inbox", "sent", "archive", "all", "drafts", "spam"].includes(initialView) && [...$("mailView").options].some((option) => option.value === initialView)) $("mailView").value = initialView;
   if (initialMailbox) {
     addMailboxes([initialMailbox]);
     $("mailbox").value = initialMailbox.trim().toLowerCase();

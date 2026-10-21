@@ -68,13 +68,14 @@ export function withReplies(worker, checkAccess = authorize) {
         let html = (await response.text()).replace('</head>', '<link rel="stylesheet" href="/cmail/reply.css"><script src="/cmail/reply.js" defer></script></head>');
         if (env.CMAIL_COMPOSE_ENABLED === '1') html = html.replace('</head>', '<link rel="stylesheet" href="/cmail/compose.css"><script src="/cmail/compose.js" defer></script></head>');
         if (env.CMAIL_SENT_ENABLED === '1') html = html.replace('<option value="archive">Archive</option>', '<option value="sent">Sent</option><option value="archive">Archive</option>');
+        if (env.CMAIL_FAST_READS === '1') html = html.replace('<option value="all">All mail</option>', '<option value="spam">Spam</option><option value="all">All mail</option>');
         const headers = new Headers(response.headers);
         const logos = [...new Set(Object.values(sendingIdentities(env)).map((item) => signatureLogo(item)?.url).filter(Boolean))];
         if (logos.length) headers.set('Content-Security-Policy', headers.get('Content-Security-Policy').replace("img-src 'self'", "img-src 'self' " + logos.join(' ')));
         return new Response(html, { status: response.status, headers });
       }
       if (url.pathname === '/cmail/api/session') {
-        return json({ ...await response.json(), read_only: false, reply_enabled: true, sent_enabled: env.CMAIL_SENT_ENABLED === '1', compose_enabled: env.CMAIL_COMPOSE_ENABLED === '1' });
+        return json({ ...await response.json(), read_only: false, reply_enabled: true, sent_enabled: env.CMAIL_SENT_ENABLED === '1', compose_enabled: env.CMAIL_COMPOSE_ENABLED === '1', spam_enabled: env.CMAIL_FAST_READS === '1' });
       }
       return response;
     },

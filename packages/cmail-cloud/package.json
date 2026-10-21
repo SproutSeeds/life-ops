@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/index.mjs && node --check src/resend.mjs && node --check src/reply.mjs && node --check src/reply-http.mjs && node --check src/reply-ui.mjs && node --check src/mail-index.mjs && node --check src/web-app.mjs && node --check src/sent-index.mjs && node --check src/contact-index.mjs && node --check src/compose-ui.mjs && node --check src/draft-store.mjs && node --check src/draft-http.mjs && node --check src/drafts-ui.mjs && node --check src/agent-api.mjs && node --check src/signature.mjs && node --check src/message-format.mjs"
+    "check": "node --check src/index.mjs && node --check src/resend.mjs && node --check src/reply.mjs && node --check src/reply-http.mjs && node --check src/reply-ui.mjs && node --check src/mail-index.mjs && node --check src/web-app.mjs && node --check src/sent-index.mjs && node --check src/contact-index.mjs && node --check src/compose-ui.mjs && node --check src/draft-store.mjs && node --check src/draft-http.mjs && node --check src/drafts-ui.mjs && node --check src/agent-api.mjs && node --check src/signature.mjs && node --check src/message-format.mjs && node --check src/spam.mjs"
   }
 }

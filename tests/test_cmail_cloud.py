@@ -48,6 +48,17 @@ class CloudMailTests(unittest.TestCase):
         with patch.object(cloud, "request", side_effect=RuntimeError("cloud unavailable")), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cloud.main(["drafts"]), 1)
 
+    def test_spam_commands_use_the_same_cloud_actions_and_search_folder(self):
+        with patch.object(cloud, "request", return_value={"items": []}) as api, contextlib.redirect_stdout(io.StringIO()):
+            message = "mail_0000000000000001"
+            for action in ["spam", "not-spam"]:
+                self.assertEqual(cloud.main([action, message]), 0)
+                api.assert_called_with("message-action", {"ids": [message], "action": action})
+            self.assertEqual(cloud.main(["search", "--view", "spam", "--query", "sender"]), 0)
+            self.assertEqual(api.call_args.args[1]["view"], "spam")
+            self.assertEqual(cloud.main(["spam-senders"]), 0)
+            self.assertEqual(api.call_args.args[0], "spam-senders")
+
     def test_save_requires_stable_id_and_send_requires_confirmation_and_revision(self):
         with patch.object(cloud, "request") as api, contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cloud.main(["draft-save", "--to", "person@example.test"]), 1)

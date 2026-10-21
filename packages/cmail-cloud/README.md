@@ -14,6 +14,25 @@ Choose **Drafts** in the Inbox/Sent selector and **New draft** to start a saved
 email. **Save draft** keeps it without sending; **Save & close** saves and returns
 to the mailbox. Multiple drafts and reply drafts can be reopened later.
 
+## Spam
+
+**Mark as spam** in the reader or bulk Actions moves selected messages to the
+**Spam** folder and filters future incoming mail from their exact From addresses
+across inboxes. **Not spam** restores selected mail to Inbox and removes its
+sender rule. Other previously caught messages remain in Spam until restored.
+Owned addresses and outgoing messages are protected. All mail labels Spam while
+retaining complete history; ordinary Archive keeps Spam quarantined.
+
+`src/spam.mjs` stores encrypted exact-address rules under hashed keys. Ingestion
+checks the rule in the same transaction as mail and folder writes. Indexes and
+counts move atomically on classification and restoration, with no full scan or
+schema migration. Spam shares the canonical agent `message-action` route and
+`cmail spam`, `cmail not-spam`, `cmail spam-senders` and `--view spam` commands.
+See [the Spam guide](../../docs/cmail-spam.md) for semantics and legacy routing.
+The network-isolated `scripts/spam-runtime-smoke.mjs` accepts the Miniflare module
+path and `--serve`, matching the other runtime scripts. Its delivery/failure
+controls and browser fixture are excluded from production uploads.
+
 ## Readable incoming mail
 
 The reader formats the existing plain-text message into compact paragraphs.

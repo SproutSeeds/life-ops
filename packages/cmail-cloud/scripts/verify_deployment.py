@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--require-compose", action="store_true")
     parser.add_argument("--require-drafts", action="store_true")
     parser.add_argument("--require-agent", action="store_true")
+    parser.add_argument("--require-spam", action="store_true")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
     key = credentials.resolve_secret(name="CLOUDFLARE_API_TOKEN")
@@ -80,8 +81,20 @@ def main():
             worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret,
             path="/api/mail/agent", payload={"action": "status"})
         assert agent["system"] == "cmail-cloud" and agent["ready"]
-    def signed(path):
-        return cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path=path, payload={})
+    def signed(path, payload=None):
+        return cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path=path, payload=payload or {})
+    spam = None
+    if args.require_spam:
+        status = agent or signed("/api/mail/agent", {"action": "status"})
+        assert "spam" in status["capabilities"]
+        page = signed("/api/mail/agent", {"action": "messages", "parameters": {"view": "spam", "limit": 1}})
+        rules = signed("/api/mail/agent", {"action": "spam-senders", "parameters": {"limit": 1}})
+        assert page["indexed"] and all(item["spam"] and item["archived"] for item in page["items"])
+        assert isinstance(rules["items"], list)
+        protected["spam_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/messages?view=spam")
+        protected["message_actions"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/messages/actions", "POST")
+        assert protected["spam_api"] == protected["message_actions"] == 302
+        spam = {"ready": True, "messages": page["total_view"], "rule_page_count": len(rules["items"]), "more_rules": bool(rules["next_cursor"])}
     sync = signed("/api/mail/resend/status")
     queue = signed("/api/mail/queue/status")
     index = None
@@ -119,7 +132,7 @@ def main():
     result = {"checked_at": datetime.now(timezone.utc).isoformat(), "version": deployment["versions"][0]["version_id"],
               "source_sha256": actual, "existing_namespace_verified": True, "mailboxes": mailboxes,
               "authentication": protected, "schedules": schedules, "scheduled_verified": scheduled_fresh and sync["status"] == "healthy", "sync": sync, "queue": queue, "index": index, "sent": sent, "contacts": contacts, "drafts": drafts,
-              "agent": {key: agent[key] for key in ["system", "ready", "drafts", "capabilities"]} if agent else None}
+              "agent": {key: agent[key] for key in ["system", "ready", "drafts", "capabilities"]} if agent else None, "spam": spam}
     target = args.receipt_dir / "production-verification.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded(result) + b"\n")

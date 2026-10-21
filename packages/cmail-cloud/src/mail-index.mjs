@@ -41,7 +41,7 @@ export class MailIndex {
     const mailbox = String(payload.envelope_to || '').trim().toLowerCase();
     const date = Number.isFinite(Date.parse(payload.received_at)) ? new Date(payload.received_at).toISOString() : new Date(0).toISOString();
     const tokens = [...new Set([...messageTokens(parsed.messageId), ...messageTokens(parsed.inReplyTo), ...messageTokens(parsed.references)])];
-    const summary = { received_at: date, date: parsed.date || date, from: address(parsed.from) || String(payload.envelope_from || ''),
+    const summary = { received_at: date, date: parsed.date || date, direction: payload.direction === 'outbound' ? 'outbound' : 'inbound', from: address(parsed.from) || String(payload.envelope_from || ''),
       to: (parsed.to || []).map(address).join(', ') || mailbox, mailbox, subject: parsed.subject || '(No subject)',
       message_id: parsed.messageId || '', in_reply_to: parsed.inReplyTo || '', references: parsed.references || '' };
     const body = { ...summary, from: parsed.from, to: parsed.to || [], cc: parsed.cc || [], reply_to: parsed.replyTo || [],
@@ -50,7 +50,7 @@ export class MailIndex {
     return { summary, body, locator: { date, scope: await digest(mailbox), tokens: await Promise.all(tokens.map(digest)) } };
   }
 
-  async put(storage, record, prepared, archived) {
+  async put(storage, record, prepared, archived, spam = false) {
     if (await storage.get(locatorKey(record.id))) return false;
     const { summary, body, locator } = prepared;
     const suffix = `${locator.date}:${record.id}`;
@@ -63,9 +63,10 @@ export class MailIndex {
     entries[bodyKey(record.id)] = JSON.stringify(bodyEnvelope).length < 90000 ? { payload_encrypted: bodyEnvelope }
       : { payload_ref: await storeArchiveEnvelope({ storage, id: `view_${record.id}`, envelope: bodyEnvelope }) };
     const scopes = ['*', locator.scope];
-    const keys = scopes.flatMap((scope) => ['all', archived ? 'archive' : 'inbox'].map((view) => countKey(scope, view)));
+    const folder = spam ? 'spam' : archived ? 'archive' : 'inbox';
+    const keys = scopes.flatMap((scope) => ['all', folder].map((view) => countKey(scope, view)));
     const counts = await getMany(storage, keys);
-    for (const scope of scopes) for (const view of ['all', archived ? 'archive' : 'inbox']) {
+    for (const scope of scopes) for (const view of ['all', folder]) {
       entries[orderPrefix(scope, view) + suffix] = record.id;
       entries[countKey(scope, view)] = Number(counts.get(countKey(scope, view)) || 0) + 1;
     }
@@ -74,11 +75,11 @@ export class MailIndex {
     return true;
   }
 
-  async moveArchive(storage, id, previous, archived) {
-    if (previous === archived) return;
+  async moveArchive(storage, id, previous, archived, previousSpam = false, spam = previousSpam) {
+    const from = previousSpam ? 'spam' : previous ? 'archive' : 'inbox', to = spam ? 'spam' : archived ? 'archive' : 'inbox';
+    if (from === to) return;
     const locator = await storage.get(locatorKey(id));
     if (!locator) return; // Backfill reads the authoritative flags at commit.
-    const from = previous ? 'archive' : 'inbox', to = archived ? 'archive' : 'inbox';
     const scopes = ['*', locator.scope];
     const keys = scopes.flatMap((scope) => [countKey(scope, from), countKey(scope, to)]);
     const counts = await getMany(storage, keys);
@@ -118,8 +119,10 @@ export class MailIndex {
     return ids.map((id) => values.get(id));
   }
   async states(ids, view = 'all') {
-    const values = await getMany(this.storage, ids.flatMap((id) => view === 'all' ? [`cmail-read:${id}`, `cmail-archived:${id}`] : [`cmail-read:${id}`]));
-    return new Map(ids.map((id) => [id, { read: values.get(`cmail-read:${id}`) === true, archived: view === 'all' ? values.get(`cmail-archived:${id}`) === true : view === 'archive' }]));
+    const values = await getMany(this.storage, ids.flatMap((id) => view === 'all' ? [`cmail-read:${id}`, `cmail-archived:${id}`, `cmail-spam:${id}`] : [`cmail-read:${id}`]));
+    return new Map(ids.map((id) => [id, { read: values.get(`cmail-read:${id}`) === true,
+      archived: view === 'all' ? values.get(`cmail-archived:${id}`) === true : ['archive', 'spam'].includes(view),
+      spam: view === 'all' ? values.get(`cmail-spam:${id}`) === true : view === 'spam' }]));
   }
   async body(id, prefetched) {
     if (this.bodyCache.has(id)) return this.bodyCache.get(id).value;
@@ -147,7 +150,7 @@ export class MailIndex {
     const query = String(parameters.query || '').trim().toLowerCase(), mailbox = String(parameters.mailbox || '').trim().toLowerCase();
     const view = parameters.view || 'inbox', cursor = parameters.cursor || '', after = parameters.after || '', before = parameters.before || '';
     const limit = Number(parameters.limit || 50);
-    if (query.length > 200 || mailbox.length > 254 || !['all', 'inbox', 'archive'].includes(view) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || cursor && !ID.test(cursor) || [after, before].some((v) => v && (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))))) throw bad();
+    if (query.length > 200 || mailbox.length > 254 || !['all', 'inbox', 'archive', 'spam'].includes(view) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || cursor && !ID.test(cursor) || [after, before].some((v) => v && (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))))) throw bad();
     const scope = mailbox ? await digest(mailbox) : '*', prefix = orderPrefix(scope, view);
     const counts = await getMany(this.storage, [...new Set(['meta', countKey(scope, view), countKey('*', 'all')])]);
     if (Number(counts.get('meta')?.total_stored || 0) !== Number(counts.get(countKey('*', 'all')) || 0)) throw bad('mail_index_warming', 503);
@@ -236,7 +239,7 @@ export class MailIndex {
       if (!await this.storage.get(locatorKey(record.id))) {
         const prepared = await this.prepare({ ...await this.queue.loadPayload(record), received_at: record.received_at });
         await this.storage.transaction(async (tx) => {
-          if (await this.put(tx, record, prepared, await tx.get(`cmail-archived:${record.id}`) === true)) imported++;
+          if (await this.put(tx, record, prepared, await tx.get(`cmail-archived:${record.id}`) === true, await tx.get(`cmail-spam:${record.id}`) === true)) imported++;
         });
       }
       await this.storage.put(PREFIX + 'build', { cursor: record.id, updated_at: new Date().toISOString() });

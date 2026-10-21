@@ -77,7 +77,8 @@ test('Sent uses bounded indexed pagination, mailbox/date filters and complete-th
   assert.deepEqual(seen, expected);
   const probe = await queue.performanceProbe({ parameters: { view: 'sent', mailbox: support, limit: 20 } });
   assert.equal(probe.raw_payload_loads, 0); assert.equal(probe.list_calls, 1); assert(probe.get_calls <= 4, JSON.stringify(probe));
-  assert(probe.keys_read <= 90, JSON.stringify(probe));
+  // Read, archived and Spam flags share the same batched state read.
+  assert(probe.keys_read <= 110, JSON.stringify(probe));
   const root = await add(151, { body: 'Needle in an older inbound message' });
   const response = await add(152, { outbound: true, references: '<sent-test-151@example.test>' });
   let matched = []; cursor = null;

@@ -172,14 +172,14 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ["status", "identities", "url", "open"]:
         sub.add_parser(name)
-    for name in ["messages", "search", "drafts", "contacts"]:
+    for name in ["messages", "search", "drafts", "contacts", "spam-senders"]:
         child = sub.add_parser(name)
         child.add_argument("--mailbox", "--identity", "--mail-identity", dest="mailbox")
         child.add_argument("--query", default="")
         child.add_argument("--cursor")
         child.add_argument("--limit", type=int, default=50)
         if name in {"messages", "search"}:
-            child.add_argument("--view", choices=["all", "inbox", "sent", "archive"], default="inbox")
+            child.add_argument("--view", choices=["all", "inbox", "sent", "archive", "spam"], default="inbox")
     for name in ["message", "thread", "reply-context", "draft"]:
         child = sub.add_parser(name)
         child.add_argument("id")
@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "draft-send":
             child.add_argument("--confirm-send", action="store_true", required=True,
                                help="Use only for a user-authorized send of this exact saved revision")
-    for name in ["read", "unread", "archive", "unarchive"]:
+    for name in ["read", "unread", "archive", "unarchive", "spam", "not-spam"]:
         child = sub.add_parser(name)
         child.add_argument("ids", nargs="+")
     args_in = list(argv if argv is not None else sys.argv[1:])
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 webbrowser.open(WEBSITE)
             print(WEBSITE)
             return 0
-        if action in {"messages", "search", "drafts", "contacts"}:
+        if action in {"messages", "search", "drafts", "contacts", "spam-senders"}:
             p = {"mailbox": address_for(args.mailbox), "query": args.query, "limit": args.limit}
             if args.cursor:
                 p["cursor"] = args.cursor
@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             p = {"id": resolve_draft_id(args.id), "revision": args.revision}
             if action == "draft-send":
                 p["confirm_send"] = args.confirm_send
-        elif action in {"read", "unread", "archive", "unarchive"}:
+        elif action in {"read", "unread", "archive", "unarchive", "spam", "not-spam"}:
             p = {"ids": args.ids, "action": action}
             action = "message-action"
         result = request(action, p)

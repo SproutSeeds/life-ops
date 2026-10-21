@@ -8,6 +8,7 @@ import { ContactIndex } from './contact-index.mjs';
 import { DraftStore, handleDrafts } from './draft-store.mjs';
 import { withDrafts } from './draft-http.mjs';
 import { handleAgent } from './agent-api.mjs';
+import { SpamStore } from './spam.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -33,6 +34,7 @@ export class MailQueue extends BaseQueue {
     this.sent = new SentIndex(this);
     this.contacts = new ContactIndex(this);
     this.drafts = new DraftStore(this);
+    this.spam = new SpamStore(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
 
@@ -80,12 +82,14 @@ export class MailQueue extends BaseQueue {
     const source = sourceKey(payload);
     const prepared = await this.views.prepare(payload);
     const contacts = await this.contacts.prepare(prepared.body, payload);
+    const sender = await this.spam.prepare(prepared.body, payload);
     return this.state.storage.transaction(async (storage) => {
       const existingId = source && await storage.get(source) || await storage.get(`dedupe:${fingerprint}`);
       if (existingId) {
         if (source) await storage.put(source, existingId);
         return { stored: false, duplicate: true, id: existingId };
       }
+      const isSpam = await this.spam.matches(storage, sender), archiveState = archived || isSpam;
       const meta = await storage.get('meta') || { next_seq: 0, total_stored: 0, total_acknowledged: 0 };
       const seq = Number(meta.next_seq || 0) + 1;
       const id = `mail_${String(seq).padStart(16, '0')}`;
@@ -103,14 +107,15 @@ export class MailQueue extends BaseQueue {
       await storage.put('cmail-date-count', Number(meta.total_stored || 0) + 1);
       if (!archiveOnly) await storage.put(`queue:${String(seq).padStart(16, '0')}`, id);
       if (read) await storage.put(`cmail-read:${id}`, true);
-      if (archived) {
+      if (isSpam) await storage.put(`cmail-spam:${id}`, true);
+      if (archiveState) {
         await storage.put(`cmail-archived:${id}`, true);
         await storage.put('cmail-archived-count', Number(await storage.get('cmail-archived-count') || 0) + 1);
       }
       await storage.put(`dedupe:${fingerprint}`, id);
       if (source) await storage.put(source, id);
       await storage.put('meta', { ...meta, next_seq: seq, total_stored: Number(meta.total_stored || 0) + 1, total_acknowledged: Number(meta.total_acknowledged || 0) + (archiveOnly ? 1 : 0) });
-      await this.views.put(storage, { id, received_at: receivedAt }, prepared, archived);
+      await this.views.put(storage, { id, received_at: receivedAt }, prepared, archiveState, isSpam);
       await this.sent.put(storage, id, prepared.locator, payload);
       await this.contacts.put(storage, id, contacts);
       return { stored: true, duplicate: false, id, seq, sha256: fingerprint };
@@ -119,6 +124,13 @@ export class MailQueue extends BaseQueue {
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path === '/archive/actions') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      try {
+        const result = await this.applyAction(await request.json());
+        return json(result || { error: 'message_not_found' }, result ? 200 : 404);
+      } catch (error) { return json({ error: error.status ? error.message : error.name === 'SyntaxError' ? 'invalid_request' : 'mail_state_unavailable' }, error.status || (error.name === 'SyntaxError' ? 400 : 503)); }
+    }
     if (path === '/agent/request') return handleAgent(this, request);
     if (path.startsWith('/drafts/')) return handleDrafts(this, request);
     if (path.startsWith('/contacts/')) {
@@ -223,20 +235,32 @@ export class MailQueue extends BaseQueue {
     return await this.views.message(parameters.id) || super.readArchiveMessage(parameters);
   }
   async applyAction({ ids, action } = {}) {
-    if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id) => !/^mail_\d{16}$/.test(id)) || new Set(ids).size !== ids.length || !['read', 'unread', 'archive', 'unarchive'].includes(action)) return super.applyAction({ ids, action });
+    if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id) => typeof id !== 'string' || !/^mail_\d{16}$/.test(id)) || new Set(ids).size !== ids.length || !['read', 'unread', 'archive', 'unarchive', 'spam', 'not-spam'].includes(action)) throw Object.assign(new Error('invalid_request'), { status: 400 });
+    const spamAction = action === 'spam' || action === 'not-spam', senders = new Map();
+    if (spamAction) {
+      await this.views.requireReady();
+      // Validate the entire selection before changing any sender rule or flag.
+      for (const id of ids) senders.set(id, await this.spam.forMessage(id, action === 'not-spam'));
+    }
     return this.state.storage.transaction(async (tx) => {
       for (const id of ids) if (!await tx.get(`mail:${id}`)) return null;
+      if (action === 'unarchive') for (const id of ids) if (await tx.get(`cmail-spam:${id}`) === true) throw Object.assign(new Error('use_not_spam_to_restore'), { status: 409 });
       let count = Number(await tx.get('cmail-archived-count') || 0);
       const items = [];
       for (const id of ids) {
-        let read = await tx.get(`cmail-read:${id}`) === true, archived = await tx.get(`cmail-archived:${id}`) === true;
+        let read = await tx.get(`cmail-read:${id}`) === true, archived = await tx.get(`cmail-archived:${id}`) === true, spam = await tx.get(`cmail-spam:${id}`) === true;
         if (action === 'read' || action === 'unread') { read = action === 'read'; await tx.put(`cmail-read:${id}`, read); }
         else {
-          const next = action === 'archive'; count += Number(next) - Number(archived);
-          await this.views.moveArchive(tx, id, archived, next); archived = next;
+          const nextSpam = spamAction ? action === 'spam' : spam;
+          const next = nextSpam || action === 'archive'; count += Number(next) - Number(archived);
+          if (spamAction) {
+            await this.spam.set(tx, senders.get(id), nextSpam, id);
+            await tx.put(`cmail-spam:${id}`, nextSpam);
+          }
+          await this.views.moveArchive(tx, id, archived, next, spam, nextSpam); archived = next; spam = nextSpam;
           await tx.put(`cmail-archived:${id}`, archived);
         }
-        items.push({ id, read, archived });
+        items.push({ id, read, archived, spam });
       }
       await tx.put('cmail-archived-count', Math.max(0, count));
       return { items };
@@ -253,7 +277,7 @@ export class MailQueue extends BaseQueue {
     } };
     facade.loadPayload = async (record) => { if (record.id?.startsWith('mail_')) metrics.raw_payload_loads++; return BaseQueue.prototype.loadPayload.call(facade, record); };
     const views = new MailIndex(facade);
-    facade.views = views; facade.sent = new SentIndex(facade); facade.contacts = new ContactIndex(facade); facade.drafts = new DraftStore(facade);
+    facade.views = views; facade.sent = new SentIndex(facade); facade.contacts = new ContactIndex(facade); facade.drafts = new DraftStore(facade); facade.spam = new SpamStore(facade);
     const started = performance.now();
     const result = operation === 'drafts' ? await facade.drafts.list(parameters) : operation === 'contacts' ? await facade.contacts.list(parameters) : legacy ? await (operation === 'list' ? BaseQueue.prototype.listArchive.call(facade, parameters) : operation === 'conversation' ? BaseQueue.prototype.listThreadIndex.call(facade, parameters) : BaseQueue.prototype.readArchiveMessage.call(facade, parameters))
       : await (operation === 'list' ? parameters.view === 'sent' ? facade.sent.list(parameters) : views.list(parameters) : operation === 'conversation' ? views.conversation(parameters) : views.message(parameters.id));
