@@ -38,6 +38,7 @@ If you are embedding Life Ops ideas into another codebase, reach for the SDK.
 
 - `bin/life-ops`: zero-install entrypoint for the CLI
 - `src/life_ops`: app code
+- [`cloud/cmail`](cloud/cmail/README.md): private cloud inbox for retained Cloudflare mail, with Mac and iPhone web app support
 - `docs/daily-weekly-flow.md`: recommended operating rhythm
 - `docs/calendar.md`: homemade calendar tracking, daily saves, and rollover workflow
 - `docs/apple-calendar.md`: Apple/iCloud `.ics` feed setup for local calendar imports
