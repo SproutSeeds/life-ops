@@ -1,0 +1,3 @@
+# Verified static encryption-purpose label, not a credential. Restrict the
+# exception to the historical commit, path, rule and line; keep all other scans.
+75e28965041f74e905befeec97f314c8f90855ae:src/life_ops/vault_crypto.py:generic-api-key:21
