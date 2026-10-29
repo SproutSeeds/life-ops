@@ -1,6 +1,7 @@
 import { PostalMime, sha256Hex, encryptArchivePayload, storeArchiveEnvelope } from './production-base.mjs';
 import { addresses, decodeRaw, encodeRaw } from './resend.mjs';
 import { brandedMessage, publicIdentity } from './signature.mjs';
+import { ATTACHMENT_LIMITS, BLOCKED_EXTENSIONS, attachToArchive } from './attachments.mjs';
 
 const MAIL_ID = /^mail_\d{16}$/;
 const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -104,7 +105,8 @@ function receipt(record) {
 
 async function archiveSent(queue, key, record, saved) {
   try {
-    const imported = await queue.enqueue({ ...saved.archive, provider_id: record.provider_id }, { archiveOnly: true, read: true, archived: true });
+    const archive = await attachToArchive(queue, saved.archive, saved.attachments, record.request_id);
+    const imported = await queue.enqueue({ ...archive, provider_id: record.provider_id }, { archiveOnly: true, read: true, archived: true });
     record = { ...record, state: 'sent', archive_id: imported.id, error: null };
     await queue.state.storage.put(key, record);
   } catch {
@@ -118,12 +120,15 @@ export const sendReply = (queue, input, options) => sendMessage(queue, input, { 
 export const sendCompose = (queue, input, options) => sendMessage(queue, input, { ...options, kind: 'compose' });
 
 async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind, html } = {}) {
-  if (kind === 'reply' && !MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
+  const attachments = await queue.attachments.validate(input.attachments);
+  if (kind === 'reply' && !MAIL_ID.test(input.id || '') || !REQUEST_ID.test(input.request_id || '') || typeof input.text !== 'string' || !input.text.trim() && !attachments.length || input.text.length > 100000 || input.text.includes('\0')) throw fail('invalid_reply');
   const composition = kind === 'compose' ? prepareCompose(queue, input) : null;
   const key = OUTBOX + input.request_id;
   const extended = composition && (composition.cc.length || composition.bcc.length || composition.in_reply_to || composition.references.length);
-  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify(composition ? [kind, composition.sender, composition.to, composition.subject, input.text,
-    ...(extended ? [composition.cc, composition.bcc, composition.in_reply_to, composition.references] : [])] : [input.id, input.text])));
+  const digestFields = composition ? [kind, composition.sender, composition.to, composition.subject, input.text,
+    ...(extended ? [composition.cc, composition.bcc, composition.in_reply_to, composition.references] : [])] : [input.id, input.text];
+  if (attachments.length) digestFields.push(attachments);
+  const digest = await sha256Hex(new TextEncoder().encode(JSON.stringify(digestFields)));
   let record = await queue.state.storage.get(key);
   if (record && ((record.kind || 'reply') !== kind || record.digest !== digest)) throw fail('reply_changed', 409);
   if (record?.state === 'sent' || record?.state === 'rejected') return receipt(record);
@@ -132,14 +137,18 @@ async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind
     saved = await queue.loadPayload(record);
   } else {
     const prepared = composition || await prepareReply(queue, input.id);
-    if (input.text.trim() === prepared.signature.trim()) throw fail('empty_reply');
+    if (input.text.trim() === prepared.signature.trim() && !attachments.length) throw fail('empty_reply');
     const createdAt = new Date(now()).toISOString();
     saved = makeMessage(prepared, input.text, input.request_id, createdAt, html);
+    if (attachments.length) saved.attachments = attachments;
     const envelope = await encryptArchivePayload({ masterKey: queue.env.LIFE_OPS_MASTER_KEY, purpose: 'cloudflare-mail-archive-v1', payload: saved,
       metadata: { id: `reply_${input.request_id}`, created_at: createdAt } });
     const payloadRef = await storeArchiveEnvelope({ storage: queue.state.storage, id: `reply_${input.request_id}`, envelope });
     record = { request_id: input.request_id, kind, ...(input.id ? { message_id: input.id } : {}), digest, created_at: createdAt, state: 'prepared', payload_ref: payloadRef };
-    await queue.state.storage.put(key, record);
+    await queue.state.storage.transaction(async (tx) => {
+      await queue.attachments.references(tx, key, [], attachments);
+      await tx.put(key, record);
+    });
   }
   if (record.provider_id) return archiveSent(queue, key, record, saved);
   // Resend retains its idempotency keys for 24 hours. An ambiguous older send
@@ -154,7 +163,7 @@ async function sendMessage(queue, input, { fetcher = fetch, now = Date.now, kind
     response = await fetcher('https://api.resend.com/emails', {
       method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(25000),
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `cmail-${kind}/${input.request_id}` },
-      body: JSON.stringify(saved.request),
+      body: JSON.stringify({ ...saved.request, ...(saved.attachments?.length ? { attachments: await queue.attachments.providerFiles(saved.attachments) } : {}) }),
     });
     const result = await response.json();
     if (!response.ok || !/^[a-f0-9-]{36}$/.test(result?.id || '')) {
@@ -177,7 +186,7 @@ export async function handleReply(queue, request) {
   try {
     const input = await request.json();
     const path = new URL(request.url).pathname;
-    if (path === '/compose/prepare') return json({ identities: Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item)), max_recipients: 10 });
+    if (path === '/compose/prepare') return json({ identities: Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item)), max_recipients: 10, attachments: { ...ATTACHMENT_LIMITS, blocked_extensions: BLOCKED_EXTENSIONS } });
     if (path === '/reply/prepare') {
       const { credential, ...prepared } = await prepareReply(queue, input.id);
       return json(prepared);

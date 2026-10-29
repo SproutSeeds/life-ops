@@ -2,6 +2,7 @@ import { sha256Hex } from './production-base.mjs';
 import { getMany, putMany } from './mail-index.mjs';
 import { prepareReply, sendingIdentities, sendCompose, sendReply } from './reply.mjs';
 import { brandedMessage, signatureLogo } from './signature.mjs';
+import { attachmentHttp } from './attachments.mjs';
 
 const P = 'cmail-drafts-v1:';
 const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
@@ -39,7 +40,7 @@ export class DraftStore {
     await putMany(tx, entries);
     record.summary = await this.queue.views.seal({ id: record.id, revision: record.revision, sender: value.sender, to: value.to,
       pending: value.pending, subject: value.subject, preview: value.text.replace(/\s+/g, ' ').slice(0, 180),
-      kind: value.kind, reply_id: value.reply_id || '', cc: value.cc || [], bcc: value.bcc || [], updated_at: record.updated_at, state: record.state });
+      kind: value.kind, reply_id: value.reply_id || '', cc: value.cc || [], bcc: value.bcc || [], attachment_count: value.attachments?.length || 0, updated_at: record.updated_at, state: record.state });
   }
   async move(tx, before, after) {
     const changes = new Map();
@@ -76,6 +77,7 @@ export class DraftStore {
     this.validateId(input.id);
     if (!Number.isSafeInteger(input.revision) || input.revision < 0 || !SAVE.test(input.save_id || '')) throw bad('invalid_draft');
     let value = this.normalize(input.draft);
+    if (Object.hasOwn(input.draft, 'attachments')) value.attachments = await this.queue.attachments.validate(input.draft.attachments);
     const digest = await hash(JSON.stringify(value));
     // Reply routing comes from the archived message; client edits cannot change
     // its sender, recipients, subject, or thread headers.
@@ -102,18 +104,19 @@ export class DraftStore {
         return;
       }
       if ((previous?.revision || 0) !== input.revision) throw bad('draft_conflict', 409);
+      const old = previous ? await this.body(previous, tx) : {};
       if (previous) {
-        const old = await this.body(previous, tx);
         if (old.kind !== value.kind || old.reply_id !== value.reply_id) throw bad('draft_changed', 409);
         // Tabs opened before CC/header support omit these fields entirely.
         // Preserve them unless a current client explicitly supplies [] or ''.
-        for (const field of ['cc', 'bcc', 'in_reply_to', 'references']) {
+        for (const field of ['cc', 'bcc', 'in_reply_to', 'references', 'attachments']) {
           if (!Object.hasOwn(input.draft, field) && old[field] !== undefined) value[field] = old[field];
         }
       }
       const now = new Date().toISOString();
       const record = { ...previous, id: input.id, revision: input.revision + 1, scope, save_id: input.save_id, digest,
         state: 'editing', created_at: previous?.created_at || now, updated_at: now };
+      await this.queue.attachments.references(tx, input.id, old.attachments, value.attachments);
       await this.writeBody(tx, record, value); await this.move(tx, previous, record); await tx.put(recordKey(input.id), record);
       if (value.reply_id) await tx.put(P + 'reply:' + value.reply_id, input.id);
     });
@@ -125,6 +128,7 @@ export class DraftStore {
       if (!before || before.state !== 'sending' || result.request_id && result.request_id !== before.request_id) return before;
       const record = { ...before };
       if (result.state === 'sent') {
+        await this.queue.attachments.references(tx, id, (await this.body(before, tx)).attachments);
         record.state = 'sent'; record.archive_id = result.archive_id; record.revision++;
         for (let n = 0; n < (record.chunks || 0); n++) await tx.delete(chunkKey(id, n));
         await tx.delete(P + 'content:' + id);
@@ -156,6 +160,7 @@ export class DraftStore {
       if (record.state === 'discarded') return { id, state: 'discarded' };
       if (record.state !== 'editing') throw bad('draft_sending', 409);
       if (record.revision !== revision) throw bad('draft_conflict', 409);
+      await this.queue.attachments.references(tx, id, (await this.body(record, tx)).attachments);
       await this.move(tx, record, null);
       for (let n = 0; n < (record.chunks || 0); n++) await tx.delete(chunkKey(id, n));
       await tx.delete(P + 'content:' + id);
@@ -187,7 +192,7 @@ export class DraftStore {
     const value = await this.body(record);
     options = { ...options, html: value.html };
     try {
-      const result = value.kind === 'reply' ? await sendReply(this.queue, { id: value.reply_id, request_id: record.request_id, text: value.text }, options)
+      const result = value.kind === 'reply' ? await sendReply(this.queue, { id: value.reply_id, request_id: record.request_id, text: value.text, attachments: value.attachments }, options)
         : await sendCompose(this.queue, { ...value, request_id: record.request_id }, options);
       await this.finish(id, result);
     } catch (error) {
@@ -218,8 +223,10 @@ export class DraftStore {
 
 export async function handleDrafts(queue, request) {
   const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } });
-  if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
   try {
+    const attachment = new URL(request.url).pathname.match(/^\/drafts\/attachments\/([a-f0-9-]{36})$/);
+    if (attachment) return await attachmentHttp(queue, request, attachment[1]);
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     const input = await request.json(), path = new URL(request.url).pathname;
     if (path === '/drafts/status') return json({ ready: true, drafts: Number(await queue.state.storage.get(P + 'count:*') || 0) });
     if (path === '/drafts/list') return json(await queue.drafts.list(input));

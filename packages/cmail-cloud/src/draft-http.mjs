@@ -10,10 +10,17 @@ export function withDrafts(worker, checkAccess = authorize) {
       const draft = path.match(/^\/cmail\/api\/drafts\/(draft_[a-f0-9-]{36})(?:\/(send|discard))?$/);
       const reply = path.match(/^\/cmail\/api\/drafts\/reply\/(mail_\d{16})$/);
       const asset = ['/cmail/drafts.js', '/cmail/drafts.css'].includes(path);
-      if (asset || path === '/cmail/api/drafts' || path === '/cmail/api/drafts/save' || draft || reply) {
+      const attachment = path.match(/^\/cmail\/api\/drafts\/attachments\/([a-f0-9-]{36})$/);
+      if (asset || path === '/cmail/api/drafts' || path === '/cmail/api/drafts/save' || draft || reply || attachment) {
         const access = await checkAccess(request, env);
         if (!access.ok) return json({ error: access.error }, access.status);
         if (env.CMAIL_DRAFTS_ENABLED !== '1') return json({ error: 'not_found' }, 404);
+        if (attachment) {
+          if (!['GET', 'POST'].includes(request.method)) return json({ error: 'method_not_allowed' }, 405);
+          if (request.method === 'POST' && (request.headers.get('Origin') !== url.origin || request.headers.get('Sec-Fetch-Site') === 'cross-site' || request.headers.get('X-Cmail-Action') !== 'draft')) return json({ error: 'invalid_origin' }, 403);
+          try { return await env.MAIL_QUEUE.getByName('primary').fetch(new Request('https://mail-queue.internal/drafts/attachments/' + attachment[1], request)); }
+          catch { return json({ error: 'attachment_unavailable' }, 503); }
+        }
         if (asset) {
           if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
           return new Response(path.endsWith('.js') ? draftsScript : draftsStyles, { headers: { 'Content-Type': path.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });

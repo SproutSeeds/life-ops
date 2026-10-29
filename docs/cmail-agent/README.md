@@ -94,8 +94,13 @@ Cloud sending supports plain text, To/CC/BCC, reply headers and configured logo 
 For branded identities, the server also saves an HTML alternative when the configured
 signature remains at the end of the text. Editing or omitting that signature preserves
 plain-text sending. The rendered alternative is frozen with the saved draft revision.
-Attachment sending, HTML-only sending, scheduled/batch delivery and legacy local
-label administration are not exposed by this client. Report missing capability
+The website's Compose and reply drafts support uploaded attachments (20 MiB total,
+up to 50 files), including download/removal and persistence across browsers.
+`draft-send` sends those saved attachments using the same receipt. When editing
+through JSON, preserve the attachment references; omitting the field retains
+existing attachments, while an explicit empty array removes them. CLI file
+upload, HTML-only sending, scheduled/batch delivery and legacy local label
+administration are not exposed by this client. Report missing capability
 and retain the draft; do not fall back to the retired system.
 
 ## Identity and correspondence

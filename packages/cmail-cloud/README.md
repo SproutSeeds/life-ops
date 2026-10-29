@@ -14,6 +14,41 @@ Choose **Drafts** in the Inbox/Sent selector and **New draft** to start a saved
 email. **Save draft** keeps it without sending; **Save & close** saves and returns
 to the mailbox. Multiple drafts and reply drafts can be reopened later.
 
+## Attachments
+
+Compose and reply drafts support **Attach files**, multiple file selection,
+drag-and-drop and pasted images. Each uploaded file is saved with its draft;
+reopen the draft from another signed-in browser to continue. Filenames, sizes,
+download links and **Remove** controls appear below the message. Attachment-only
+messages can be sent. Draft rows show the attachment count.
+
+Up to 50 files and **20 MiB total** can be attached per message. PDFs, Office
+documents, images, archives, audio, video and other extensions are accepted;
+the sender enforces the provider's [blocked extensions](https://resend.com/docs/knowledge-base/what-attachment-types-are-not-supported).
+The total limit leaves room for MIME/base64 overhead in the existing 30 MiB
+archive and the provider's [40 MB encoded-message limit](https://resend.com/docs/dashboard/emails/attachments).
+Empty files and oversize selections receive an explicit error before upload.
+
+`src/attachments.mjs` stores immutable encrypted file chunks in the existing
+Durable Object. Drafts and frozen send receipts reference server-verified file
+metadata; typing and draft listing never transfer file bytes. Older clients
+that omit the attachments field preserve existing attachments. Save a copy
+preserves the same immutable files. Upload retries reuse one ID, and uncertain
+sends retain the exact files and provider idempotency key. Sent copies contain
+matching MIME attachments, including Unicode filenames and branded HTML bodies.
+
+Access protects uploads and downloads; uploads also require the existing
+same-origin draft action header. Downloads use attachment disposition, a generic
+binary content type and a sandbox policy. Removed/discarded files and abandoned
+uploads retain a seven-day recovery grace period; the existing receiving tick
+cleans at most one expired unreferenced file. Saved drafts and frozen outboxes
+keep their references. No new service, binding or scheduler is required.
+
+`scripts/attachments-runtime-smoke.mjs MINIFLARE_MODULE --large` tests the full
+20 MiB boundary against a network-isolated provider and verifies matching hashes
+in the draft download, provider request and Sent attachment. Add `--serve` for
+browser testing. Production validation uses synthetic unsent drafts only.
+
 ## Spam
 
 **Mark as spam** in the reader or bulk Actions moves selected messages to the
@@ -131,9 +166,9 @@ diagnostics. Operators should inspect `last_scheduled_success_at` as well as
   An archive failure can retry without another provider send. Confirmed copies
   appear in the conversation and Archive, marked read. API acceptance is not
   recipient-delivery confirmation. No delivery webhook was introduced.
-- Replies support plain text and a configured branded HTML alternative, one reply recipient group derived from
-  Reply-To/From, and the existing conversation headers. Attachments and Reply all
-  are separate features.
+- Replies support plain text and a configured branded HTML alternative, attachments
+  through the shared draft editor, one reply recipient group derived from
+  Reply-To/From, and the existing conversation headers. Reply all is a separate feature.
 - Cloud replies remain in the cloud archive and do not modify local follow-up
   classifications or enter the legacy inbound-delivery queue.
 
@@ -213,8 +248,8 @@ production catalog had 726 contacts, requiring three bounded page requests.
 The composer preserves one new-message draft per browser tab through Cancel,
 Escape, Back and reload. Discard draft explicitly clears it; Sign out clears
 drafts and in-memory contacts. Escape closes suggestions before the composer,
-and closing restores focus to Compose. Attachments, Cc/Bcc composition and
-cross-device drafts are outside this release.
+and closing restores focus to Compose. The shared draft editor adds attachments,
+Cc/Bcc composition and cross-device drafts to the original Compose release.
 
 GET `/cmail/api/compose` returns allowed identities and signatures, never keys;
 POST on the same route accepts a new message. GET `/cmail/api/contacts` reads

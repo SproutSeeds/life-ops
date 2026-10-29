@@ -47,8 +47,16 @@ function composeApplication(findMatches, splitSignature) {
     send_rejected: 'The mail service did not accept this message. Your draft is saved and can be edited.',
     send_rate_limited: 'The mail service is busy. Your draft is saved; try again shortly.',
     archive_pending: 'Your email was sent. Retry confirmation to finish saving its Sent copy.',
+    attachments_too_large: 'Attachments can total up to 20 MB per email. Remove a file or choose smaller files.',
+    too_many_attachments: 'You can attach up to 50 files per email.',
+    attachment_type_blocked: 'The email provider blocks this file type. Choose a different file format.',
+    attachment_empty: 'This file is empty. Choose a file with content.',
+    invalid_attachment_name: 'This filename is not supported. Rename the file and try again.',
+    attachment_changed: 'This upload changed. Choose the file again.',
+    attachment_not_found: 'An attachment is unavailable. Remove it and attach the file again.',
+    attachment_unavailable: 'The attachment could not be uploaded. Your saved draft is safe; choose the file again to retry.',
   };
-  const meaningful = () => draft && (draft.to?.length || draft.pending || draft.subject || draft.text?.trim() !== draft.signature?.trim());
+  const meaningful = () => draft && (draft.attachments?.length || draft.to?.length || draft.pending || draft.subject || draft.text?.trim() !== draft.signature?.trim());
   function updateTrigger() { trigger.textContent = opening ? 'Opening…' : meaningful() ? 'Continue draft' : 'Compose'; trigger.disabled = opening || busy || saving; }
   function save(changed = false) {
     if (signedOut || !draft) return;
@@ -94,6 +102,7 @@ function composeApplication(findMatches, splitSignature) {
   function draftValue(value) {
     return { kind: value.kind || 'compose', sender: value.sender, to: value.to, pending: value.pending || '', subject: value.subject,
       cc: value.cc || [], bcc: value.bcc || [],
+      attachments: value.attachments || [],
       in_reply_to: value.in_reply_to || '', references: value.references || [],
       text: value.text, signature: value.signature || '', ...(value.reply_id ? { reply_id: value.reply_id } : {}) };
   }
@@ -125,6 +134,7 @@ function composeApplication(findMatches, splitSignature) {
         }
         if (current === owner) {
           signaturePreview(owner);
+          renderAttachments(owner);
           status('Saved to Drafts.'); owner.keepLocal.hidden = true;
           if (owner.inline) { if (!owner.closing) inlineRoute(owner, true); selection(owner); }
         }
@@ -149,6 +159,58 @@ function composeApplication(findMatches, splitSignature) {
     const image = document.createElement('img'); image.src = logo.url; image.alt = logo.alt; image.width = image.height = 96;
     const words = document.createElement('div'); words.textContent = parts.signature;
     card.append(image, words); target.append(label, card);
+  }
+  function renderAttachments(owner) {
+    if (!owner.files) return;
+    owner.files.replaceChildren();
+    for (const file of owner.draft.attachments || []) {
+      const row = document.createElement('li'), link = document.createElement('a'), size = document.createElement('span'), remove = document.createElement('button');
+      link.href = '/cmail/api/drafts/attachments/' + file.id; link.textContent = file.filename; link.download = file.filename;
+      size.textContent = file.size < 1024 ? file.size + ' B' : file.size < 1024 * 1024 ? (file.size / 1024).toFixed(1) + ' KB' : (file.size / (1024 * 1024)).toFixed(1) + ' MB';
+      remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove attachment ' + file.filename);
+      remove.addEventListener('click', async () => {
+        if (owner.adding || saving || busy || owner.draft.locked || owner.sent || owner.draft.pending_save) return;
+        owner.draft.attachments = owner.draft.attachments.filter((item) => item.id !== file.id);
+        save(true); renderAttachments(owner); controls(); await saveCloud(owner); owner.attach.focus();
+      });
+      row.append(link, size, remove); owner.files.append(row);
+    }
+    const files = owner.draft.attachments || [], total = files.reduce((sum, file) => sum + file.size, 0);
+    owner.fileHint.textContent = (files.length ? files.length + (files.length === 1 ? ' file · ' : ' files · ') + (total / (1024 * 1024)).toFixed(1) + ' MB attached. ' : '') + 'Up to 20 MB total. Drop files here or paste an image. Some executable file types are blocked by the email provider.';
+  }
+  async function addFiles(owner, selected) {
+    if (!persistent || current !== owner || owner.adding || saving || busy || owner.draft.locked || owner.sent || owner.draft.pending_save) return;
+    const files = [...selected]; if (!files.length) return;
+    const limits = config.attachments;
+    let count = (owner.draft.attachments || []).length, total = (owner.draft.attachments || []).reduce((sum, file) => sum + file.size, 0);
+    for (const file of files) {
+      const extension = file.name.trim().replace(/[. ]+$/, '').split('.').pop().toLowerCase();
+      const error = !file.size ? 'attachment_empty' : limits.blocked_extensions.includes(extension) ? 'attachment_type_blocked' : ++count > limits.max_count ? 'too_many_attachments' : (total += file.size) > limits.max_bytes ? 'attachments_too_large' : null;
+      if (error) { status(file.name + ': ' + errors[error], true); return; }
+    }
+    owner.adding = true; controls();
+    try {
+      if (!await saveCloud(owner)) return;
+      for (const [index, file] of files.entries()) {
+        status('Uploading ' + (index + 1) + ' of ' + files.length + ': ' + file.name + '…');
+        const id = crypto.randomUUID(); let data;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await fetch('/cmail/api/drafts/attachments/' + id, { method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/octet-stream', 'X-Cmail-Action': 'draft', 'X-Cmail-Filename': encodeURIComponent(file.name), 'X-Cmail-Content-Type': file.type || 'application/octet-stream' }, body: file });
+            if (response.redirected || !response.headers.get('Content-Type')?.includes('application/json')) throw new Error('Your sign-in expired. Sign in and choose the file again.');
+            data = await response.json();
+            if (!response.ok) throw Object.assign(new Error(errors[data.error] || errors.attachment_unavailable), { status: response.status });
+            break;
+          } catch (error) { if (attempt || error.status && error.status < 500) throw error; }
+        }
+        owner.draft.attachments ||= []; owner.draft.attachments.push(data.attachment);
+        save(true); renderAttachments(owner);
+        if (!await saveCloud(owner)) return;
+      }
+      status('Attachments saved to Drafts.');
+    } catch (error) { status(error.message || errors.attachment_unavailable, true); }
+    finally { owner.adding = false; if (current === owner) { controls(); owner.attach.focus(); } }
   }
   function loadContacts() {
     if (contactsPromise || contactsAt > Date.now() - 300000) return contactsPromise;
@@ -226,7 +288,7 @@ function composeApplication(findMatches, splitSignature) {
   }
   function controls() {
     if (!current) return;
-    const owner = current, locked = busy || saving || owner.draft.locked || owner.sent || Boolean(owner.draft.pending_save);
+    const owner = current, locked = busy || saving || owner.adding || owner.draft.locked || owner.sent || Boolean(owner.draft.pending_save);
     for (const input of [owner.from, owner.to, owner.cc, owner.bcc, owner.subject, owner.text]) input.disabled = Boolean(locked);
     owner.cc.parentElement.hidden = owner.bcc.parentElement.hidden = owner.draft.kind === 'reply';
     for (const button of owner.tokens.querySelectorAll('button')) button.disabled = Boolean(locked);
@@ -237,19 +299,22 @@ function composeApplication(findMatches, splitSignature) {
     owner.send.hidden = Boolean(owner.sent); owner.discard.hidden = Boolean(owner.sent);
     owner.send.textContent = busy ? 'Sending…' : owner.draft.locked ? 'Retry confirmation' : 'Send';
     const hasRecipients = owner.draft.to.length > 0 || Boolean(owner.to.value.trim());
-    owner.send.disabled = busy || saving || owner.conflict || Boolean(owner.draft.pending_save) || owner.sent || !hasRecipients || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim();
+    const hasContent = owner.draft.attachments?.length || owner.text.value.trim() && owner.text.value.trim() !== owner.draft.signature.trim();
+    owner.send.disabled = busy || saving || owner.adding || owner.conflict || Boolean(owner.draft.pending_save) || owner.sent || !hasRecipients || !hasContent;
+    owner.attach.disabled = owner.fileInput.disabled = Boolean(locked);
+    for (const button of owner.files.querySelectorAll('button')) button.disabled = Boolean(locked);
     owner.discard.disabled = Boolean(locked); owner.cancel.textContent = owner.inline ? '← Drafts' : owner.sent ? 'Done' : persistent ? 'Save & close' : 'Cancel';
     owner.cancel.title = owner.inline && !owner.sent ? 'Save and return to Drafts' : '';
     if (persistent) {
-      owner.saveButton.hidden = Boolean(owner.sent); owner.saveButton.disabled = busy || saving || owner.draft.locked || owner.conflict;
+      owner.saveButton.hidden = Boolean(owner.sent); owner.saveButton.disabled = busy || saving || owner.adding || owner.draft.locked || owner.conflict;
       owner.saveButton.textContent = saving ? 'Saving…' : 'Save draft'; owner.copyButton.hidden = !owner.conflict;
-      owner.cancel.disabled = busy || saving;
+      owner.cancel.disabled = busy || saving || owner.adding;
     }
     if (locked) hideSuggestions(); updateTrigger();
   }
   async function close(goBack = true, keepLocal = false, replacing = false) {
     const owner = current; if (!owner) return true;
-    if (owner.closing || busy) {
+    if (owner.closing || busy || owner.adding) {
       if (owner.inline && location.href !== owner.route) history.pushState({ cmailDraft: true }, '', owner.route);
       return false;
     }
@@ -297,9 +362,9 @@ function composeApplication(findMatches, splitSignature) {
   }
   async function send() {
     const owner = current;
-    if (!owner || busy || owner.sent) return;
+    if (!owner || busy || saving || owner.adding || owner.sent) return;
     if (!owner.draft.locked && owner.to.value.trim() && !add(owner.to.value)) { status(errors.invalid_recipients, true); owner.to.focus(); return; }
-    if (!owner.draft.to.length || !owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim()) return;
+    if (!owner.draft.to.length || !owner.draft.attachments?.length && (!owner.text.value.trim() || owner.text.value.trim() === owner.draft.signature.trim())) return;
     if (persistent && !(owner.draft.locked && !owner.draft.cloud_id)) {
       if (!await saveCloud(owner)) return;
       busy = true; owner.draft.locked = true; save(); controls(); status('Sending…');
@@ -371,10 +436,20 @@ function composeApplication(findMatches, splitSignature) {
         <label class="cmail-compose-field">Subject<input id="composeSubject" maxlength="1000" autocomplete="off"></label>
         <label class="cmail-compose-body"><span class="cmail-compose-sr">Message</span><textarea id="composeText" aria-label="Message" maxlength="100000" placeholder="Write your message…"></textarea></label>
         <section class="cmail-signature-preview" aria-label="Signature preview" hidden></section>
+        <section class="cmail-attachments" aria-label="Attachments"><div><button type="button" id="composeAttach">Attach files</button><input type="file" id="composeFiles" aria-label="Choose attachments" multiple hidden></div><ul id="composeAttachments"></ul><p id="composeAttachmentHint"></p></section>
         <footer><button id="composeSend" type="button" class="cmail-reply-send">Send</button><button id="composeSave" type="button" hidden>Save draft</button><span id="composeStatus" class="cmail-reply-status" role="status"></span><a id="composeSentLink" hidden>View in Sent</a><button id="composeCopy" type="button" hidden>Save a copy</button><button id="composeKeepLocal" type="button" hidden>Close, keep local copy</button><button id="composeDiscard" type="button">Discard draft</button></footer></form>`;
       (inline ? $('draftEditor') : document.body).append(dialog);
       const owner = current = { dialog, inline, mailbox: $('mailbox').value, draft, active: -1, options: [], from: $('composeFrom'), to: $('composeTo'), tokens: $('composeTokens'), list: $('composeOptions'), unique: $('composeUnique'), hint: $('composeRecipientHint'), subject: $('composeSubject'), text: $('composeText'), send: $('composeSend'), cancel: $('composeCancel'), discard: $('composeDiscard'), status: $('composeStatus'), sentLink: $('composeSentLink') };
       Object.assign(owner, { cc: $('composeCc'), bcc: $('composeBcc'), saveButton: $('composeSave'), copyButton: $('composeCopy'), keepLocal: $('composeKeepLocal') });
+      Object.assign(owner, { attach: $('composeAttach'), fileInput: $('composeFiles'), files: $('composeAttachments'), fileHint: $('composeAttachmentHint') });
+      owner.attach.closest('section').hidden = !persistent || !config.attachments;
+      owner.attach.addEventListener('click', () => owner.fileInput.click());
+      owner.fileInput.addEventListener('change', () => { const files = [...owner.fileInput.files]; owner.fileInput.value = ''; addFiles(owner, files); });
+      dialog.addEventListener('dragover', (event) => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); dialog.classList.add('cmail-file-drag'); } });
+      dialog.addEventListener('dragleave', (event) => { if (!dialog.contains(event.relatedTarget)) dialog.classList.remove('cmail-file-drag'); });
+      dialog.addEventListener('drop', (event) => { dialog.classList.remove('cmail-file-drag'); if (event.dataTransfer?.files.length) { event.preventDefault(); addFiles(owner, event.dataTransfer.files); } });
+      dialog.addEventListener('paste', (event) => { if (event.clipboardData?.files.length) { event.preventDefault(); addFiles(owner, event.clipboardData.files); } });
+      renderAttachments(owner);
       $('composeHeading').textContent = draft.kind === 'reply' ? 'Reply draft' : persistent ? draft.cloud_id ? 'Draft' : 'New draft' : 'New message';
       dialog.setAttribute('aria-label', draft.kind === 'reply' ? 'Reply draft' : persistent ? 'Email draft' : 'New message');
       for (const item of config.identities) { const option = document.createElement('option'); option.value = item.address; option.textContent = item.from; owner.from.append(option); }
@@ -490,6 +565,7 @@ function composeApplication(findMatches, splitSignature) {
     if (destination.searchParams.get('view') === 'drafts' && (id === 'new' || /^draft_[a-f0-9-]{36}$/.test(id || ''))) await open({ ...(id === 'new' ? { fresh: true } : { id }), restore: true });
   });
   window.addEventListener('pagehide', () => { if (draft) save(); });
+  window.addEventListener('beforeunload', (event) => { if (current?.adding) { event.preventDefault(); event.returnValue = ''; } });
   $('signOut').addEventListener('click', () => { signedOut = true; clear(); contacts = []; config = null; if (current) { current.sent = true; close(false); } }, true);
   updateTrigger();
   if (persistent) {
@@ -533,6 +609,12 @@ export const composeStyles = `
 .cmail-signature-card img{display:block;width:96px;height:96px;flex-shrink:0}.cmail-signature-card div{border-left:2px solid #cf4d1c;padding-left:18px;white-space:pre-line;overflow-wrap:anywhere;min-width:0}
 .cmail-compose-form input:focus,.cmail-compose-form textarea:focus,.cmail-compose-form select:focus{outline:2px solid var(--accent);outline-offset:1px}
 .cmail-compose-form footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px}
+.cmail-attachments{border:1px dashed var(--line);border-radius:7px;padding:10px;box-sizing:border-box}
+.cmail-attachments[hidden]{display:none}.cmail-compose-form #composeAttach{border:1px solid #526445;color:var(--accent);padding:7px 12px}
+.cmail-attachments ul{list-style:none;padding:0;margin:8px 0}.cmail-attachments ul:empty{display:none}
+.cmail-attachments li{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:12px;min-width:0}
+.cmail-attachments li a{flex:1;min-width:0;overflow-wrap:anywhere}.cmail-attachments li span{white-space:nowrap;color:var(--muted)}
+.cmail-attachments p{margin:8px 0 0;font-size:11px;color:var(--muted);line-height:1.5}.cmail-file-drag .cmail-attachments{border-color:var(--accent);background:#34432b}
 #composeDiscard{margin-left:auto}.cmail-compose-form a{color:var(--accent)}
 .cmail-compose-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .cmail-compose-dialog [hidden]{display:none!important}

@@ -53,6 +53,7 @@ export function withReplies(worker, checkAccess = authorize) {
             if (body.length > 650000) return json({ error: 'invalid_reply' }, 413);
             const parsed = JSON.parse(body);
             input = compose ? { request_id: parsed.request_id, sender: parsed.sender, to: parsed.to, subject: parsed.subject, text: parsed.text } : { id: message[1], request_id: parsed.request_id, text: parsed.text };
+            if (parsed.attachments !== undefined) input.attachments = parsed.attachments;
           } catch { return json({ error: 'invalid_reply' }, 400); }
           path = compose ? '/compose/send' : '/reply/send';
         } else return json({ error: 'method_not_allowed' }, 405);

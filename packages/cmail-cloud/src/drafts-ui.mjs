@@ -17,7 +17,7 @@ function draftsApplication() {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'cmail-draft-row'; button.dataset.draftId = item.id;
     const recipients = item.to.join(', ') || item.pending || 'No recipients yet';
     for (const [tag, className, text] of [['span', 'cmail-draft-to', 'To: ' + recipients], ['strong', 'cmail-draft-subject', item.subject || '(No subject)'],
-      ['span', 'cmail-draft-preview', item.preview || 'Empty draft'], ['span', 'cmail-draft-meta', 'From: ' + item.sender + (item.kind === 'reply' ? ' · Reply' : '') + (item.state === 'sending' ? ' · Check send confirmation' : '')],
+      ['span', 'cmail-draft-preview', item.preview || (item.attachment_count ? 'Attachments' : 'Empty draft')], ['span', 'cmail-draft-meta', 'From: ' + item.sender + (item.kind === 'reply' ? ' · Reply' : '') + (item.attachment_count ? ' · ' + item.attachment_count + (item.attachment_count === 1 ? ' attachment' : ' attachments') : '') + (item.state === 'sending' ? ' · Check send confirmation' : '')],
       ['time', 'cmail-draft-date', new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(item.updated_at))]]) {
       const element = document.createElement(tag); element.className = className; element.textContent = text; button.append(element);
       if (tag === 'time') { element.dateTime = item.updated_at; element.title = new Date(item.updated_at).toLocaleString(); }

@@ -9,6 +9,7 @@ import { DraftStore, handleDrafts } from './draft-store.mjs';
 import { withDrafts } from './draft-http.mjs';
 import { handleAgent } from './agent-api.mjs';
 import { SpamStore } from './spam.mjs';
+import { AttachmentStore } from './attachments.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -34,6 +35,7 @@ export class MailQueue extends BaseQueue {
     this.sent = new SentIndex(this);
     this.contacts = new ContactIndex(this);
     this.drafts = new DraftStore(this);
+    this.attachments = new AttachmentStore(this);
     this.spam = new SpamStore(this);
     this.indexReady = state.blockConcurrencyWhile(() => this.ensureDateIndex());
   }
@@ -179,6 +181,7 @@ export class MailQueue extends BaseQueue {
     try { input = await request.json(); } catch { return json({ error: 'invalid_json' }, 400); }
     if (path === '/resend/status') return json(await this.state.storage.get(SYNC_STATE) || { status: 'pending' });
     if (path === '/resend/sync') {
+      if (input.trigger === 'scheduled') await this.attachments.cleanup();
       if (!this.syncPromise) {
         this.syncPromise = syncReceived(this, this.env, { trigger: input.trigger === 'scheduled' ? 'scheduled' : 'manual', verifyExisting: input.verify_existing === true && input.trigger !== 'scheduled' }).finally(() => { this.syncPromise = null; });
       }
