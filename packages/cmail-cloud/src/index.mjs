@@ -10,6 +10,7 @@ import { withDrafts } from './draft-http.mjs';
 import { handleAgent } from './agent-api.mjs';
 import { SpamStore } from './spam.mjs';
 import { AttachmentStore } from './attachments.mjs';
+import { recoveryTransport, handleRitmoRecovery } from './ritmo-recovery.mjs';
 
 const ADMIN_ROUTES = new Map([
   ['/api/mail/resend/sync', '/resend/sync'],
@@ -134,6 +135,7 @@ export class MailQueue extends BaseQueue {
       } catch (error) { return json({ error: error.status ? error.message : error.name === 'SyntaxError' ? 'invalid_request' : 'mail_state_unavailable' }, error.status || (error.name === 'SyntaxError' ? 400 : 503)); }
     }
     if (path === '/agent/request') return handleAgent(this, request);
+    if (path === '/ritmo/recovery') return handleRitmoRecovery(this, request);
     if (path.startsWith('/drafts/')) return handleDrafts(this, request);
     if (path.startsWith('/contacts/')) {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -304,6 +306,7 @@ export function withResend(worker = baseWorker) {
     },
     async fetch(request, env, context) {
       const url = new URL(request.url);
+      if (url.pathname === '/api/mail/ritmo-recovery') return recoveryTransport(request, env);
       const route = ADMIN_ROUTES.get(url.pathname);
       if (route) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

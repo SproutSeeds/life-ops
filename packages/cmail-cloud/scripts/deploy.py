@@ -78,7 +78,7 @@ def updated_signatures(settings, signatures):
     return identities
 
 
-def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False, enable_compose=False, enable_drafts=False, enable_agent=False, enable_ritmo=False, signatures=None):
+def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_sent=False, enable_compose=False, enable_drafts=False, enable_agent=False, enable_ritmo=False, enable_ritmo_recovery=False, signatures=None):
     if enable_ritmo and enable_replies:
         raise RuntimeError("Add Ritmo separately from rebuilding existing sending identities")
     if signatures and (enable_ritmo or enable_replies):
@@ -166,6 +166,12 @@ def deploy(settings, *, enable_replies=False, enable_fast_reads=False, enable_se
         bindings.append({"type": "plain_text", "name": "CMAIL_COMPOSE_ENABLED", "text": "1"})
     if enable_drafts:
         bindings.append({"type": "plain_text", "name": "CMAIL_DRAFTS_ENABLED", "text": "1"})
+    if enable_ritmo_recovery and not any(b["name"] == "RITMO_AUTH_MAIL_SECRET" for b in settings["bindings"]):
+        lookup = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "orp.secret.cloudflare", "-a", "ritmo-auth-mail-secret", "-w"], capture_output=True, text=True)
+        secret = lookup.stdout.strip()
+        if lookup.returncode or len(secret) < 40:
+            raise RuntimeError("Dedicated Ritmo auth-mail credential unavailable in Keychain")
+        bindings.append({"type": "secret_text", "name": "RITMO_AUTH_MAIL_SECRET", "text": secret})
     metadata = {
         "main_module": "index.mjs", "bindings": bindings,
         "compatibility_date": settings["compatibility_date"],
@@ -201,6 +207,7 @@ def main():
     parser.add_argument("--enable-drafts", action="store_true", help="Enable encrypted saved drafts with existing Compose and Sent")
     parser.add_argument("--enable-agent", action="store_true", help="Enable signed agent access to the same cloud mailbox and drafts")
     parser.add_argument("--enable-ritmo", action="store_true", help="Add the two Ritmo identities using their domain-scoped Keychain sending key, preserving all existing credentials")
+    parser.add_argument("--enable-ritmo-recovery", action="store_true", help="Connect the fixed owner-only password reset template using its separate Keychain capability")
     parser.add_argument("--signature-config", type=Path, help="Private JSON of signature text and logo updates keyed by existing sending address")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
@@ -251,7 +258,7 @@ def main():
                     raise RuntimeError("Sent requires indexed reads")
         if current()[1]["versions"][0]["version_id"] != version:
             raise RuntimeError("Production changed during preflight; inspect before deploying")
-        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent, enable_compose=args.enable_compose, enable_drafts=args.enable_drafts, enable_agent=args.enable_agent, enable_ritmo=args.enable_ritmo, signatures=signatures)
+        result = deploy(settings, enable_replies=args.enable_replies, enable_fast_reads=args.enable_fast_reads, enable_sent=args.enable_sent, enable_compose=args.enable_compose, enable_drafts=args.enable_drafts, enable_agent=args.enable_agent, enable_ritmo=args.enable_ritmo, enable_ritmo_recovery=args.enable_ritmo_recovery, signatures=signatures)
     else:
         desired = list(dict.fromkeys([*(item["cron"] for item in schedules), "*/2 * * * *"]))
         result = api("/schedules", method="PUT", data=encoded([{"cron": cron} for cron in desired]), content_type="application/json")
