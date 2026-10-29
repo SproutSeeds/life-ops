@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import mimetypes
 import sys
 import uuid
 from pathlib import Path
@@ -164,6 +166,55 @@ def addresses(values: list[str] | None) -> list[str]:
     return [address for _, address in getaddresses(values or []) if address]
 
 
+def attach_files(envelope: dict, paths: list[Path], remove: list[str], clear: bool) -> None:
+    """Upload immutable files, then include references in one revision-safe save.
+
+    IDs depend on the save UUID and argument position, so retrying a changed
+    file fails instead of silently substituting bytes under the same save.
+    Validate the whole selection before any upload. Failed saves leave only
+    unreferenced uploads, which the shared store expires after seven days.
+    """
+    namespace = uuid.UUID(envelope["save_id"])
+    files = [] if clear else list(envelope["draft"].get("attachments", []))
+    remove_ids = {str(uuid.UUID(value)) for value in remove}
+    files = [file for file in files if file["id"] not in remove_ids]
+    policy = request("status").get("attachments")
+    if not policy:
+        raise RuntimeError("Cloud draft attachment support is unavailable; retain the draft and retry after deployment")
+    uploads = []
+    for index, path in enumerate(paths):
+        if not path.is_file():
+            raise ValueError(f"Attachment is not a regular file: {path}")
+        name = path.name
+        if not name.strip() or len(name.encode("utf-16-le")) // 2 > 255 or any(ord(c) < 32 or ord(c) == 127 or c in "/\\" for c in name):
+            raise ValueError(f"Invalid attachment filename: {name}")
+        if name.rstrip(". ").rsplit(".", 1)[-1].lower() in policy["blocked_extensions"]:
+            raise ValueError(f"Attachment type blocked by the mail provider: {name}")
+        size = path.stat().st_size
+        if not 0 < size <= policy["max_bytes"]:
+            raise ValueError(f"Attachment must contain 1 to {policy['max_bytes']} bytes: {name}")
+        file_id = str(uuid.uuid5(namespace, f"attachment:{index}"))
+        # A successful save retry already contains these same references.
+        files = [file for file in files if file["id"] != file_id]
+        uploads.append((path, file_id, size))
+    if len(files) + len(uploads) > policy["max_count"]:
+        raise ValueError(f"A draft supports at most {policy['max_count']} attachments")
+    if sum(file["size"] for file in files) + sum(size for _, _, size in uploads) > policy["max_bytes"]:
+        raise ValueError(f"Combined attachments exceed {policy['max_bytes']} bytes; remove files before adding more")
+    for path, file_id, size in uploads:
+        with path.open("rb") as stream:
+            content = stream.read(policy["max_bytes"] + 1)
+        if len(content) != size:
+            raise ValueError(f"Attachment changed while reading: {path}")
+        uploaded = request("attachment-upload", {"id": file_id, "filename": path.name,
+            "content_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "content_base64": base64.b64encode(content).decode("ascii")})["attachment"]
+        if uploaded["id"] != file_id or uploaded["size"] != size or uploaded["sha256"] != hashlib.sha256(content).hexdigest():
+            raise RuntimeError("Cloud attachment verification failed; draft was not saved")
+        files.append(uploaded)
+    envelope["draft"]["attachments"] = files
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cmail", description="C-mail cloud mailbox and shared Drafts. Saving never sends.",
@@ -180,6 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument("--limit", type=int, default=50)
         if name in {"messages", "search"}:
             child.add_argument("--view", choices=["all", "inbox", "sent", "archive", "spam"], default="inbox")
+            child.add_argument("--after", help="Inclusive start date YYYY-MM-DD, as on the website")
+            child.add_argument("--before", help="Inclusive end date YYYY-MM-DD, as on the website")
+        if name == "contacts":
+            child.add_argument("--revision", type=int, help="Keep contact pagination on the same returned revision")
     for name in ["message", "thread", "reply-context", "draft"]:
         child = sub.add_parser(name)
         child.add_argument("id")
@@ -187,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             child.add_argument("--raw", action="store_true")
             child.add_argument("--attachment", type=int)
             child.add_argument("--output", type=Path)
+        if name == "draft":
+            child.add_argument("--attachment", help="Download an attachment by zero-based index or its UUID")
+            child.add_argument("--output", type=Path, help="Save attachment bytes; existing files are never overwritten")
     save = sub.add_parser("draft-save", help="Save to the website's Drafts; never sends")
     save.add_argument("--id", "--draft-id", dest="id")
     save.add_argument("--revision", type=int, help="Required when editing an existing draft")
@@ -202,6 +260,13 @@ def main(argv: list[str] | None = None) -> int:
     body.add_argument("--text-file", "--body-file", dest="text_file", type=Path)
     save.add_argument("--reply-to-message", help="Cloud mail ID; derives the exact sender and reply headers")
     save.add_argument("--no-signature", action="store_true")
+    save.add_argument("--attach", "--attachment", action="append", type=Path, default=[], help="Upload a file; repeat for multiple files (also works for replies and existing drafts)")
+    save.add_argument("--remove-attachment", action="append", default=[], metavar="UUID", help="Remove a saved attachment by its returned ID; repeat as needed")
+    save.add_argument("--clear-attachments", action="store_true", help="Remove all current attachments before adding any --attach files")
+    copy = sub.add_parser("draft-copy", help="Save a separate copy, including attachments; never sends")
+    copy.add_argument("id")
+    copy.add_argument("--revision", type=int, required=True)
+    copy.add_argument("--save-id", required=True)
     for name in ["draft-send", "draft-discard"]:
         child = sub.add_parser(name)
         child.add_argument("id")
@@ -236,6 +301,11 @@ def main(argv: list[str] | None = None) -> int:
             if action in {"messages", "search"}:
                 action = "messages"
                 p["view"] = args.view
+                for field in ("after", "before"):
+                    if getattr(args, field):
+                        p[field] = getattr(args, field)
+            if action == "contacts" and args.revision is not None:
+                p["revision"] = args.revision
         elif action in {"message", "thread", "reply-context", "draft"}:
             p = {"id": resolve_draft_id(args.id) if action == "draft" else args.id}
             if action == "thread":
@@ -245,11 +315,24 @@ def main(argv: list[str] | None = None) -> int:
                     p["raw"] = True
                 if args.attachment is not None:
                     p["attachment"] = args.attachment
+            if action == "draft":
+                if args.output and args.attachment is None:
+                    raise ValueError("--output requires --attachment INDEX_OR_UUID")
+                if args.attachment is not None:
+                    if not args.output:
+                        raise ValueError("--attachment requires --output PATH")
+                    action = "draft-attachment"
+                    p["attachment"] = int(args.attachment) if args.attachment.isdigit() else args.attachment
         elif action == "draft-save":
             if args.json_file:
                 p = json.loads(args.json_file.read_text())
                 if not isinstance(p, dict) or not {"id", "revision", "save_id", "draft"} <= p.keys():
                     raise ValueError("Save file requires id, revision, save_id, draft")
+                if not isinstance(p["draft"], dict):
+                    raise ValueError("Save file draft must be an object")
+                if (args.attach or args.remove_attachment) and p["revision"] and "attachments" not in p["draft"]:
+                    previous = request("draft", {"id": p["id"]})
+                    p["draft"]["attachments"] = previous.get("draft", {}).get("attachments", [])
             else:
                 if not args.save_id:
                     raise ValueError("--save-id UUID is required. Generate it once, then reuse it and the exact content on retry.")
@@ -286,6 +369,15 @@ def main(argv: list[str] | None = None) -> int:
                     value["text"] = text.rstrip() + "\n\n" + value["signature"]
                 p = {"id": resolve_draft_id(args.id) if args.id else "draft_" + save_id,
                      "revision": args.revision or 0, "save_id": save_id, "draft": value}
+            if args.attach or args.remove_attachment or args.clear_attachments:
+                attach_files(p, args.attach, args.remove_attachment, args.clear_attachments)
+        elif action == "draft-copy":
+            previous = request("draft", {"id": resolve_draft_id(args.id)})
+            if previous["state"] != "editing" or previous["revision"] != args.revision:
+                raise ValueError("Draft changed or closed; reread the source before copying")
+            save_id = str(uuid.UUID(args.save_id))
+            p = {"id": "draft_" + save_id, "revision": 0, "save_id": save_id, "draft": previous["draft"]}
+            action = "draft-save"
         elif action in {"draft-send", "draft-discard"}:
             p = {"id": resolve_draft_id(args.id), "revision": args.revision}
             if action == "draft-send":
@@ -294,13 +386,17 @@ def main(argv: list[str] | None = None) -> int:
             p = {"ids": args.ids, "action": action}
             action = "message-action"
         result = request(action, p)
-        if action == "message" and args.output:
+        if action in {"message", "draft-attachment"} and args.output:
             content = result.get("content_base64")
             if not content:
                 raise ValueError("--output requires --raw or --attachment")
+            decoded = base64.b64decode(content, validate=True)
+            if action == "draft-attachment" and (len(decoded) != result["size"] or hashlib.sha256(decoded).hexdigest() != result["sha256"]):
+                raise RuntimeError("Attachment download verification failed; no output written")
             with args.output.open("xb") as stream:
-                stream.write(base64.b64decode(content, validate=True))
-            result = {"saved": str(args.output), "filename": result.get("filename")}
+                stream.write(decoded)
+            result = {key: value for key, value in result.items() if key != "content_base64"}
+            result["saved"] = str(args.output)
         print(json.JSONEncoder(indent=2, ensure_ascii=False).encode(result))
         return 0 if action != "draft-send" or result.get("state") == "sent" else 1
     except (RuntimeError, ValueError, OSError, KeyError) as error:

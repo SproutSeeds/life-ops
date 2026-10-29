@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -203,6 +204,10 @@ def main():
     parser.add_argument("--signature-config", type=Path, help="Private JSON of signature text and logo updates keyed by existing sending address")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
+    if args.deploy:
+        # A cloud-only feature release is incomplete: check both interfaces
+        # before credentials, production inspection or any deployment mutation.
+        subprocess.run([sys.executable, str(ROOT / "scripts/check-parity.py")], check=True)
     signatures = json.loads(args.signature_config.read_text()) if args.signature_config else None
     settings, deployment = current()
     version = deployment["versions"][0]["version_id"]

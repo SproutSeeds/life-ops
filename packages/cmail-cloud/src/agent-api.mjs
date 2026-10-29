@@ -1,6 +1,7 @@
 import { handleDrafts } from './draft-store.mjs';
 import { sendingIdentities } from './reply.mjs';
 import { publicIdentity } from './signature.mjs';
+import { ATTACHMENT_LIMITS, BLOCKED_EXTENSIONS, attachmentMetadata } from './attachments.mjs';
 
 // Reached only through the existing timestamped HMAC administrative transport.
 // This is an allowlist, not an arbitrary Durable Object route proxy.
@@ -14,8 +15,27 @@ export async function handleAgent(queue, request) {
     const identities = Object.entries(sendingIdentities(queue.env)).map(([address, item]) => publicIdentity(address, item));
     if (action === 'status') return json({ system: 'cmail-cloud', website: 'https://cmail.frg.earth', ready: true,
       drafts: (await queue.state.storage.get('cmail-drafts-v1:count:*')) || 0, identities,
-      capabilities: ['messages', 'search', 'threads', 'raw', 'attachments-read', 'drafts', 'send', 'read-state', 'archive', 'spam'] });
+      capabilities: ['messages', 'search', 'threads', 'raw', 'attachments-read', 'drafts', 'draft-attachments', 'send', 'read-state', 'archive', 'spam'],
+      attachments: { ...ATTACHMENT_LIMITS, blocked_extensions: BLOCKED_EXTENSIONS } });
     if (action === 'identities') return json({ identities });
+    if (action === 'attachment-upload') {
+      // Use the browser's immutable encrypted store and policy. Bound decoded
+      // bytes before allocating; never pass client file paths to a provider.
+      const content = p.content_base64;
+      if (typeof content !== 'string' || content.length > Math.ceil(ATTACHMENT_LIMITS.max_bytes / 3) * 4) return json({ error: 'attachments_too_large' }, 413);
+      let binary;
+      try { binary = atob(content); } catch { return json({ error: 'invalid_attachment_base64' }, 400); }
+      attachmentMetadata(p.filename, p.content_type, binary.length);
+      const bytes = new Uint8Array(binary.length);
+      for (let n = 0; n < binary.length; n++) bytes[n] = binary.charCodeAt(n);
+      return json({ attachment: await queue.attachments.upload(p.id, p.filename, p.content_type, bytes) });
+    }
+    if (action === 'draft-attachment') {
+      const draft = await queue.drafts.get(p.id), files = draft.draft?.attachments || [];
+      const file = Number.isSafeInteger(p.attachment) ? files[p.attachment] : files.find((item) => item.id === p.attachment);
+      if (!file) return json({ error: 'attachment_not_found' }, 404);
+      return json({ ...file, content_base64: await queue.attachments.content(file) });
+    }
     // Append-only ingestion cursor for the local Life Ops projection. Ordinary
     // mailbox reads use the bounded indexes above, never this raw export.
     if (action === 'changes') {

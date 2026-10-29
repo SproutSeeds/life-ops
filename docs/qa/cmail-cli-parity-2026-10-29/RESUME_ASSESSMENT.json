@@ -1,0 +1,12 @@
+{
+  "event_id": "cmail-cli-parity-2026-10-29-r1",
+  "decision": "no-change",
+  "reason": "Routine completion and correction of the preceding private mailbox attachment feature. The work closes an agent-interface gap and establishes release checks; it does not justify a separate public resume accomplishment. Preserve concrete technical verification as project evidence.",
+  "related_event": "cmail-attachments-2026-10-29-r1",
+  "evidence": "VERIFICATION.md",
+  "production_version": "d11e5a6e-b6c2-40e0-a93c-b1b9d774f735",
+  "canonical_resume_changed": false,
+  "public_resume_changed": false,
+  "confidential_mail_published": false,
+  "limitations": ["Real provider delivery was not exercised"]
+}

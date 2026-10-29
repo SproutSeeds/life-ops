@@ -16,6 +16,13 @@ to the mailbox. Multiple drafts and reply drafts can be reopened later.
 
 ## Attachments
 
+The website and CLI ship together under the mandatory
+[feature parity rule](../../docs/cmail-feature-parity.md). Agents can use
+`cmail draft-save --attach PATH` repeatedly to upload files, `cmail draft ID
+--attachment INDEX_OR_UUID --output PATH` to download, and `draft-save
+--remove-attachment UUID` or `--clear-attachments` to remove. `lifeops cmail`
+exposes the same commands. See the [agent guide](../../docs/cmail-agent/README.md).
+
 Compose and reply drafts support **Attach files**, multiple file selection,
 drag-and-drop and pasted images. Each uploaded file is saved with its draft;
 reopen the draft from another signed-in browser to continue. Filenames, sizes,

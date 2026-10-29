@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--require-compose", action="store_true")
     parser.add_argument("--require-drafts", action="store_true")
     parser.add_argument("--require-agent", action="store_true")
+    parser.add_argument("--require-attachments", action="store_true")
     parser.add_argument("--require-spam", action="store_true")
     parser.add_argument("--receipt-dir", type=Path, default=Path("data/qa/cmail-bindmysoul-2026-10-17"))
     args = parser.parse_args()
@@ -73,7 +74,7 @@ def main():
     assert protected == {"website": 302, "worker_mail_api": 302, "signed_admin": 401}, protected
     secret = credentials.resolve_secret(name="LIFE_OPS_MAIL_INGEST_SECRET")
     agent = None
-    if args.require_agent:
+    if args.require_agent or args.require_attachments:
         assert next(b["text"] for b in settings["bindings"] if b["name"] == "CMAIL_AGENT_ENABLED") == "1"
         protected["agent_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/api/mail/agent", "POST")
         assert protected["agent_api"] == 401
@@ -81,6 +82,13 @@ def main():
             worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret,
             path="/api/mail/agent", payload={"action": "status"})
         assert agent["system"] == "cmail-cloud" and agent["ready"]
+        if args.require_attachments:
+            assert "draft-attachments" in agent["capabilities"]
+            assert agent["attachments"]["max_bytes"] == 20 * 1024 * 1024
+            assert agent["attachments"]["max_count"] == 50
+            assert "exe" in agent["attachments"]["blocked_extensions"]
+            protected["draft_attachment_api"] = unauthenticated("https://life-ops-email-ingest.frg-life-ops.workers.dev/cmail/api/drafts/attachments/10000000-0000-4000-8000-000000000001")
+            assert protected["draft_attachment_api"] == 302
     def signed(path, payload=None):
         return cloudflare_email._cloudflare_worker_request_json(worker_public_url="https://life-ops-email-ingest.frg-life-ops.workers.dev", secret=secret, path=path, payload=payload or {})
     spam = None

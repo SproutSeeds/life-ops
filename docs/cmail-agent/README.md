@@ -10,6 +10,10 @@ sending require the authority in Cody's request. Saving never sends. Sending
 requires authorization for the exact message; a broad software change or a
 request to edit a draft does not authorize delivery.
 
+Website and CLI capabilities must ship together. Follow the mandatory
+[feature parity rule and release checks](../cmail-feature-parity.md) for every
+C-mail implementation change.
+
 ## Read and find mail
 
 ```sh
@@ -67,6 +71,46 @@ and headers. If a draft already exists for the thread, edit that draft using its
 revision. Original reply routing remains locked. Migrated replies retain their
 original headers and any CC recipients.
 
+## Draft attachments
+
+Attach files directly from the command line when composing, replying or editing:
+
+```sh
+cmail draft-save --save-id UUID --to recipient@example.com --subject 'Files' \
+  --body-file /private/path/body.txt --attach /private/path/image.png \
+  --attach /private/path/document.pdf
+cmail draft-save --id draft_UUID --revision N --save-id NEW_UUID \
+  --attach /private/path/archive.zip
+cmail draft draft_UUID
+cmail draft draft_UUID --attachment 0 --output /private/path/download.png
+cmail draft-save --id draft_UUID --revision N --save-id NEW_UUID \
+  --remove-attachment ATTACHMENT_UUID
+```
+
+Use the returned cloud IDs and latest revision. `--attach` is repeatable and
+preserves existing attachments, recipients, body and thread headers. The same
+flags work with `--reply-to-message`. Files appear immediately in the website's
+saved draft. Reopen it and verify each filename, byte count and SHA-256 as well
+as the message before requesting send authorization.
+
+Downloads accept a zero-based index or attachment UUID, verify bytes against
+the saved hash, and refuse to overwrite an existing output file. Repeat
+`--remove-attachment UUID` for multiple removals; `--clear-attachments` removes
+all saved attachments before adding any new files. `draft-copy ID --revision N
+--save-id UUID` preserves a separate copy with the same attachments.
+
+Both interfaces accept provider-supported types, including images, PDF, Office
+documents, ZIP, audio, video and custom formats, up to **20 MiB combined and 50
+files**. `cmail status` reports the shared policy, including blocked extensions.
+Empty files and blocked types receive explicit errors. File bytes remain in the
+same encrypted cloud store; `draft-send` sends the exact saved references.
+
+Keep the same save UUID, file contents, paths and flag order on a retry. Upload
+IDs are stable per save; changed bytes under that ID are rejected. A failed
+save leaves the previous draft intact. Reopen after a conflict and use its
+current revision with a new save UUID for a deliberate new edit. Saving and
+uploading never send mail. Every command also works as `lifeops cmail ...`.
+
 ## Send only when authorized
 
 Read the exact saved revision, verify the intended recipient and message, then:
@@ -94,13 +138,12 @@ Cloud sending supports plain text, To/CC/BCC, reply headers and configured logo 
 For branded identities, the server also saves an HTML alternative when the configured
 signature remains at the end of the text. Editing or omitting that signature preserves
 plain-text sending. The rendered alternative is frozen with the saved draft revision.
-The website's Compose and reply drafts support uploaded attachments (20 MiB total,
-up to 50 files), including download/removal and persistence across browsers.
-`draft-send` sends those saved attachments using the same receipt. When editing
+Website and CLI Compose/reply drafts support the same attachments, including
+download, removal, copying and persistence across clients. When editing
 through JSON, preserve the attachment references; omitting the field retains
-existing attachments, while an explicit empty array removes them. CLI file
-upload, HTML-only sending, scheduled/batch delivery and legacy local label
-administration are not exposed by this client. Report missing capability
+existing attachments, while an explicit empty array removes them. HTML-only
+sending, scheduled/batch delivery and legacy local label administration are not
+exposed by either cloud interface. Report missing capability
 and retain the draft; do not fall back to the retired system.
 
 ## Identity and correspondence

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import contextlib
 import io
 import json
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch, Mock
 
@@ -130,6 +132,84 @@ class CloudMailTests(unittest.TestCase):
                 "--save-id", "10000000-0000-4000-8000-000000000017", "--subject", "Revised"])
         self.assertEqual(code, 0)
         self.assertEqual(calls[-1][1]["draft"], {**original, "subject": "Revised", "bcc": []})
+
+    def test_cli_attachment_upload_retry_download_remove_and_copy_preserve_drafts(self):
+        path = Path(self.temp.name) / "Résumé ☕.png"
+        content = bytes(range(256)); path.write_bytes(content)
+        original = {"kind": "compose", "sender": "cody@frg.earth", "to": ["person@example.test"],
+                    "text": "Keep my body", "subject": "Keep my subject", "signature": "", "pending": "",
+                    "attachments": [{"id": str(uuid.uuid4()), "size": 4, "filename": "website.txt"}]}
+        saved = {"draft": original, "state": "editing", "revision": 4}
+        calls = []
+        def fake(action, p=None):
+            calls.append((action, p))
+            if action == "status":
+                return {"attachments": {"max_bytes": 20 * 1024 * 1024, "max_count": 50, "blocked_extensions": ["exe"]}}
+            if action == "identities":
+                return {"identities": [{"address": "cody@frg.earth", "signature": ""}]}
+            if action == "draft":
+                return saved
+            if action == "attachment-upload":
+                data = base64.b64decode(p["content_base64"], validate=True)
+                return {"attachment": {"id": p["id"], "filename": p["filename"], "content_type": p["content_type"],
+                        "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}
+            if action == "draft-attachment":
+                return {**saved["draft"]["attachments"][-1], "content_base64": base64.b64encode(content).decode()}
+            if action == "draft-save":
+                saved.update(draft=p["draft"], revision=5)
+                return saved
+            raise AssertionError(action)
+        args = ["draft-save", "--id", "draft_test", "--revision", "4", "--save-id", str(uuid.uuid4()), "--attach", str(path)]
+        with patch.object(cloud, "request", side_effect=fake), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cloud.main(args), 0)
+            first = calls[-1][1]
+            self.assertEqual(cloud.main(args), 0)
+            self.assertEqual(calls[-1][1], first)
+            self.assertEqual(len(saved["draft"]["attachments"]), 2)
+            self.assertEqual(saved["draft"]["text"], original["text"])
+            uploaded = saved["draft"]["attachments"][-1]
+            output = Path(self.temp.name) / "download.png"
+            self.assertEqual(cloud.main(["draft", "draft_test", "--attachment", uploaded["id"], "--output", str(output)]), 0)
+            self.assertEqual(output.read_bytes(), content)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cloud.main(["draft", "draft_test", "--attachment", "1", "--output", str(output)]), 1)
+            self.assertEqual(cloud.main(["draft-copy", "draft_test", "--revision", "5", "--save-id", str(uuid.uuid4())]), 0)
+            self.assertEqual(calls[-1][1]["draft"]["attachments"], first["draft"]["attachments"])
+            self.assertEqual(cloud.main(["draft-save", "--id", "draft_test", "--revision", "5", "--save-id", str(uuid.uuid4()), "--remove-attachment", uploaded["id"]]), 0)
+            self.assertEqual(saved["draft"]["attachments"], original["attachments"])
+            self.assertEqual(cloud.main(["draft-save", "--id", "draft_test", "--revision", "5", "--save-id", str(uuid.uuid4()), "--clear-attachments"]), 0)
+            self.assertEqual(saved["draft"]["attachments"], [])
+        self.assertNotIn("draft-send", [action for action, _ in calls])
+
+    def test_attachment_selection_rejects_before_upload_and_download_verifies_hash(self):
+        limit = 20 * 1024 * 1024
+        policy = {"attachments": {"max_bytes": limit, "max_count": 50, "blocked_extensions": ["exe"]}}
+        envelope = {"save_id": str(uuid.uuid4()), "draft": {}}
+        path = Path(self.temp.name) / "file.txt"
+        for name, size in [("empty.txt", 0), ("blocked.exe", 1), ("large.zip", limit + 1)]:
+            path = Path(self.temp.name) / name
+            with path.open("wb") as stream:
+                stream.truncate(size)
+            with patch.object(cloud, "request", return_value=policy) as api:
+                with self.assertRaises(ValueError):
+                    cloud.attach_files(envelope, [path], [], False)
+                self.assertEqual(api.call_count, 1)
+        path.write_bytes(b"x")
+        with patch.object(cloud, "request", return_value=policy):
+            with self.assertRaisesRegex(ValueError, "at most 50"):
+                cloud.attach_files(envelope, [path] * 51, [], False)
+        output = Path(self.temp.name) / "corrupt.txt"
+        with patch.object(cloud, "request", return_value={"content_base64": "eA==", "size": 1, "sha256": "wrong"}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cloud.main(["draft", "draft_test", "--attachment", "0", "--output", str(output)]), 1)
+        self.assertFalse(output.exists())
+
+    def test_date_filters_and_contact_revision_match_browser_parameters(self):
+        with patch.object(cloud, "request", return_value={}) as api, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cloud.main(["search", "--after", "2026-10-01", "--before", "2026-10-29"]), 0)
+            self.assertEqual(api.call_args.args[1]["after"], "2026-10-01")
+            self.assertEqual(api.call_args.args[1]["before"], "2026-10-29")
+            self.assertEqual(cloud.main(["contacts", "--revision", "42", "--cursor", "next"]), 0)
+            self.assertEqual(api.call_args.args[1]["revision"], 42)
 
     def test_projection_deduplicates_existing_mail_and_resumes_after_ingest_failure(self):
         db = Path(self.temp.name) / "projection.db"
